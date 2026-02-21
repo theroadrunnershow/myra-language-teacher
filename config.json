@@ -1,6 +1,6 @@
 {
   "languages": [
-    "telugu"
+    "assamese"
   ],
   "categories": [
     "animals",
@@ -12,6 +12,6 @@
   ],
   "child_name": "Myra",
   "show_romanized": true,
-  "similarity_threshold": 30,
-  "max_attempts": 5
+  "similarity_threshold": 85,
+  "max_attempts": 3
 }

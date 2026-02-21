@@ -110,6 +110,49 @@
 </main>
 
 <script>
+const CONFIG_KEY = 'myra_config';
+
+// Populate form from sessionStorage on load (overrides server defaults)
+document.addEventListener('DOMContentLoaded', () => {
+  const stored = sessionStorage.getItem(CONFIG_KEY);
+  if (stored) {
+    const cfg = JSON.parse(stored);
+    const childName = document.getElementById('child-name');
+    if (childName && cfg.child_name) childName.value = cfg.child_name;
+    if (cfg.languages) {
+      cfg.languages.forEach(lang => {
+        const cb = document.getElementById('lang-' + lang);
+        if (cb) cb.checked = true;
+      });
+      ['telugu','assamese'].forEach(lang => {
+        if (!(cfg.languages || []).includes(lang)) {
+          const cb = document.getElementById('lang-' + lang);
+          if (cb) cb.checked = false;
+        }
+      });
+    }
+    if (cfg.categories) {
+      document.querySelectorAll('.cat-checkbox').forEach(cb => {
+        cb.checked = cfg.categories.includes(cb.value);
+      });
+    }
+    if (typeof cfg.show_romanized === 'boolean') {
+      const sr = document.getElementById('show-romanized');
+      if (sr) sr.checked = cfg.show_romanized;
+    }
+    if (cfg.similarity_threshold != null) {
+      const st = document.getElementById('similarity-threshold');
+      const label = document.getElementById('threshold-label');
+      if (st) st.value = cfg.similarity_threshold;
+      if (label) label.textContent = cfg.similarity_threshold + '%';
+    }
+    if (cfg.max_attempts != null) {
+      const ma = document.getElementById('max-attempts');
+      if (ma) ma.value = String(cfg.max_attempts);
+    }
+  }
+});
+
 async function saveSettings() {
   const languages = [];
   document.querySelectorAll('input[type=checkbox][id^="lang-"]').forEach(cb => {
@@ -146,6 +189,7 @@ async function saveSettings() {
   });
 
   if (resp.ok) {
+    sessionStorage.setItem(CONFIG_KEY, JSON.stringify(config));
     const fb = document.getElementById('save-feedback');
     fb.classList.remove('hidden');
     setTimeout(() => fb.classList.add('hidden'), 2500);

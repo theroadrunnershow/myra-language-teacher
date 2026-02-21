@@ -3,3 +3,6 @@ venv/
 
 # Cursor
 .cursor/
+
+# Local config (settings now in browser sessionStorage for multi-user hosting)
+config.json

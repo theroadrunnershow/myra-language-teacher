@@ -80,12 +80,22 @@ async function init() {
   await loadNextWord();
 }
 
+const CONFIG_KEY = 'myra_config';
+
 async function fetchConfig() {
+  const defaults = { languages: ['telugu', 'assamese'], categories: ['animals', 'colors', 'body_parts', 'numbers', 'food', 'common_objects'], child_name: 'Myra', show_romanized: true, similarity_threshold: 50, max_attempts: 3 };
   try {
     const resp = await fetch('/api/config');
-    return await resp.json();
+    const serverDefaults = await resp.json();
+    const stored = sessionStorage.getItem(CONFIG_KEY);
+    if (stored) {
+      return { ...serverDefaults, ...JSON.parse(stored) };
+    }
+    return serverDefaults;
   } catch {
-    return { max_attempts: 3, show_romanized: true };
+    const stored = sessionStorage.getItem(CONFIG_KEY);
+    if (stored) return { ...defaults, ...JSON.parse(stored) };
+    return defaults;
   }
 }
 
@@ -97,7 +107,10 @@ async function loadNextWord() {
   els.wordCard.classList.remove('correct-flash', 'wrong-flash');
 
   try {
-    const resp = await fetch('/api/word');
+    const params = new URLSearchParams();
+    (state.config.languages || []).forEach(l => params.append('languages', l));
+    (state.config.categories || []).forEach(c => params.append('categories', c));
+    const resp = await fetch(`/api/word?${params}`);
     if (!resp.ok) {
       const err = await resp.json();
       setBubble(err.detail || 'Error loading word. Check settings!');
@@ -341,6 +354,7 @@ async function processAudio() {
   formData.append('expected_word', state.currentWord.translation);
   formData.append('romanized', state.currentWord.romanized || '');
   formData.append('audio_format', mimeType);
+  formData.append('similarity_threshold', String(state.config.similarity_threshold ?? 50));
 
   try {
     const resp = await fetch('/api/recognize', { method: 'POST', body: formData });

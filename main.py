@@ -1,5 +1,4 @@
 import io
-import json
 import logging
 import os
 import random
@@ -31,9 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
-# ── Configuration helpers ─────────────────────────────────────────────────────
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-
+# ── Configuration (client-side sessionStorage; these are defaults only) ────────
 DEFAULT_CONFIG = {
     "languages": ["telugu", "assamese"],
     "categories": ALL_CATEGORIES,
@@ -44,62 +41,46 @@ DEFAULT_CONFIG = {
 }
 
 
-def load_config() -> dict:
-    if os.path.exists(CONFIG_FILE):
-        with open(CONFIG_FILE, encoding="utf-8") as f:
-            data = json.load(f)
-        # Merge with defaults so new keys are always present
-        return {**DEFAULT_CONFIG, **data}
-    return dict(DEFAULT_CONFIG)
-
-
-def save_config(config: dict) -> None:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-
-
 # ── Page routes ───────────────────────────────────────────────────────────────
 @app.get("/")
 async def home(request: Request):
-    config = load_config()
-    return templates.TemplateResponse("index.html", {"request": request, "config": config})
+    return templates.TemplateResponse("index.html", {"request": request, "config": DEFAULT_CONFIG})
 
 
 @app.get("/settings")
 async def settings_page(request: Request):
-    config = load_config()
     return templates.TemplateResponse(
         "config.html",
-        {"request": request, "config": config, "all_categories": ALL_CATEGORIES},
+        {"request": request, "config": DEFAULT_CONFIG, "all_categories": ALL_CATEGORIES},
     )
 
 
-# ── API: configuration ────────────────────────────────────────────────────────
+# ── API: configuration (returns defaults; client stores in sessionStorage) ─────
 @app.get("/api/config")
 async def api_get_config():
-    return load_config()
+    return dict(DEFAULT_CONFIG)
 
 
 @app.post("/api/config")
 async def api_save_config(request: Request):
+    """Validate config. Client persists to sessionStorage; no server-side storage."""
     body = await request.json()
-    # Validate
     if "languages" in body and not isinstance(body["languages"], list):
         raise HTTPException(status_code=400, detail="'languages' must be a list")
     if "categories" in body and not isinstance(body["categories"], list):
         raise HTTPException(status_code=400, detail="'categories' must be a list")
-    current = load_config()
-    current.update(body)
-    save_config(current)
-    return {"status": "ok", "config": current}
+    merged = {**DEFAULT_CONFIG, **body}
+    return {"status": "ok", "config": merged}
 
 
 # ── API: words ────────────────────────────────────────────────────────────────
 @app.get("/api/word")
-async def api_get_word():
-    config = load_config()
-    langs = config.get("languages", [])
-    cats = config.get("categories", ALL_CATEGORIES)
+async def api_get_word(
+    languages: str = "",  # comma-separated, e.g. "telugu,assamese"
+    categories: str = "",  # comma-separated, e.g. "animals,colors"
+):
+    langs = [s.strip() for s in languages.split(",") if s.strip()] if languages else DEFAULT_CONFIG["languages"]
+    cats = [s.strip() for s in categories.split(",") if s.strip()] if categories else DEFAULT_CONFIG["categories"]
 
     if not langs:
         raise HTTPException(status_code=400, detail="No languages configured. Go to Settings.")
@@ -135,9 +116,9 @@ async def api_recognize(
     expected_word: str = Form(...),
     romanized: str = Form(default=""),
     audio_format: str = Form(default="audio/webm"),
+    similarity_threshold: str = Form(default="50"),  # from client sessionStorage
 ):
-    config = load_config()
-    threshold = float(config.get("similarity_threshold", 50))
+    threshold = float(similarity_threshold)
 
     audio_data = await audio.read()
     if not audio_data:
@@ -159,10 +140,12 @@ async def api_recognize(
 
 # ── API: word list (for progress tracking) ────────────────────────────────────
 @app.get("/api/words/all")
-async def api_all_words():
-    config = load_config()
-    langs = config.get("languages", [])
-    cats = config.get("categories", ALL_CATEGORIES)
+async def api_all_words(
+    languages: str = "",
+    categories: str = "",
+):
+    langs = [s.strip() for s in languages.split(",") if s.strip()] if languages else DEFAULT_CONFIG["languages"]
+    cats = [s.strip() for s in categories.split(",") if s.strip()] if categories else DEFAULT_CONFIG["categories"]
     result = {}
     for lang in langs:
         result[lang] = []
