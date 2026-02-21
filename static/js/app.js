@@ -15,6 +15,8 @@ const state = {
   audioChunks: [],
   recTimerInterval: null,
   ttsAudio: null,          // current playing Audio object
+  pendingTimeoutIds: [],   // timeouts to clear when Stop is pressed
+  stopRequested: false,    // true when Stop pressed; skips processAudio after recording
 };
 
 // ── DOM refs ──────────────────────────────────────────
@@ -23,8 +25,9 @@ const $ = id => document.getElementById(id);
 const els = {
   dinoWrapper:  $('dino-wrapper'),
   dinoSvg:      $('dino-svg'),
-  dinoMouth:    $('dino-mouth'),
-  dinoTeeth:    $('dino-teeth'),
+  dinoMouth:      $('dino-mouth'),
+  dinoTeeth:      $('dino-teeth'),
+  dinoMouthInner: $('dino-mouth-inner'),
   bubble:       $('speech-bubble'),
   bubbleText:   $('bubble-text'),
   langBadge:    $('lang-badge'),
@@ -39,6 +42,7 @@ const els = {
   btnPlay:      $('btn-play'),
   btnRecord:    $('btn-record'),
   btnSkip:      $('btn-skip'),
+  btnStop:      $('btn-stop'),
   recIndicator: $('recording-indicator'),
   recTimer:     $('rec-timer'),
   scoreDisplay: $('score-display'),
@@ -55,6 +59,7 @@ const MESSAGES = {
   wrong:   ["Try again! 💪", "So close! 🤗", "Almost! Give it another go! 😊", "Keep trying! 🌟"],
   skip:    ["Next word! Let's go! 🚀", "New word coming! 🌟", "Here we go again! 🦕"],
   listen:  ["I'm listening… 👂", "Speak up! 🎤", "Go ahead! 🌟"],
+  stop:    ["Stopped. Ready when you are! 🌟", "Paused! Take your time. 🦕", "Whenever you're ready! 😊"],
 };
 
 function randomMsg(key) {
@@ -129,6 +134,7 @@ function displayWord(word) {
 // ── TTS: play pronunciation ───────────────────────────
 async function playWord() {
   if (!state.currentWord) return;
+  state.stopRequested = false;
   stopExistingAudio();
 
   const { translation, language } = state.currentWord;
@@ -165,6 +171,7 @@ function stopExistingAudio() {
 async function playPromptThenRecord() {
   if (state.isRecording) return;
   if (!state.currentWord) return;
+  state.stopRequested = false;
 
   stopExistingAudio();
 
@@ -213,10 +220,20 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Schedule a transition (next word, retry, etc.). IDs stored so Stop can cancel them.
+function scheduleTransition(fn, delayMs) {
+  const id = setTimeout(() => {
+    state.pendingTimeoutIds = state.pendingTimeoutIds.filter(x => x !== id);
+    fn();
+  }, delayMs);
+  state.pendingTimeoutIds.push(id);
+}
+
 // ── Recording ─────────────────────────────────────────
 async function startRecording() {
   if (state.isRecording) return;
   if (!state.currentWord) return;
+  if (state.stopRequested) return;
 
   stopExistingAudio();
 
@@ -246,6 +263,10 @@ async function startRecording() {
     stream.getTracks().forEach(t => t.stop());
     state.isRecording = false;
     setRecordingUI(false);
+    if (state.stopRequested) {
+      state.stopRequested = false;
+      return;
+    }
     await processAudio();
   });
 
@@ -372,8 +393,8 @@ function handleResult(result) {
     launchConfetti();
     setBubble(randomMsg('correct'));
 
-    // Move to next word after a short delay
-    setTimeout(() => nextWord(), 2200);
+    // Move to next word after a short delay (cancelled if Stop pressed)
+    scheduleTransition(nextWord, 2200);
 
   } else if (state.attempts >= state.maxAttempts) {
     // ❌ Out of attempts – auto-advance
@@ -389,7 +410,7 @@ function handleResult(result) {
     els.wordCard.classList.add('wrong-flash');
     setBubble("Good try! Let's move on. 🌟");
 
-    setTimeout(() => nextWord(), 3000);
+    scheduleTransition(nextWord, 3000);
 
   } else {
     // ❌ Wrong, but can try again
@@ -402,16 +423,35 @@ function handleResult(result) {
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
 
-    // Say "Myra, repeat after me! <word>" again, then start recording
-    setTimeout(() => {
+    // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
+    scheduleTransition(() => {
       els.wordCard.classList.remove('wrong-flash');
       playPromptThenRecord();
     }, 1500);
   }
 }
 
+// ── Stop flow ─────────────────────────────────────────
+function stopFlow() {
+  state.pendingTimeoutIds.forEach(id => clearTimeout(id));
+  state.pendingTimeoutIds = [];
+
+  stopExistingAudio();
+  if (state.isRecording) {
+    state.stopRequested = true;
+    stopRecording();
+  }
+  if (state.isRecording) setRecordingUI(false);
+
+  els.wordCard.classList.remove('correct-flash', 'wrong-flash');
+  hideFeedback();
+  animateDino('idle');
+  setBubble(randomMsg('stop'));
+}
+
 // ── Navigation ────────────────────────────────────────
 async function nextWord() {
+  state.stopRequested = false;
   setBubble(randomMsg('skip'));
   await loadNextWord();
   // Auto-play pronunciation for the new word
@@ -480,21 +520,44 @@ function animateDino(state_name) {
   }
 }
 
+// Lip-sync frames: [upper-lip path d, inner-mouth ry, inner-mouth cy]
+// Upper lip flattens as jaw drops; inner cavity grows to fill the gap.
+const MOUTH_FRAMES = [
+  ['M 330,162 Q 355,170 375,162',  0,    0],   // closed
+  ['M 330,161 Q 355,164 375,161',  7,  170],   // slightly open
+  ['M 330,161 Q 355,162 375,161', 12,  175],   // open
+  ['M 330,162 Q 355,166 375,162',  5,  168],   // closing
+];
+
 let mouthInterval = null;
+let _mouthFrameIdx = 0;
+
 function animateMouth(open) {
   clearInterval(mouthInterval);
   const mouth = els.dinoMouth;
-  if (open) {
-    let toggle = false;
-    mouthInterval = setInterval(() => {
-      toggle = !toggle;
-      mouth.setAttribute('d', toggle
-        ? 'M 330,162 Q 355,185 375,162'   // mouth open
-        : 'M 330,162 Q 355,178 375,162'); // mouth normal
-    }, 280);
-  } else {
+  const inner = els.dinoMouthInner;
+
+  if (!open) {
     mouth.setAttribute('d', 'M 330,162 Q 355,178 375,162');
+    if (inner) inner.style.display = 'none';
+    return;
   }
+
+  _mouthFrameIdx = 0;
+  mouthInterval = setInterval(() => {
+    const [d, ry, cy] = MOUTH_FRAMES[_mouthFrameIdx % MOUTH_FRAMES.length];
+    _mouthFrameIdx++;
+    mouth.setAttribute('d', d);
+    if (inner) {
+      if (ry > 0) {
+        inner.style.display = '';
+        inner.setAttribute('ry', ry);
+        inner.setAttribute('cy', cy);
+      } else {
+        inner.style.display = 'none';
+      }
+    }
+  }, 130);
 }
 
 // ── Confetti ──────────────────────────────────────────

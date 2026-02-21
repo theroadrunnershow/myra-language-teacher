@@ -360,6 +360,12 @@ main {
 }
 .btn-skip:hover { filter: brightness(1.08); transform: translateY(-2px); }
 
+.btn-stop {
+  background: linear-gradient(135deg, #7F8C8D, #5D6D7E);
+  color: var(--white);
+}
+.btn-stop:hover { filter: brightness(1.08); transform: translateY(-2px); }
+
 .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none !important; }
 
 /* ── Recording indicator ───────────────────────────── */

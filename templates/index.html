@@ -84,15 +84,18 @@
         <!-- ── NOSTRIL ── -->
         <ellipse cx="366" cy="148" rx="6" ry="4" fill="#CC4488" opacity="0.7"/>
 
-        <!-- ── MOUTH (smile) ── -->
-        <path id="dino-mouth" d="M 330,162 Q 355,178 375,162" stroke="#CC4488" stroke-width="4" fill="none" stroke-linecap="round"/>
+        <!-- ── MOUTH CAVITY (dark inside; drawn first so teeth + lip sit on top) ── -->
+        <ellipse id="dino-mouth-inner" cx="353" cy="174" rx="21" ry="0" fill="#7B0040" style="display:none"/>
 
-        <!-- ── TOP TEETH (visible when mouth is open) ── -->
+        <!-- ── TOP TEETH ── -->
         <g id="dino-teeth" style="display:none">
           <polygon points="337,165 341,173 345,165" fill="white"/>
           <polygon points="350,168 354,176 358,168" fill="white"/>
           <polygon points="363,165 367,173 371,165" fill="white"/>
         </g>
+
+        <!-- ── UPPER LIP (drawn last → renders on top of cavity and teeth) ── -->
+        <path id="dino-mouth" d="M 330,162 Q 355,178 375,162" stroke="#CC4488" stroke-width="4" fill="none" stroke-linecap="round"/>
 
         <!-- ── LEFT ARM (slightly raised) ── -->
         <ellipse cx="100" cy="295" rx="28" ry="45" fill="#FF69B4" transform="rotate(-15 100 295)"/>
@@ -180,6 +183,10 @@
 
       <button class="btn btn-skip" id="btn-skip" onclick="nextWord()" title="Skip to next word">
         ⏭ Skip
+      </button>
+
+      <button class="btn btn-stop" id="btn-stop" onclick="stopFlow()" title="Stop flow, stay on current word">
+        ⏹ Stop
       </button>
 
     </div>
