@@ -35,6 +35,9 @@ MIME_TO_EXT = {
 # Feature flag: enable spectral noise reduction on recorded audio
 NOISE_REDUCTION_ENABLED = False
 
+# Feature flag: use initial_prompt to guide Whisper toward expected word (helps Telugu/Assamese)
+INITIAL_PROMPT_ENABLED = True
+
 # Lazy-loaded Whisper model
 _whisper_model = None
 _whisper_model_size = "base"  # upgrade to "small" for better regional-language accuracy
@@ -182,31 +185,55 @@ async def recognize_speech(
 
         def _transcribe():
             model = get_whisper_model()
-            # Primary: force the target language
-            result = model.transcribe(wav_path, language=lang_code, fp16=False)
-            transcribed = result["text"].strip()
-            logger.info(f"Whisper (lang={lang_code}) raw output: '{transcribed}'")
 
-            # If output looks empty or suspiciously short, also try auto-detect
-            if len(transcribed) < 2:
-                result2 = model.transcribe(wav_path, fp16=False)
-                transcribed2 = result2["text"].strip()
-                logger.info(f"Whisper (auto-detect) raw output: '{transcribed2}'")
-                if len(transcribed2) > len(transcribed):
-                    transcribed = transcribed2
+            # Optional prompt to bias Whisper toward expected word (when flag on)
+            kw_native = {"initial_prompt": expected_word} if INITIAL_PROMPT_ENABLED else {}
+            kw_roman = {"initial_prompt": (romanized or expected_word).strip()} if INITIAL_PROMPT_ENABLED else {}
 
-            return transcribed
+            # Pass 1: force target language (native-script output, e.g. Telugu/Assamese glyphs).
+            # The base model has sparse Indic training data so this can hallucinate, but it's
+            # the best path when Whisper does know the word.
+            result_native = model.transcribe(
+                wav_path,
+                language=lang_code,
+                task="transcribe",
+                fp16=False,
+                **kw_native,
+            )
+            transcribed_native = result_native["text"].strip()
+            logger.info(f"Whisper pass-1 (lang={lang_code}): '{transcribed_native}'")
 
-        transcribed = await loop.run_in_executor(None, _transcribe)
+            # Pass 2: force English — Whisper reliably produces a phonetic / romanized
+            # approximation of Indic speech in English mode.  This is what we compare
+            # against the `romanized` pronunciation guide.
+            result_roman = model.transcribe(
+                wav_path,
+                language="en",
+                task="transcribe",
+                fp16=False,
+                **kw_roman,
+            )
+            transcribed_roman = result_roman["text"].strip()
+            logger.info(f"Whisper pass-2 (lang=en/phonetic): '{transcribed_roman}'")
 
-        # --- Primary comparison: native script ---
-        similarity = calculate_similarity(expected_word, transcribed)
+            return transcribed_native, transcribed_roman
 
-        # --- Romanized fallback: if Whisper output Latin chars ---
+        transcribed_native, transcribed_roman = await loop.run_in_executor(None, _transcribe)
+
+        # --- Primary comparison: native script (pass-1 output vs. e.g. పడవ) ---
+        similarity = calculate_similarity(expected_word, transcribed_native)
+
+        # --- Romanized comparison: phonetic English output (pass-2) vs. romanized guide ---
         roman_similarity = 0.0
         if romanized:
-            roman_similarity = calculate_similarity(romanized, transcribed)
-            logger.info(f"Romanized fallback: expected_roman='{romanized}' → similarity={roman_similarity:.1f}%")
+            roman_similarity = calculate_similarity(romanized, transcribed_roman)
+            logger.info(
+                f"Romanized: expected='{romanized}' heard='{transcribed_roman}' → {roman_similarity:.1f}%"
+            )
+
+        # Use pass-2 output as the displayed transcription when it produces a better score
+        # (more useful to show "padava" than a hallucinated Telugu glyph sequence)
+        transcribed = transcribed_roman if roman_similarity > similarity else transcribed_native
 
         best_similarity = max(similarity, roman_similarity)
         is_correct = best_similarity >= similarity_threshold
