@@ -233,6 +233,16 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Play a short reaction sound ("yaaaaay" / "beeeep") with lip-sync
+function playReaction(text) {
+  const teeth = els.dinoTeeth;
+  teeth.style.display = 'block';
+  animateMouth(true);
+  const done = () => { animateMouth(false); teeth.style.display = 'none'; };
+  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`)
+    .then(done).catch(done);
+}
+
 // Schedule a transition (next word, retry, etc.). IDs stored so Stop can cancel them.
 function scheduleTransition(fn, delayMs) {
   const id = setTimeout(() => {
@@ -406,7 +416,7 @@ function handleResult(result) {
     els.wordCard.classList.add('correct-flash');
     launchConfetti();
     setBubble(randomMsg('correct'));
-    playAudioUrl(`/api/tts?text=${encodeURIComponent('yaaaaay')}&language=english`).catch(() => {});
+    playReaction('yaaaaay');
 
     // Move to next word after a short delay (cancelled if Stop pressed)
     scheduleTransition(nextWord, 2200);
@@ -424,7 +434,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble("Good try! Let's move on. 🌟");
-    playAudioUrl(`/api/tts?text=${encodeURIComponent('beeeep')}&language=english`).catch(() => {});
+    playReaction('beeeep');
 
     scheduleTransition(nextWord, 3000);
 
@@ -438,7 +448,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
-    playAudioUrl(`/api/tts?text=${encodeURIComponent('beeeep')}&language=english`).catch(() => {});
+    playReaction('beeeep');
 
     // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
     scheduleTransition(() => {
