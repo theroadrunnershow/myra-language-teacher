@@ -4,8 +4,10 @@ import asyncio
 import logging
 import unicodedata
 
+import numpy as np
 from pydub import AudioSegment
 from rapidfuzz import fuzz
+from scipy.signal import butter, sosfilt
 
 logger = logging.getLogger(__name__)
 
@@ -16,57 +18,137 @@ LANGUAGE_CODES = {
     "english": "en",
 }
 
+# Map browser MIME types → file extensions pydub/ffmpeg understand
+MIME_TO_EXT = {
+    "audio/webm": "webm",
+    "audio/webm;codecs=opus": "webm",
+    "audio/webm;codecs=vp8": "webm",
+    "audio/ogg": "ogg",
+    "audio/ogg;codecs=opus": "ogg",
+    "audio/mp4": "mp4",
+    "audio/mp4;codecs=mp4a.40.2": "mp4",
+    "audio/mpeg": "mp3",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+}
+
 # Lazy-loaded Whisper model
 _whisper_model = None
-_whisper_model_size = "base"  # "base" is ~140MB; upgrade to "small" for better accuracy
+_whisper_model_size = "base"  # upgrade to "small" for better regional-language accuracy
 
 
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
         import whisper
-        logger.info(f"Loading Whisper model '{_whisper_model_size}'...")
+        logger.info(f"Loading Whisper model '{_whisper_model_size}'…")
         _whisper_model = whisper.load_model(_whisper_model_size)
         logger.info("Whisper model loaded.")
     return _whisper_model
 
 
 def normalize_text(text: str) -> str:
-    """Normalize unicode text for comparison."""
+    """Normalize unicode text for fuzzy comparison."""
     text = unicodedata.normalize("NFC", text)
     text = text.strip().lower()
-    # Keep only alphanumeric and spaces (works for Unicode scripts too)
     text = "".join(c for c in text if c.isalnum() or c.isspace())
     return text
 
 
 def calculate_similarity(expected: str, actual: str) -> float:
-    """Return fuzzy similarity ratio (0-100) between two strings."""
+    """Return fuzzy similarity ratio 0–100 between two strings."""
     exp_norm = normalize_text(expected)
     act_norm = normalize_text(actual)
     if not act_norm:
         return 0.0
-    # Use token_sort_ratio for robustness against word order / partial speech
     return fuzz.token_sort_ratio(exp_norm, act_norm)
 
 
-async def _convert_to_wav(audio_data: bytes, src_format: str = "webm") -> str:
-    """Convert audio bytes to a temporary WAV file. Returns the path."""
+def mime_to_ext(mime_type: str) -> str:
+    """Convert a browser MIME type string to a file extension."""
+    # Normalize: strip parameters like '; codecs=…' for the lookup, but try exact first
+    mime_clean = mime_type.strip().lower()
+    if mime_clean in MIME_TO_EXT:
+        return MIME_TO_EXT[mime_clean]
+    # Try base type only (before semicolon)
+    base = mime_clean.split(";")[0].strip()
+    return MIME_TO_EXT.get(base, "webm")  # default to webm
+
+
+def _highpass_filter(samples: np.ndarray, sample_rate: int, cutoff_hz: int = 80) -> np.ndarray:
+    """Remove low-frequency rumble below cutoff_hz (not speech)."""
+    sos = butter(4, cutoff_hz, btype="highpass", fs=sample_rate, output="sos")
+    return sosfilt(sos, samples)
+
+
+def _reduce_noise(audio: AudioSegment) -> AudioSegment:
+    """
+    Apply spectral noise reduction then a high-pass filter.
+
+    noisereduce estimates the noise floor from the whole clip (stationary=False for music/TV)
+    and subtracts it via spectral gating — effective against fans, AC, and
+    ambient room noise without distorting speech.
+    """
+    try:
+        import noisereduce as nr
+
+        samples = np.array(audio.get_array_of_samples(), dtype=np.float32)
+        sr = audio.frame_rate
+
+        # 1. Spectral noise reduction (stationary=False: music, TV, varying background)
+        cleaned = nr.reduce_noise(
+            y=samples,
+            sr=sr,
+            stationary=False,
+            prop_decrease=0.75,   # remove 75% of noise energy; keeps speech natural
+            n_fft=1024,
+            hop_length=256,
+        )
+
+        # 2. High-pass filter – cut everything below 80 Hz (rumble, table vibrations)
+        cleaned = _highpass_filter(cleaned, sr, cutoff_hz=80)
+
+        cleaned_int16 = np.clip(cleaned, -32768, 32767).astype(np.int16)
+        result = AudioSegment(
+            cleaned_int16.tobytes(),
+            frame_rate=sr,
+            sample_width=2,   # 16-bit
+            channels=1,
+        )
+        logger.info("Noise reduction applied successfully.")
+        return result
+
+    except Exception as e:
+        logger.warning(f"Noise reduction skipped (will use raw audio): {e}")
+        return audio
+
+
+async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
+    """Save audio_data to a temp file and convert to 16 kHz mono WAV. Returns WAV path."""
     loop = asyncio.get_event_loop()
 
     def _convert():
-        with tempfile.NamedTemporaryFile(suffix=f".{src_format}", delete=False) as tmp_in:
+        # Write incoming bytes to a temp file with the correct extension
+        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tmp_in:
             tmp_in.write(audio_data)
             tmp_in_path = tmp_in.name
 
+        logger.info(f"Audio temp file: {tmp_in_path}  size={len(audio_data)} bytes  ext=.{ext}")
+
         tmp_wav_path = tmp_in_path.rsplit(".", 1)[0] + ".wav"
         try:
+            # Let ffmpeg auto-detect the actual format from file contents
             audio = AudioSegment.from_file(tmp_in_path)
-            # Whisper works best with 16kHz mono
             audio = audio.set_frame_rate(16000).set_channels(1)
+
+            # Apply noise reduction before handing off to Whisper
+            audio = _reduce_noise(audio)
+
             audio.export(tmp_wav_path, format="wav")
+            logger.info(f"WAV written: {tmp_wav_path}  duration={len(audio)/1000:.1f}s")
         finally:
             os.unlink(tmp_in_path)
+
         return tmp_wav_path
 
     return await loop.run_in_executor(None, _convert)
@@ -76,55 +158,80 @@ async def recognize_speech(
     audio_data: bytes,
     language: str,
     expected_word: str,
+    romanized: str = "",
+    mime_type: str = "audio/webm",
     similarity_threshold: float = 50.0,
 ) -> dict:
     """
-    Transcribe audio using Whisper and compare to the expected word.
+    Transcribe audio with Whisper and compare to the expected word.
 
-    Returns a dict with:
-        transcribed     – what Whisper heard
-        expected        – the target word
-        similarity      – 0-100 score
-        is_correct      – bool
-        language        – language used
-        error           – error message if something went wrong (optional)
+    Also tries romanized fallback comparison if native-script similarity is low,
+    which handles cases where Whisper outputs Latin transliteration.
     """
     lang_code = LANGUAGE_CODES.get(language, "te")
+    ext = mime_to_ext(mime_type)
     wav_path = None
 
     try:
-        wav_path = await _convert_to_wav(audio_data)
+        wav_path = await _convert_to_wav(audio_data, ext)
 
         loop = asyncio.get_event_loop()
 
         def _transcribe():
             model = get_whisper_model()
+            # Primary: force the target language
             result = model.transcribe(wav_path, language=lang_code, fp16=False)
-            return result["text"].strip()
+            transcribed = result["text"].strip()
+            logger.info(f"Whisper (lang={lang_code}) raw output: '{transcribed}'")
+
+            # If output looks empty or suspiciously short, also try auto-detect
+            if len(transcribed) < 2:
+                result2 = model.transcribe(wav_path, fp16=False)
+                transcribed2 = result2["text"].strip()
+                logger.info(f"Whisper (auto-detect) raw output: '{transcribed2}'")
+                if len(transcribed2) > len(transcribed):
+                    transcribed = transcribed2
+
+            return transcribed
 
         transcribed = await loop.run_in_executor(None, _transcribe)
+
+        # --- Primary comparison: native script ---
         similarity = calculate_similarity(expected_word, transcribed)
-        is_correct = similarity >= similarity_threshold
+
+        # --- Romanized fallback: if Whisper output Latin chars ---
+        roman_similarity = 0.0
+        if romanized:
+            roman_similarity = calculate_similarity(romanized, transcribed)
+            logger.info(f"Romanized fallback: expected_roman='{romanized}' → similarity={roman_similarity:.1f}%")
+
+        best_similarity = max(similarity, roman_similarity)
+        is_correct = best_similarity >= similarity_threshold
 
         logger.info(
-            f"Recognized: '{transcribed}' | Expected: '{expected_word}' | "
-            f"Similarity: {similarity:.1f}% | Correct: {is_correct}"
+            f"Expected: '{expected_word}' | Heard: '{transcribed}' | "
+            f"Script sim: {similarity:.1f}% | Roman sim: {roman_similarity:.1f}% | "
+            f"Best: {best_similarity:.1f}% | Correct: {is_correct}"
         )
 
         return {
             "transcribed": transcribed,
             "expected": expected_word,
-            "similarity": round(similarity, 1),
+            "similarity": round(best_similarity, 1),
+            "script_similarity": round(similarity, 1),
+            "roman_similarity": round(roman_similarity, 1),
             "is_correct": is_correct,
             "language": language,
         }
 
     except Exception as e:
-        logger.error(f"Speech recognition error: {e}")
+        logger.error(f"Speech recognition error: {e}", exc_info=True)
         return {
             "transcribed": "",
             "expected": expected_word,
             "similarity": 0.0,
+            "script_similarity": 0.0,
+            "roman_similarity": 0.0,
             "is_correct": False,
             "language": language,
             "error": str(e),

@@ -133,6 +133,8 @@ async def api_recognize(
     audio: UploadFile = File(...),
     language: str = Form(...),
     expected_word: str = Form(...),
+    romanized: str = Form(default=""),
+    audio_format: str = Form(default="audio/webm"),
 ):
     config = load_config()
     threshold = float(config.get("similarity_threshold", 50))
@@ -141,10 +143,15 @@ async def api_recognize(
     if not audio_data:
         raise HTTPException(status_code=400, detail="Empty audio file received.")
 
+    logger.info(f"Recognize request: language={language}, expected='{expected_word}', "
+                f"mime='{audio_format}', audio_size={len(audio_data)} bytes")
+
     result = await recognize_speech(
         audio_data=audio_data,
         language=language,
         expected_word=expected_word,
+        romanized=romanized,
+        mime_type=audio_format,
         similarity_threshold=threshold,
     )
     return result

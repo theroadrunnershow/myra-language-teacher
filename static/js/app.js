@@ -295,29 +295,61 @@ function setRecordingUI(recording) {
 async function processAudio() {
   if (!state.audioChunks.length) {
     setBubble("I didn't hear anything! Try again. 🎤");
+    showDebug('', '', 'No audio recorded');
     return;
   }
 
   const mimeType = state.mediaRecorder?.mimeType || 'audio/webm';
   const audioBlob = new Blob(state.audioChunks, { type: mimeType });
 
+  console.log(`Sending audio: mimeType=${mimeType}, size=${audioBlob.size} bytes`);
+
   setBubble("Hmm, let me think… 🤔");
   animateDino('think');
+  showDebug('…thinking…', '', '');
+
+  // Pick a file extension that matches the mime type for the filename hint
+  const ext = mimeType.includes('mp4') ? 'mp4'
+             : mimeType.includes('ogg') ? 'ogg'
+             : mimeType.includes('wav') ? 'wav'
+             : 'webm';
 
   const formData = new FormData();
-  formData.append('audio', audioBlob, 'recording.webm');
+  formData.append('audio', audioBlob, `recording.${ext}`);
   formData.append('language', state.currentWord.language);
   formData.append('expected_word', state.currentWord.translation);
+  formData.append('romanized', state.currentWord.romanized || '');
+  formData.append('audio_format', mimeType);
 
   try {
     const resp = await fetch('/api/recognize', { method: 'POST', body: formData });
     const result = await resp.json();
+    console.log('Recognition result:', result);
+    showDebug(result.transcribed, result.similarity, result.error || '');
     handleResult(result);
   } catch (err) {
     console.error('Recognition error:', err);
     setBubble("Oops! Something went wrong. Try again! 🙈");
+    showDebug('', '', err.message);
     animateDino('idle');
   }
+}
+
+// ── Debug panel ───────────────────────────────────────
+function showDebug(heard, similarity, error) {
+  const panel = document.getElementById('debug-panel');
+  if (!panel) return;
+
+  const heardEl = document.getElementById('debug-heard');
+  const simEl   = document.getElementById('debug-sim');
+  const errEl   = document.getElementById('debug-error');
+
+  heardEl.textContent = heard  ? `🎙️ Whisper heard: "${heard}"` : '';
+  simEl.textContent   = (similarity !== '' && similarity !== undefined)
+                        ? `📊 Match score: ${similarity}%` : '';
+  errEl.textContent   = error  ? `⚠️ Error: ${error}` : '';
+
+  panel.classList.remove('hidden');
 }
 
 // ── Result handling ───────────────────────────────────
@@ -370,10 +402,10 @@ function handleResult(result) {
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
 
-    // Play the word again so they can hear it
+    // Say "Myra, repeat after me! <word>" again, then start recording
     setTimeout(() => {
       els.wordCard.classList.remove('wrong-flash');
-      playWord();
+      playPromptThenRecord();
     }, 1500);
   }
 }

@@ -523,6 +523,23 @@ hr { border: none; border-top: 2px dashed var(--pink-light); margin: 1.4rem 0; }
 
 .text-input:focus, .select-input:focus { border-color: var(--pink-dark); }
 
+/* ── Debug panel ───────────────────────────────────── */
+.debug-panel {
+  width: 100%;
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-family: 'Courier New', monospace;
+  font-size: 0.82rem;
+  border-radius: 12px;
+  padding: 0.7rem 1rem;
+  line-height: 1.7;
+  border: 1px solid #45475a;
+}
+.debug-panel div:empty { display: none; }
+#debug-error { color: #f38ba8; }
+#debug-sim   { color: #a6e3a1; }
+#debug-heard { color: #89dceb; }
+
 /* ── Utility ───────────────────────────────────────── */
 .hidden { display: none !important; }
 
