@@ -32,6 +32,9 @@ MIME_TO_EXT = {
     "audio/x-wav": "wav",
 }
 
+# Feature flag: enable spectral noise reduction on recorded audio
+NOISE_REDUCTION_ENABLED = False
+
 # Lazy-loaded Whisper model
 _whisper_model = None
 _whisper_model_size = "base"  # upgrade to "small" for better regional-language accuracy
@@ -141,8 +144,8 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
             audio = AudioSegment.from_file(tmp_in_path)
             audio = audio.set_frame_rate(16000).set_channels(1)
 
-            # Apply noise reduction before handing off to Whisper
-            audio = _reduce_noise(audio)
+            if NOISE_REDUCTION_ENABLED:
+                audio = _reduce_noise(audio)
 
             audio.export(tmp_wav_path, format="wav")
             logger.info(f"WAV written: {tmp_wav_path}  duration={len(audio)/1000:.1f}s")

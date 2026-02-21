@@ -145,12 +145,81 @@ myra-language-teacher/
 
 ---
 
-## 🔮 Future: AWS Deployment
+## 🔮 AWS Deployment Plan
 
-| Component | AWS target |
-|-----------|-----------|
-| Backend | ECS Fargate (Whisper needs persistent memory; Lambda cold-starts are too slow) |
-| Frontend | S3 + CloudFront |
-| STT upgrade | Amazon Transcribe (Telugu supported; keep Whisper for Assamese) |
-| TTS upgrade | Amazon Polly Neural voices |
-| Config storage | DynamoDB or S3 (replace `config.json`) |
+### Architecture
+
+```
+Browser ──HTTPS──▶ CloudFront ──▶ WAF ──▶ ALB ──▶ ECS Fargate (FastAPI + Whisper)
+                        │                              │
+                        ▼                              ▼
+                       S3                         NAT Gateway ──▶ Google (gTTS)
+                 (static frontend)
+```
+
+| Component | AWS service | Notes |
+|-----------|-------------|-------|
+| Frontend | S3 + CloudFront | Static HTML/CSS/JS; CDN edge caching |
+| Backend | ECS Fargate | Whisper stays warm in memory; Lambda too slow (cold-start re-loads 140 MB model) |
+| Load balancer | ALB | Health-checks ECS; only public entry point to private subnet |
+| Networking | VPC (public/private subnets) | ECS has no public IP; only ALB exposed |
+| Container registry | ECR | Private; image scanning enabled |
+| Config storage | SSM Parameter Store | Replaces `config.json`; encrypted at rest |
+| TTS (future) | Amazon Polly | Eliminates Google dependency; Telugu supported |
+
+### DDoS / Cost Guardrails (no login required)
+
+**WAF rate limits** (at CloudFront edge — bots never reach ECS):
+
+| Endpoint | Limit per IP |
+|----------|-------------|
+| `/api/recognize` | 10 req/min |
+| `/api/tts` | 30 req/min |
+| All other `/api/*` | 100 req/min |
+
+**ECS hard cap:** max 2 Fargate tasks. Auto-scaling can never spin up more, bounding compute cost regardless of traffic.
+
+**Audio size limit:** 5 MB hard cap on uploaded audio in FastAPI. A 5-second recording is ~160 KB — 5 MB is 30× headroom for legitimate use.
+
+**Single budget — $50/month hard kill:**
+
+| Threshold | Action |
+|-----------|--------|
+| $40 (80%) | Email alert → "investigate" |
+| $50 (100%) | **Automated kill** — Budget Action sets ECS desired tasks to 0; SNS push notification sent |
+
+App goes offline when the kill fires. Restart manually via console or CLI when ready.
+
+**Nightly scale-to-zero** (EventBridge Scheduler):
+- `8:00 PM` → ECS desired = 0
+- `7:30 AM` → ECS desired = 1
+- Saves ~$15–18/month vs always-on
+
+**Cost Anomaly Detection:** free AWS ML service; emails on unusual spending spikes.
+
+### Estimated Monthly Cost
+
+| Scenario | Cost |
+|----------|------|
+| Normal home use (evenings + weekends, nightly scale-to-zero) | ~$22–28/mo |
+| Heavy all-day use | ~$42/mo |
+| DDoS hits (WAF throttles, ECS capped at 2 tasks) | ~$48/mo |
+| Hard stop triggers | ≤ $50, app goes offline |
+
+### Files to Add for Deployment
+
+```
+myra-language-teacher/
+├── Dockerfile           # Python + ffmpeg + app
+├── .dockerignore
+└── infra/               # Terraform
+    ├── ecr.tf           # Container registry
+    ├── ecs.tf           # Fargate task + service + auto-scaling
+    ├── alb.tf           # Load balancer
+    ├── cloudfront.tf    # CDN + WAF + rate limit rules
+    ├── vpc.tf           # Network (public/private subnets, NAT)
+    ├── iam.tf           # ECS task role (least-privilege)
+    ├── ssm.tf           # Parameter Store entries (replaces config.json)
+    ├── budgets.tf       # $50 budget + automated kill action
+    └── scheduler.tf     # Nightly scale-to-zero
+```
