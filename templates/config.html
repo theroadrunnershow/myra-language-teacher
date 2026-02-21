@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Settings – Myra Language Teacher</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;900&display=swap" rel="stylesheet" />
+</head>
+<body class="settings-page">
+
+<header>
+  <div class="header-inner">
+    <a href="/" class="back-btn">← Back</a>
+    <h1>⚙️ Settings</h1>
+    <span></span>
+  </div>
+</header>
+
+<main class="settings-main">
+
+  <div class="settings-card">
+
+    <h2>👶 Child's Name</h2>
+    <input type="text" id="child-name" class="text-input"
+           value="{{ config.child_name }}" placeholder="e.g. Myra" />
+
+    <hr />
+
+    <h2>🗣️ Languages to Teach</h2>
+    <p class="hint">Select one or both — the app will alternate randomly.</p>
+    <div class="checkbox-group">
+      <label class="checkbox-label">
+        <input type="checkbox" id="lang-telugu" value="telugu"
+               {% if 'telugu' in config.languages %}checked{% endif %} />
+        <span>Telugu</span>
+        <span class="lang-sample">తెలుగు</span>
+      </label>
+      <label class="checkbox-label">
+        <input type="checkbox" id="lang-assamese" value="assamese"
+               {% if 'assamese' in config.languages %}checked{% endif %} />
+        <span>Assamese</span>
+        <span class="lang-sample">অসমীয়া</span>
+      </label>
+    </div>
+
+    <hr />
+
+    <h2>📚 Word Categories</h2>
+    <p class="hint">Choose which topics to practice.</p>
+    <div class="checkbox-group categories-group">
+      {% set category_labels = {
+          'animals': '🐾 Animals',
+          'colors': '🎨 Colors',
+          'body_parts': '🤚 Body Parts',
+          'numbers': '🔢 Numbers',
+          'food': '🍎 Food',
+          'common_objects': '🏠 Common Objects'
+      } %}
+      {% for cat in all_categories %}
+      <label class="checkbox-label">
+        <input type="checkbox" class="cat-checkbox" value="{{ cat }}"
+               {% if cat in config.categories %}checked{% endif %} />
+        <span>{{ category_labels.get(cat, cat.replace('_', ' ').title()) }}</span>
+      </label>
+      {% endfor %}
+    </div>
+
+    <hr />
+
+    <h2>🎛️ Advanced Options</h2>
+
+    <div class="option-row">
+      <label for="show-romanized">Show pronunciation guide (romanized)</label>
+      <input type="checkbox" id="show-romanized"
+             {% if config.show_romanized %}checked{% endif %} />
+    </div>
+
+    <div class="option-row">
+      <label for="similarity-threshold">
+        Accuracy required: <strong id="threshold-label">{{ config.similarity_threshold }}%</strong>
+      </label>
+      <input type="range" id="similarity-threshold"
+             min="30" max="90" step="5"
+             value="{{ config.similarity_threshold }}"
+             oninput="document.getElementById('threshold-label').textContent = this.value + '%'" />
+    </div>
+
+    <div class="option-row">
+      <label for="max-attempts">Max attempts before auto-skip</label>
+      <select id="max-attempts" class="select-input">
+        {% for n in [2, 3, 4, 5] %}
+        <option value="{{ n }}" {% if config.max_attempts == n %}selected{% endif %}>{{ n }}</option>
+        {% endfor %}
+      </select>
+    </div>
+
+    <hr />
+
+    <div class="btn-row centered">
+      <button class="btn btn-play" onclick="saveSettings()">💾 Save Settings</button>
+      <a href="/" class="btn btn-skip">🏠 Go Home</a>
+    </div>
+
+    <div id="save-feedback" class="feedback-banner hidden success">✅ Settings saved!</div>
+
+  </div><!-- end settings-card -->
+
+</main>
+
+<script>
+async function saveSettings() {
+  const languages = [];
+  document.querySelectorAll('input[type=checkbox][id^="lang-"]').forEach(cb => {
+    if (cb.checked) languages.push(cb.value);
+  });
+
+  const categories = [];
+  document.querySelectorAll('.cat-checkbox').forEach(cb => {
+    if (cb.checked) categories.push(cb.value);
+  });
+
+  if (languages.length === 0) {
+    alert('Please select at least one language!');
+    return;
+  }
+  if (categories.length === 0) {
+    alert('Please select at least one category!');
+    return;
+  }
+
+  const config = {
+    child_name: document.getElementById('child-name').value.trim() || 'Myra',
+    languages,
+    categories,
+    show_romanized: document.getElementById('show-romanized').checked,
+    similarity_threshold: parseInt(document.getElementById('similarity-threshold').value),
+    max_attempts: parseInt(document.getElementById('max-attempts').value),
+  };
+
+  const resp = await fetch('/api/config', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(config),
+  });
+
+  if (resp.ok) {
+    const fb = document.getElementById('save-feedback');
+    fb.classList.remove('hidden');
+    setTimeout(() => fb.classList.add('hidden'), 2500);
+  } else {
+    alert('Save failed – check the server console.');
+  }
+}
+</script>
+</body>
+</html>

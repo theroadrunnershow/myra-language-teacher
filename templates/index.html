@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Myra Learns Languages 🦕</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@400;700;900&display=swap" rel="stylesheet" />
+</head>
+<body>
+
+<!-- ═══════════════════════ CONFETTI LAYER ═══════════════════════ -->
+<div id="confetti-container"></div>
+
+<!-- ═══════════════════════ HEADER ═══════════════════════ -->
+<header>
+  <div class="header-inner">
+    <h1 id="child-name-title">🦕 {{ config.child_name }} Learns!</h1>
+    <a href="/settings" class="settings-btn" title="Settings">⚙️</a>
+  </div>
+</header>
+
+<!-- ═══════════════════════ MAIN LAYOUT ═══════════════════════ -->
+<main>
+
+  <!-- ── DINO COLUMN ── -->
+  <section class="dino-col">
+    <div class="dino-wrapper" id="dino-wrapper">
+
+      <!-- Speech bubble -->
+      <div class="speech-bubble" id="speech-bubble">
+        <span id="bubble-text">Hi! Let's learn words! 🌟</span>
+      </div>
+
+      <!-- Pink Dino SVG -->
+      <svg id="dino-svg" viewBox="0 0 380 430" xmlns="http://www.w3.org/2000/svg" aria-label="Pink Dino Stuffy mascot">
+
+        <!-- ── TAIL ── -->
+        <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FF69B4"/>
+        <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FFB6C1" opacity="0.4"/>
+
+        <!-- ── BACK SPIKES ── -->
+        <polygon points="105,195 82,128 128,195" fill="#FF1493" opacity="0.85"/>
+        <polygon points="138,172 120,98  162,172" fill="#FF1493" opacity="0.85"/>
+        <polygon points="172,158 162,78  196,158" fill="#FF1493" opacity="0.85"/>
+        <polygon points="206,155 200,72  228,155" fill="#FF1493" opacity="0.85"/>
+        <polygon points="238,162 236,82  258,162" fill="#FF1493" opacity="0.85"/>
+
+        <!-- ── BODY ── -->
+        <ellipse cx="185" cy="300" rx="130" ry="115" fill="#FF69B4"/>
+
+        <!-- ── BELLY (lighter) ── -->
+        <ellipse cx="185" cy="315" rx="78" ry="82" fill="#FFB6C1"/>
+
+        <!-- ── BELLY DOTS ── -->
+        <circle cx="168" cy="295" r="10" fill="#FF69B4" opacity="0.4"/>
+        <circle cx="195" cy="330" r="8"  fill="#FF69B4" opacity="0.4"/>
+        <circle cx="160" cy="335" r="7"  fill="#FF69B4" opacity="0.4"/>
+
+        <!-- ── NECK ── -->
+        <path d="M 260,228 Q 295,195 315,168 Q 305,240 272,260 Z" fill="#FF69B4"/>
+
+        <!-- ── HEAD ── -->
+        <ellipse cx="318" cy="138" rx="62" ry="58" fill="#FF69B4"/>
+
+        <!-- ── CHEEK BLUSH ── -->
+        <ellipse cx="348" cy="155" rx="18" ry="10" fill="#FF1493" opacity="0.3"/>
+
+        <!-- ── EYE (white sclera) ── -->
+        <circle cx="335" cy="118" r="22" fill="white"/>
+        <!-- ── EYE (pupil) ── -->
+        <circle id="dino-pupil" cx="340" cy="119" r="13" fill="#3B0A6B"/>
+        <!-- ── EYE (shine) ── -->
+        <circle cx="346" cy="112" r="5" fill="white"/>
+        <circle cx="334" cy="122" r="2.5" fill="white" opacity="0.6"/>
+
+        <!-- ── EYELASHES ── -->
+        <line x1="320" y1="99"  x2="323" y2="91"  stroke="#3B0A6B" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="333" y1="95"  x2="334" y2="86"  stroke="#3B0A6B" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="346" y1="96"  x2="350" y2="88"  stroke="#3B0A6B" stroke-width="2.5" stroke-linecap="round"/>
+        <line x1="356" y1="102" x2="362" y2="95"  stroke="#3B0A6B" stroke-width="2.5" stroke-linecap="round"/>
+
+        <!-- ── NOSTRIL ── -->
+        <ellipse cx="366" cy="148" rx="6" ry="4" fill="#CC4488" opacity="0.7"/>
+
+        <!-- ── MOUTH (smile) ── -->
+        <path id="dino-mouth" d="M 330,162 Q 355,178 375,162" stroke="#CC4488" stroke-width="4" fill="none" stroke-linecap="round"/>
+
+        <!-- ── TOP TEETH (visible when mouth is open) ── -->
+        <g id="dino-teeth" style="display:none">
+          <polygon points="337,165 341,173 345,165" fill="white"/>
+          <polygon points="350,168 354,176 358,168" fill="white"/>
+          <polygon points="363,165 367,173 371,165" fill="white"/>
+        </g>
+
+        <!-- ── LEFT ARM (slightly raised) ── -->
+        <ellipse cx="100" cy="295" rx="28" ry="45" fill="#FF69B4" transform="rotate(-15 100 295)"/>
+        <!-- Paw -->
+        <ellipse cx="85"  cy="335" rx="20" ry="16" fill="#FF1493" opacity="0.7"/>
+
+        <!-- ── RIGHT ARM (waving up) ── -->
+        <g id="dino-right-arm">
+          <ellipse cx="270" cy="275" rx="22" ry="40" fill="#FF69B4" transform="rotate(25 270 275)"/>
+          <!-- Paw -->
+          <ellipse cx="285" cy="242" rx="18" ry="14" fill="#FF1493" opacity="0.7"/>
+        </g>
+
+        <!-- ── LEFT LEG ── -->
+        <ellipse cx="138" cy="400" rx="38" ry="48" fill="#FF69B4"/>
+        <!-- Left foot -->
+        <ellipse cx="130" cy="440" rx="44" ry="18" fill="#FF1493" opacity="0.8"/>
+        <!-- Left claws -->
+        <line x1="112" y1="448" x2="108" y2="458" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+        <line x1="128" y1="452" x2="126" y2="462" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+        <line x1="144" y1="452" x2="144" y2="463" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+
+        <!-- ── RIGHT LEG ── -->
+        <ellipse cx="234" cy="400" rx="38" ry="48" fill="#FF69B4"/>
+        <!-- Right foot -->
+        <ellipse cx="244" cy="440" rx="44" ry="18" fill="#FF1493" opacity="0.8"/>
+        <!-- Right claws -->
+        <line x1="228" y1="452" x2="226" y2="462" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+        <line x1="244" y1="452" x2="244" y2="463" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+        <line x1="260" y1="448" x2="264" y2="458" stroke="#CC4488" stroke-width="3" stroke-linecap="round"/>
+
+        <!-- ── STARS decoration ── -->
+        <text x="30"  y="60"  font-size="22" opacity="0.5">⭐</text>
+        <text x="340" y="35"  font-size="18" opacity="0.4">✨</text>
+        <text x="10"  y="160" font-size="16" opacity="0.4">💫</text>
+
+      </svg>
+      <!-- end dino SVG -->
+    </div><!-- end dino-wrapper -->
+  </section>
+
+  <!-- ── LESSON COLUMN ── -->
+  <section class="lesson-col">
+
+    <!-- Language badge -->
+    <div class="lang-badge" id="lang-badge">Telugu 🌟</div>
+
+    <!-- Word card -->
+    <div class="word-card" id="word-card">
+
+      <div class="word-emoji" id="word-emoji">🌟</div>
+
+      <div class="word-english" id="word-english">Loading…</div>
+
+      <div class="word-arrow">➜</div>
+
+      <div class="word-translation" id="word-translation">…</div>
+
+      <div class="word-romanized" id="word-romanized"></div>
+
+    </div><!-- end word-card -->
+
+    <!-- Feedback banner -->
+    <div class="feedback-banner hidden" id="feedback-banner">
+      <span id="feedback-text"></span>
+    </div>
+
+    <!-- Attempt dots -->
+    <div class="attempt-dots" id="attempt-dots">
+      <span class="dot" id="dot-1"></span>
+      <span class="dot" id="dot-2"></span>
+      <span class="dot" id="dot-3"></span>
+    </div>
+
+    <!-- Action buttons -->
+    <div class="btn-row">
+
+      <button class="btn btn-play" id="btn-play" title="Hear the word" onclick="playWord()">
+        🔊 Hear It!
+      </button>
+
+      <button class="btn btn-record" id="btn-record" onclick="playPromptThenRecord()">
+        🎤 Say It!
+      </button>
+
+      <button class="btn btn-skip" id="btn-skip" onclick="nextWord()" title="Skip to next word">
+        ⏭ Skip
+      </button>
+
+    </div>
+
+    <!-- Recording indicator -->
+    <div class="recording-indicator hidden" id="recording-indicator">
+      <span class="rec-dot"></span>
+      <span>Listening… <span id="rec-timer">5</span>s</span>
+    </div>
+
+    <!-- Score display -->
+    <div class="score-row">
+      <span>⭐ Score: <strong id="score-display">0</strong></span>
+      <span>📚 Words: <strong id="words-display">0</strong></span>
+    </div>
+
+  </section><!-- end lesson-col -->
+
+</main>
+
+<script src="/static/js/app.js"></script>
+</body>
+</html>

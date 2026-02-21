@@ -1,0 +1,17 @@
+{
+  "languages": [
+    "telugu"
+  ],
+  "categories": [
+    "animals",
+    "colors",
+    "body_parts",
+    "numbers",
+    "food",
+    "common_objects"
+  ],
+  "child_name": "Myra",
+  "show_romanized": true,
+  "similarity_threshold": 30,
+  "max_attempts": 5
+}
