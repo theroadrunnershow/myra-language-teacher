@@ -192,7 +192,7 @@ async function playPromptThenRecord() {
   const { translation, language } = state.currentWord;
 
   setBubble(`${childName}, repeat after me! 🎤`);
-  animateDino('talk');
+  animateDino('ask');
 
   try {
     // 1. Play "<Name>, repeat after me!" in English
@@ -406,6 +406,7 @@ function handleResult(result) {
     els.wordCard.classList.add('correct-flash');
     launchConfetti();
     setBubble(randomMsg('correct'));
+    playAudioUrl(`/api/tts?text=${encodeURIComponent('yaaaaay')}&language=english`).catch(() => {});
 
     // Move to next word after a short delay (cancelled if Stop pressed)
     scheduleTransition(nextWord, 2200);
@@ -423,6 +424,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble("Good try! Let's move on. 🌟");
+    playAudioUrl(`/api/tts?text=${encodeURIComponent('beeeep')}&language=english`).catch(() => {});
 
     scheduleTransition(nextWord, 3000);
 
@@ -436,6 +438,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
+    playAudioUrl(`/api/tts?text=${encodeURIComponent('beeeep')}&language=english`).catch(() => {});
 
     // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
     scheduleTransition(() => {
@@ -512,7 +515,7 @@ function updateDots(index, correct) {
 // ── Dino animations ───────────────────────────────────
 function animateDino(state_name) {
   const svg = els.dinoSvg;
-  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk');
+  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk', 'dino-ask');
 
   const teeth = els.dinoTeeth;
 
@@ -522,6 +525,11 @@ function animateDino(state_name) {
     setTimeout(() => { teeth.style.display = 'none'; }, 1600);
   } else if (state_name === 'shake') {
     svg.classList.add('dino-shake');
+  } else if (state_name === 'ask') {
+    // Dino turns to face the toddler and asks the question
+    svg.classList.add('dino-ask');
+    teeth.style.display = 'block';
+    animateMouth(true);
   } else if (state_name === 'talk') {
     svg.classList.add('dino-talk');
     teeth.style.display = 'block';
