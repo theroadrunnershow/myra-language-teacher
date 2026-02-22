@@ -83,7 +83,7 @@ async function init() {
 const CONFIG_KEY = 'myra_config';
 
 async function fetchConfig() {
-  const defaults = { languages: ['telugu', 'assamese'], categories: ['animals', 'colors', 'body_parts', 'numbers', 'food', 'common_objects'], child_name: 'Myra', show_romanized: true, similarity_threshold: 50, max_attempts: 3 };
+  const defaults = { languages: ['telugu', 'assamese'], categories: ['animals', 'colors', 'body_parts', 'numbers', 'food', 'common_objects'], child_name: 'Myra', show_romanized: true, similarity_threshold: 50, max_attempts: 3, reachy_enabled: false, reachy_host: 'reachy.local', reachy_username: 'bedrock' };
   try {
     const resp = await fetch('/api/config');
     const serverDefaults = await resp.json();
@@ -144,6 +144,42 @@ function displayWord(word) {
   els.langBadge.textContent = langLabel;
 }
 
+// ── Reachy Mini helpers ───────────────────────────────
+function reachyEnabled() {
+  return !!(state.config.reachy_enabled);
+}
+
+/**
+ * Play TTS through the Reachy robot's speaker.
+ * Returns a Promise that resolves after estimated playback duration.
+ */
+async function reachyPlayTTS(text, language) {
+  try {
+    const resp = await fetch('/api/reachy/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text, language }),
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const { duration_ms } = await resp.json();
+    // Wait for the robot to finish speaking
+    await sleep(duration_ms + 300);
+  } catch (e) {
+    console.warn('Reachy TTS failed, no audio played:', e);
+  }
+}
+
+/**
+ * Trigger a robot dance (fire-and-forget – does not wait for completion).
+ */
+function reachyDance(type) {
+  fetch('/api/reachy/dance', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ type }),
+  }).catch(e => console.warn('Reachy dance request failed:', e));
+}
+
 // ── TTS: play pronunciation ───────────────────────────
 async function playWord() {
   if (!state.currentWord) return;
@@ -151,21 +187,25 @@ async function playWord() {
   stopExistingAudio();
 
   const { translation, language } = state.currentWord;
-  const url = `/api/tts?text=${encodeURIComponent(translation)}&language=${language}`;
 
   setBubble("Listen carefully! 👂");
   animateDino('talk');
 
   try {
-    const audio = new Audio(url);
-    state.ttsAudio = audio;
-
-    audio.addEventListener('ended', () => {
-      animateDino('idle');
-      setBubble(randomMsg('prompt'));
-    });
-
-    await audio.play();
+    if (reachyEnabled()) {
+      await reachyPlayTTS(translation, language);
+    } else {
+      const url = `/api/tts?text=${encodeURIComponent(translation)}&language=${language}`;
+      const audio = new Audio(url);
+      state.ttsAudio = audio;
+      await new Promise((resolve, reject) => {
+        audio.addEventListener('ended', resolve);
+        audio.addEventListener('error', reject);
+        audio.play().catch(reject);
+      });
+    }
+    animateDino('idle');
+    setBubble(randomMsg('prompt'));
   } catch (e) {
     console.error('TTS playback error:', e);
     animateDino('idle');
@@ -195,15 +235,23 @@ async function playPromptThenRecord() {
   animateDino('ask');
 
   try {
-    // 1. Play "<Name>, repeat after me!" in English
     const promptText = `${childName}, repeat after me!`;
-    await playAudioUrl(`/api/tts?text=${encodeURIComponent(promptText)}&language=english`);
 
-    // 2. Short pause between prompt and word
-    await sleep(350);
-
-    // 3. Play the target-language word
-    await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}`);
+    if (reachyEnabled()) {
+      // 1. Play prompt through robot
+      await reachyPlayTTS(promptText, 'english');
+      // 2. Short pause
+      await sleep(350);
+      // 3. Play the target word through robot
+      await reachyPlayTTS(translation, language);
+    } else {
+      // 1. Play "<Name>, repeat after me!" in English via browser
+      await playAudioUrl(`/api/tts?text=${encodeURIComponent(promptText)}&language=english`);
+      // 2. Short pause between prompt and word
+      await sleep(350);
+      // 3. Play the target-language word
+      await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}`);
+    }
 
     // 4. Short gap, then start recording
     await sleep(500);
@@ -239,8 +287,13 @@ function playReaction(text) {
   teeth.style.display = 'block';
   animateMouth(true);
   const done = () => { animateMouth(false); teeth.style.display = 'none'; };
-  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`)
-    .then(done).catch(done);
+
+  if (reachyEnabled()) {
+    reachyPlayTTS(text, 'english').then(done).catch(done);
+  } else {
+    playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`)
+      .then(done).catch(done);
+  }
 }
 
 // Schedule a transition (next word, retry, etc.). IDs stored so Stop can cancel them.
@@ -418,6 +471,9 @@ function handleResult(result) {
     setBubble(randomMsg('correct'));
     playReaction('yaaaaay');
 
+    // Trigger Reachy celebration dance (fire-and-forget)
+    if (reachyEnabled()) reachyDance('celebrate');
+
     // Move to next word after a short delay (cancelled if Stop pressed)
     scheduleTransition(nextWord, 2200);
 
@@ -436,6 +492,9 @@ function handleResult(result) {
     setBubble("Good try! Let's move on. 🌟");
     playReaction('beeeep');
 
+    // Trigger Reachy sad dance (fire-and-forget)
+    if (reachyEnabled()) reachyDance('sad');
+
     scheduleTransition(nextWord, 3000);
 
   } else {
@@ -449,6 +508,9 @@ function handleResult(result) {
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
     playReaction('beeeep');
+
+    // Trigger Reachy sad dance on wrong attempt (fire-and-forget)
+    if (reachyEnabled()) reachyDance('sad');
 
     // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
     scheduleTransition(() => {

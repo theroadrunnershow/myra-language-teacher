@@ -536,6 +536,26 @@ hr { border: none; border-top: 2px dashed var(--pink-light); margin: 1.4rem 0; }
 
 .text-input:focus, .select-input:focus { border-color: var(--pink-dark); }
 
+/* ── Reachy Mini settings ───────────────────────────── */
+.reachy-settings-group {
+  background: rgba(155, 89, 182, 0.06);
+  border: 2px dashed rgba(155, 89, 182, 0.25);
+  border-radius: 16px;
+  padding: 1rem 1.2rem;
+  margin-top: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.reachy-status {
+  font-size: 0.95rem;
+  font-weight: 700;
+  padding: 0.3rem 0.6rem;
+  border-radius: 8px;
+  align-self: center;
+}
+
 /* ── Debug panel ───────────────────────────────────── */
 .debug-panel {
   width: 100%;

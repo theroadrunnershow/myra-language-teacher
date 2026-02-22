@@ -10,3 +10,6 @@ aiofiles==24.1.0
 rapidfuzz==3.10.1
 noisereduce==3.0.3
 scipy==1.13.1
+# Reachy Mini robot integration (optional – app works without these)
+reachy2-sdk>=1.0.0
+paramiko>=3.0.0
