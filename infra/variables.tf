@@ -13,7 +13,7 @@ variable "aws_region" {
 variable "alert_email" {
   description = "Email for $40 budget warning and $50 kill-switch notification. REPLACE before deploying."
   type        = string
-  default     = "YOUR_ALERT_EMAIL@example.com"
+  default     = "theroadrunnershow@gmail.com"
 }
 
 variable "container_cpu" {
