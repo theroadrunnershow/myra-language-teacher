@@ -6,3 +6,6 @@ venv/
 
 # Local config (settings now in browser sessionStorage for multi-user hosting)
 config.json
+
+# Environment variables (secrets)
+.env
