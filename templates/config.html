@@ -98,6 +98,44 @@
 
     <hr />
 
+    <h2>🤖 Reachy Mini Robot</h2>
+    <p class="hint">When enabled, audio plays through the robot's speaker and the robot dances on correct/wrong answers.</p>
+
+    <div class="option-row">
+      <label for="reachy-enabled">Enable Reachy Mini integration</label>
+      <input type="checkbox" id="reachy-enabled"
+             {% if config.get('reachy_enabled') %}checked{% endif %} />
+    </div>
+
+    <div id="reachy-settings" class="reachy-settings-group" style="display:none">
+      <div class="option-row">
+        <label for="reachy-host">Robot IP address or hostname</label>
+        <input type="text" id="reachy-host" class="text-input"
+               value="{{ config.get('reachy_host', 'reachy.local') }}"
+               placeholder="e.g. 192.168.1.42 or reachy.local" />
+      </div>
+
+      <div class="option-row">
+        <label for="reachy-username">SSH username</label>
+        <input type="text" id="reachy-username" class="text-input"
+               value="{{ config.get('reachy_username', 'bedrock') }}"
+               placeholder="bedrock" />
+      </div>
+
+      <div class="option-row">
+        <label for="reachy-password">SSH password</label>
+        <input type="password" id="reachy-password" class="text-input"
+               placeholder="Leave blank to keep saved password" />
+      </div>
+
+      <div class="btn-row">
+        <button class="btn btn-skip" onclick="testReachyConnection()">🔌 Test Connection</button>
+        <span id="reachy-status" class="reachy-status"></span>
+      </div>
+    </div>
+
+    <hr />
+
     <div class="btn-row centered">
       <button class="btn btn-play" onclick="saveSettings()">💾 Save Settings</button>
       <a href="/" class="btn btn-skip">🏠 Go Home</a>
@@ -150,8 +188,94 @@ document.addEventListener('DOMContentLoaded', () => {
       const ma = document.getElementById('max-attempts');
       if (ma) ma.value = String(cfg.max_attempts);
     }
+
+    // Reachy settings
+    if (typeof cfg.reachy_enabled === 'boolean') {
+      const re = document.getElementById('reachy-enabled');
+      if (re) re.checked = cfg.reachy_enabled;
+    }
+    if (cfg.reachy_host) {
+      const rh = document.getElementById('reachy-host');
+      if (rh) rh.value = cfg.reachy_host;
+    }
+    if (cfg.reachy_username) {
+      const ru = document.getElementById('reachy-username');
+      if (ru) ru.value = cfg.reachy_username;
+    }
   }
+
+  // Show/hide Reachy settings group based on checkbox
+  const reachyCb = document.getElementById('reachy-enabled');
+  const reachyGroup = document.getElementById('reachy-settings');
+  if (reachyCb && reachyGroup) {
+    reachyGroup.style.display = reachyCb.checked ? '' : 'none';
+    reachyCb.addEventListener('change', () => {
+      reachyGroup.style.display = reachyCb.checked ? '' : 'none';
+    });
+  }
+
+  // Show live connection status on load
+  fetchReachyStatus();
 });
+
+async function fetchReachyStatus() {
+  try {
+    const resp = await fetch('/api/reachy/status');
+    const st = await resp.json();
+    updateReachyStatusBadge(st);
+  } catch (_) { /* server might not have the endpoint yet */ }
+}
+
+function updateReachyStatusBadge(st) {
+  const el = document.getElementById('reachy-status');
+  if (!el) return;
+  if (st.connected) {
+    el.textContent = `✅ Connected to ${st.host}`;
+    el.style.color = '#2ecc71';
+  } else {
+    el.textContent = '⚫ Not connected';
+    el.style.color = '#aaa';
+  }
+}
+
+async function testReachyConnection() {
+  const host = document.getElementById('reachy-host').value.trim();
+  const username = document.getElementById('reachy-username').value.trim() || 'bedrock';
+  const password = document.getElementById('reachy-password').value;
+
+  if (!host) {
+    alert('Please enter the robot IP address or hostname.');
+    return;
+  }
+
+  const statusEl = document.getElementById('reachy-status');
+  statusEl.textContent = '🔄 Connecting…';
+  statusEl.style.color = '#f39c12';
+
+  try {
+    const resp = await fetch('/api/reachy/connect', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ host, username, password }),
+    });
+    const st = await resp.json();
+
+    if (st.connected) {
+      const parts = [];
+      if (st.sdk_connected) parts.push('arm control');
+      if (st.ssh_connected) parts.push('audio');
+      statusEl.textContent = `✅ Connected! (${parts.join(', ')})`;
+      statusEl.style.color = '#2ecc71';
+    } else {
+      const errs = (st.errors || []).join('; ');
+      statusEl.textContent = `❌ Failed: ${errs || 'Could not reach robot'}`;
+      statusEl.style.color = '#e74c3c';
+    }
+  } catch (err) {
+    statusEl.textContent = `❌ Error: ${err.message}`;
+    statusEl.style.color = '#e74c3c';
+  }
+}
 
 async function saveSettings() {
   const languages = [];
@@ -173,6 +297,15 @@ async function saveSettings() {
     return;
   }
 
+  const reachyEnabled = document.getElementById('reachy-enabled').checked;
+  const reachyHost = document.getElementById('reachy-host').value.trim();
+  const reachyUsername = document.getElementById('reachy-username').value.trim() || 'bedrock';
+  const reachyPasswordRaw = document.getElementById('reachy-password').value;
+
+  // Read existing stored password so we don't wipe it when field is blank
+  const storedCfg = JSON.parse(sessionStorage.getItem(CONFIG_KEY) || '{}');
+  const reachyPassword = reachyPasswordRaw || storedCfg.reachy_password || 'bedrock';
+
   const config = {
     child_name: document.getElementById('child-name').value.trim() || 'Myra',
     languages,
@@ -180,6 +313,10 @@ async function saveSettings() {
     show_romanized: document.getElementById('show-romanized').checked,
     similarity_threshold: parseInt(document.getElementById('similarity-threshold').value),
     max_attempts: parseInt(document.getElementById('max-attempts').value),
+    reachy_enabled: reachyEnabled,
+    reachy_host: reachyHost || 'reachy.local',
+    reachy_username: reachyUsername,
+    reachy_password: reachyPassword,
   };
 
   const resp = await fetch('/api/config', {
@@ -190,6 +327,23 @@ async function saveSettings() {
 
   if (resp.ok) {
     sessionStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+
+    // If Reachy just got enabled, connect now
+    if (reachyEnabled && reachyHost) {
+      const statusEl = document.getElementById('reachy-status');
+      statusEl.textContent = '🔄 Connecting to robot…';
+      statusEl.style.color = '#f39c12';
+      try {
+        const cr = await fetch('/api/reachy/connect', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ host: reachyHost, username: reachyUsername, password: reachyPassword }),
+        });
+        const st = await cr.json();
+        updateReachyStatusBadge(st);
+      } catch (_) {}
+    }
+
     const fb = document.getElementById('save-feedback');
     fb.classList.remove('hidden');
     setTimeout(() => fb.classList.add('hidden'), 2500);
