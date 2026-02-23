@@ -1,6 +1,6 @@
 # Container image repository (replaces ECR)
 resource "google_artifact_registry_repository" "app" {
-  repository_id = "myra"
+  repository_id = var.artifact_registry_repo
   format        = "DOCKER"
   location      = var.region
   description   = "Myra language teacher app images"

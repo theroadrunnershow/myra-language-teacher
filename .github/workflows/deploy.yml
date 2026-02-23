@@ -7,7 +7,7 @@ on:
 
 env:
   REGION: ${{ secrets.GCP_REGION }}
-  IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/myra/dino-app
+  IMAGE: ${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ vars.GCP_REGISTRY_REPO }}/dino-app
 
 jobs:
   deploy:

@@ -10,7 +10,7 @@ output "cloud_run_url" {
 
 output "registry_url" {
   description = "Artifact Registry URL — used for docker push"
-  value       = "${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app"
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_registry_repo}/dino-app"
 }
 
 output "cloud_run_service_name" {
@@ -37,7 +37,7 @@ output "docker_push_command" {
   description = "Commands to build and push the Docker image"
   value       = <<-EOT
     gcloud auth configure-docker ${var.region}-docker.pkg.dev
-    docker build -t ${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app:latest .
-    docker push ${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app:latest
+    docker build -t ${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_registry_repo}/dino-app:latest .
+    docker push ${var.region}-docker.pkg.dev/${var.project_id}/${var.artifact_registry_repo}/dino-app:latest
   EOT
 }

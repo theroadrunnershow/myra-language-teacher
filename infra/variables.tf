@@ -3,6 +3,12 @@ variable "project_id" {
   type        = string
 }
 
+variable "artifact_registry_repo" {
+  description = "Artifact Registry repository name (used in image paths)"
+  type        = string
+  default     = "myra-language-teacher"
+}
+
 variable "region" {
   description = "GCP region for Cloud Run and Artifact Registry"
   type        = string
