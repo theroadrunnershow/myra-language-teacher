@@ -192,106 +192,138 @@ WARNING:reachy_service:reachy2-sdk not installed – arm movements will be skipp
 
 ---
 
-## 4. Testing on AWS
+## 4. Testing on GCP (Cloud Run)
 
 ### Important: network reachability
 
-The app runs on **AWS ECS Fargate in a private subnet**. It reaches the internet
-through a NAT Gateway (outbound only). This means:
+The app runs on **GCP Cloud Run** — a fully managed serverless platform. Each request
+spins up a container that makes outbound calls through Google's network. There is no
+fixed IP or VPC, so the robot must be reachable over the public internet or via a tunnel.
 
 | Scenario | Works? |
 |----------|--------|
-| Robot on same Wi-Fi as the ECS cluster | ❌ Not possible (ECS is in AWS cloud) |
-| Robot with a **public static IP** | ✅ Yes |
-| Robot behind a VPN with AWS VPC peering | ✅ Yes (advanced) |
-| Robot accessible via a **tunnel** (e.g. ngrok, Tailscale, WireGuard) | ✅ Yes (recommended) |
-
-The simplest approach for home use is a **Tailscale tunnel**.
+| Robot on same local Wi-Fi (no public access) | ❌ Cloud Run can't reach your home network |
+| Robot with a **public static IP** + port forwarding | ✅ Yes |
+| Robot reachable via **Tailscale** (recommended) | ✅ Yes — simplest for home use |
+| Robot reachable via **ngrok TCP tunnel** | ✅ Yes — quick to set up, free tier available |
 
 ---
 
-### Option A — Tailscale (recommended for home use)
+### Option A — Tailscale (recommended)
 
-Tailscale gives the robot a stable private IP reachable from anywhere, including AWS.
+Tailscale gives the robot a stable private IP reachable from Cloud Run via a Tailscale
+subnet router or funnel.
 
-**On the robot:**
+**Step 1 — Install Tailscale on the robot:**
 
 ```bash
 ssh bedrock@<robot-local-ip>
 
-# Install Tailscale
 curl -fsSL https://tailscale.com/install.sh | sh
 sudo tailscale up
 
-# Note the Tailscale IP shown (e.g. 100.x.x.x)
+# Note the Tailscale IP (e.g. 100.x.y.z)
 tailscale ip -4
 ```
 
-**On your AWS machine (or in the ECS task):** install Tailscale and join the same network.
-The ECS task would need Tailscale sidecar — contact your DevOps team for this.
+**Step 2 — Expose the robot publicly via Tailscale Funnel** (makes ports reachable from Cloud Run):
 
-**Simpler alternative:** run the robot connection through a small **EC2 proxy instance** on the same Tailscale network, then have ECS call the proxy.
+```bash
+# On the robot — expose SSH (port 22) and gRPC (port 50051) via Tailscale Funnel
+sudo tailscale funnel 22
+sudo tailscale funnel 50051
+```
+
+> Tailscale Funnel gives you a stable `https://<machine>.ts.net` hostname.
+> Use that hostname in the app Settings as the robot IP.
 
 ---
 
-### Option B — Public IP on the robot (simplest, less secure)
+### Option B — ngrok TCP tunnel (quick setup, no account needed for basic use)
 
-> Only do this if your robot is behind a proper firewall that limits access.
+```bash
+ssh bedrock@<robot-local-ip>
 
-1. Give your home router a static public IP (contact your ISP) or use a DDNS service
-2. Forward ports **22** (SSH) and **50051** (gRPC/SDK) from your router to the robot
+# Install ngrok on the robot
+curl -s https://ngrok-agent.s3.amazonaws.com/ngrok.asc | sudo tee /etc/apt/trusted.gpg.d/ngrok.asc >/dev/null
+echo "deb https://ngrok-agent.s3.amazonaws.com buster main" | sudo tee /etc/apt/sources.list.d/ngrok.list
+sudo apt update && sudo apt install ngrok
+
+# Expose SSH (run this; note the hostname + port it assigns)
+ngrok tcp 22
+# → Forwarding tcp://0.tcp.ngrok.io:12345 -> localhost:22
+```
+
+Use `0.tcp.ngrok.io` as the robot hostname and `12345` as the SSH port in settings.
+Repeat for port 50051 (gRPC) in a second terminal. Note: free ngrok tunnels reset on restart.
+
+---
+
+### Option C — Public IP + port forwarding (simplest, less secure)
+
+> Only do this on a network with a proper firewall. Never expose SSH to the internet
+> without a strong password or key-based auth.
+
+1. Get a static public IP from your ISP, or set up a DDNS service (e.g. DuckDNS, No-IP)
+2. Log into your router and forward ports **22** (SSH) and **50051** (gRPC) to the robot's local IP
 3. In the app Settings, enter your **public IP or DDNS hostname** as the robot IP
 
 ---
 
-### Deploying the updated code to AWS
+### Deploying the updated code to GCP
 
-After merging the Reachy feature branch to `main`, rebuild and push the Docker image:
-
-```bash
-export AWS_PROFILE=myra-deploy
-cd ~/Downloads/claude_projects/myra-language-teacher
-
-# Build and push the new image, then force an ECS rolling deploy
-./deploy/build-push.sh --deploy
-```
-
-Wait for the rollout:
+After merging the Reachy feature branch to `main`, build and push a new Docker image
+to Artifact Registry, which triggers Cloud Run to pick up the change:
 
 ```bash
-aws ecs wait services-stable \
-  --region us-west-2 \
-  --cluster dino-app-cluster \
-  --services dino-app-service
+export PROJECT_ID=your-gcp-project-id   # e.g. myra-language-teacher-123456
+export REGION=us-west1
+
+# Authenticate Docker to Artifact Registry (one-time)
+gcloud auth configure-docker ${REGION}-docker.pkg.dev
+
+# Build and push
+docker build -t ${REGION}-docker.pkg.dev/${PROJECT_ID}/myra/dino-app:latest .
+docker push ${REGION}-docker.pkg.dev/${PROJECT_ID}/myra/dino-app:latest
+
+# Force Cloud Run to pick up the new image immediately
+gcloud run services update dino-app \
+  --region=${REGION} \
+  --image=${REGION}-docker.pkg.dev/${PROJECT_ID}/myra/dino-app:latest \
+  --project=${PROJECT_ID}
 ```
 
-Then open the app URL:
+Get the live app URL:
 
 ```bash
 cd infra && terraform output app_url
+# or for the direct Cloud Run URL (no CDN):
+terraform output cloud_run_url
 ```
 
-### Configuring the robot from the AWS-hosted app
+### Configuring the robot from the GCP-hosted app
 
-1. Open the CloudFront URL (e.g. `https://d1abc123xyz.cloudfront.net`)
+1. Open the app URL (from `terraform output app_url`)
 2. Go to **Settings → 🤖 Reachy Mini Robot**
-3. Enter the robot's **public IP or Tailscale IP**, username, and password
-4. Click **🔌 Test Connection**
+3. Enter the robot's **Tailscale hostname, ngrok host, or public IP**, username, and password
+4. Click **🔌 Test Connection** — confirm green status
 
-Settings are saved in **your browser's sessionStorage**, so they are local to each
-browser/device. Anyone using a different browser will need to enter the robot details
-again.
+Settings are stored in **your browser's sessionStorage** (local to each browser/device).
+Anyone accessing from a different browser will need to enter their own robot details.
 
-### Viewing logs on AWS
-
-If something isn't working, check the ECS logs:
+### Viewing logs on GCP
 
 ```bash
-aws logs tail /ecs/dino-app --follow --region us-west-2
+# Stream live logs from Cloud Run
+gcloud logging tail "resource.type=cloud_run_revision AND resource.labels.service_name=dino-app" \
+  --project=${PROJECT_ID} --format="value(textPayload)"
+
+# Or open in the console (URL printed by terraform output logs_url)
+cd infra && terraform output logs_url
 ```
 
-Look for lines from `reachy_service` — they'll tell you whether the SDK or SSH
-connection succeeded or what error occurred.
+Look for lines from `reachy_service` — they'll show whether the SDK or SSH connection
+succeeded or what error occurred.
 
 ---
 
@@ -299,11 +331,11 @@ connection succeeded or what error occurred.
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| "Not connected" after Test Connection | Wrong IP or robot is off | Verify robot is on and ping it |
-| `SSH: Connection timed out` | Firewall blocking port 22 | Check robot's SSH service: `ssh bedrock@<ip>` from terminal |
-| `SDK:` error, SSH works | `reachy2-sdk` not installed or gRPC port 50051 blocked | Run `pip install reachy2-sdk`; check firewall allows port 50051 |
+| "Not connected" after Test Connection | Wrong IP or robot is off | Verify robot is on and `ping <robot-ip>` from your laptop first |
+| `SSH: Connection timed out` | Firewall or tunnel not running | Check tunnel is active; try `ssh bedrock@<ip>` from your terminal |
+| `SDK:` error, SSH works | `reachy2-sdk` not installed or gRPC port 50051 blocked | Run `pip install reachy2-sdk`; ensure port 50051 is forwarded/tunnelled |
 | Audio plays on browser, not robot | Reachy not enabled in Settings | Enable the toggle in Settings and Save |
 | No audio at all on robot | `mpg123` not installed on robot | `ssh bedrock@<ip> "sudo apt install -y mpg123"` |
-| Arms don't move | Robot motors not homed / turned off | Power-cycle the robot; SDK will turn motors on before each dance |
-| Dance crashes mid-move | Joint angle out of safe range | Check `reachy_service.py` `_do_celebration_dance` / `_do_sad_dance` and reduce joint angles |
-| AWS: connection refused to robot | Robot not publicly reachable | Use Tailscale or set up port forwarding (see Section 4) |
+| Arms don't move | Robot motors off or SDK API mismatch | Power-cycle robot; check console for SDK errors; see todo doc for API verification steps |
+| Dance crashes mid-move | Joint angle out of safe range | Reduce angles in `reachy_service.py` `_do_celebration_dance` / `_do_sad_dance` |
+| GCP: connection refused to robot | Robot not publicly reachable from Cloud Run | Set up Tailscale Funnel or ngrok tunnel (see Option A/B above) |
