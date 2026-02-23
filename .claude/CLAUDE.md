@@ -92,6 +92,11 @@ pytest tests/test_api.py  # specific file
 pytest -v                 # verbose output
 ```
 
+**Testing requirements:**
+- Every new feature or change **must include new tests** covering the added behaviour
+- **Never modify existing tests** without explicitly asking the user first
+- After any change (feature, bug fix, refactor), run the full test suite and confirm all tests pass before marking work complete
+
 **Mocking strategy:**
 - `main.generate_tts` and `main.recognize_speech` are `AsyncMock`ed — no network/Whisper in API tests
 - `words_db` is **not** mocked — tests use real in-memory data
