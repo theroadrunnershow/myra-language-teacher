@@ -53,7 +53,7 @@ Internet → Cloud Armor → Global HTTPS LB → Cloud CDN → Cloud Run (auto s
 ### 1.1 Create GCP Project
 1. Go to https://console.cloud.google.com
 2. Create new project — suggested name: `myra-language-teacher`
-3. Note your **Project ID** (e.g., `myra-language-teacher-123456`)
+3. Note your **Project ID** (e.g., `myra-language-teacher`)
 4. Go to Billing → link a billing account (credit card required)
 
 ### 1.2 Install gcloud CLI
@@ -66,7 +66,7 @@ gcloud auth application-default login
 
 ### 1.3 Enable Required APIs
 ```bash
-export PROJECT_ID=YOUR_PROJECT_ID   # e.g. myra-language-teacher-123456
+export PROJECT_ID=myra-language-teacher   # e.g. myra-language-teacher
 
 gcloud services enable \
   run.googleapis.com \
@@ -160,7 +160,39 @@ terraform apply
 
 ---
 
-## Step 5: Verification Checklist
+## Step 5: CI/CD Setup (GitHub Actions)
+
+CI/CD is handled by GitHub Actions — free, no GCP cost, 2,000 min/month included.
+Workflow file: `.github/workflows/deploy.yml`
+
+**Trigger**: Push to `main` → build Docker image → push to Artifact Registry → deploy to Cloud Run.
+
+### One-time GitHub Secrets setup
+Go to: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
+
+| Secret | Value |
+|---|---|
+| `GCP_SA_KEY` | Full JSON contents of `~/terraform-gcp-key.json` |
+| `GCP_PROJECT_ID` | Your GCP project ID (e.g. `myra-language-teacher-123456`) |
+| `GCP_REGION` | `us-west1` |
+
+> Cloud Run service name (`dino-app`) is hardcoded in the workflow since it's fixed by Terraform.
+
+### What happens on each push to `main`
+1. Checkout code
+2. Authenticate to GCP via service account key
+3. Configure Docker for `us-west1-docker.pkg.dev`
+4. Build image tagged with both `:latest` and `:<git-sha>`
+5. Push both tags to Artifact Registry
+6. Deploy new revision to Cloud Run using the SHA-tagged image
+
+### Future upgrade: Workload Identity Federation (optional)
+Replace the JSON key with keyless OIDC tokens — more secure, no long-lived credentials.
+Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
+
+---
+
+## Step 6: Verification Checklist
 
 - [ ] `terraform init` succeeds with GCS backend
 - [ ] `terraform plan` shows expected resources, no errors
