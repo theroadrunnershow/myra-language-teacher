@@ -28,18 +28,18 @@
 
     <hr />
 
-    <h2>🗣️ Languages to Teach</h2>
-    <p class="hint">Select one or both — the app will alternate randomly.</p>
+    <h2>🗣️ Language to Teach</h2>
+    <p class="hint">Select one language to practice.</p>
     <div class="checkbox-group">
       <label class="checkbox-label">
-        <input type="checkbox" id="lang-telugu" value="telugu"
-               {% if 'telugu' in config.languages %}checked{% endif %} />
+        <input type="radio" name="language" id="lang-telugu" value="telugu"
+               {% if config.languages and config.languages[0] == 'telugu' %}checked{% endif %} />
         <span>Telugu</span>
         <span class="lang-sample">తెలుగు</span>
       </label>
       <label class="checkbox-label">
-        <input type="checkbox" id="lang-assamese" value="assamese"
-               {% if 'assamese' in config.languages %}checked{% endif %} />
+        <input type="radio" name="language" id="lang-assamese" value="assamese"
+               {% if config.languages and config.languages[0] == 'assamese' %}checked{% endif %} />
         <span>Assamese</span>
         <span class="lang-sample">অসমীয়া</span>
       </label>
@@ -112,25 +112,25 @@
 <script>
 const CONFIG_KEY = 'myra_config';
 
-// Populate form from sessionStorage on load (overrides server defaults)
 document.addEventListener('DOMContentLoaded', () => {
-  const stored = sessionStorage.getItem(CONFIG_KEY);
+  const stored = localStorage.getItem(CONFIG_KEY);
+
   if (stored) {
+    // Returning user: populate form from localStorage (overrides server-rendered defaults)
     const cfg = JSON.parse(stored);
+
     const childName = document.getElementById('child-name');
     if (childName && cfg.child_name) childName.value = cfg.child_name;
-    if (cfg.languages) {
-      cfg.languages.forEach(lang => {
-        const cb = document.getElementById('lang-' + lang);
-        if (cb) cb.checked = true;
-      });
-      ['telugu','assamese'].forEach(lang => {
-        if (!(cfg.languages || []).includes(lang)) {
-          const cb = document.getElementById('lang-' + lang);
-          if (cb) cb.checked = false;
-        }
-      });
+
+    // Set the single language radio button (use first element if array)
+    const lang = Array.isArray(cfg.languages) ? cfg.languages[0] : cfg.languages;
+    if (lang) {
+      // First clear all radios, then check the stored one
+      document.querySelectorAll('input[name="language"]').forEach(r => r.checked = false);
+      const rb = document.querySelector(`input[name="language"][value="${lang}"]`);
+      if (rb) rb.checked = true;
     }
+
     if (cfg.categories) {
       document.querySelectorAll('.cat-checkbox').forEach(cb => {
         cb.checked = cfg.categories.includes(cb.value);
@@ -150,36 +150,50 @@ document.addEventListener('DOMContentLoaded', () => {
       const ma = document.getElementById('max-attempts');
       if (ma) ma.value = String(cfg.max_attempts);
     }
+  } else {
+    // New user: clear all server-rendered defaults so they must choose their own settings
+    document.getElementById('child-name').value = '';
+    document.querySelectorAll('input[name="language"]').forEach(r => r.checked = false);
+    document.querySelectorAll('.cat-checkbox').forEach(cb => cb.checked = false);
+
+    // Update header and hide nav links so they can't skip setup
+    const h1 = document.querySelector('h1');
+    if (h1) h1.textContent = '👋 Welcome! Set Up Your App';
+    document.querySelector('.back-btn').style.display = 'none';
+    document.querySelector('a.btn-skip').style.display = 'none';
   }
 });
 
 async function saveSettings() {
-  const languages = [];
-  document.querySelectorAll('input[type=checkbox][id^="lang-"]').forEach(cb => {
-    if (cb.checked) languages.push(cb.value);
-  });
+  const childNameVal = document.getElementById('child-name').value.trim();
+  if (!childNameVal) {
+    alert("Please enter the child's name!");
+    return;
+  }
+
+  const selectedLang = document.querySelector('input[name="language"]:checked');
+  if (!selectedLang) {
+    alert('Please select a language!');
+    return;
+  }
 
   const categories = [];
   document.querySelectorAll('.cat-checkbox').forEach(cb => {
     if (cb.checked) categories.push(cb.value);
   });
-
-  if (languages.length === 0) {
-    alert('Please select at least one language!');
-    return;
-  }
   if (categories.length === 0) {
     alert('Please select at least one category!');
     return;
   }
 
   const config = {
-    child_name: document.getElementById('child-name').value.trim() || 'Myra',
-    languages,
+    child_name: childNameVal,
+    languages: [selectedLang.value],
     categories,
     show_romanized: document.getElementById('show-romanized').checked,
     similarity_threshold: parseInt(document.getElementById('similarity-threshold').value),
     max_attempts: parseInt(document.getElementById('max-attempts').value),
+    setup_complete: true,
   };
 
   const resp = await fetch('/api/config', {
@@ -189,10 +203,10 @@ async function saveSettings() {
   });
 
   if (resp.ok) {
-    sessionStorage.setItem(CONFIG_KEY, JSON.stringify(config));
+    localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
     const fb = document.getElementById('save-feedback');
     fb.classList.remove('hidden');
-    setTimeout(() => fb.classList.add('hidden'), 2500);
+    setTimeout(() => { fb.classList.add('hidden'); window.location.href = '/'; }, 1500);
   } else {
     alert('Save failed – check the server console.');
   }
