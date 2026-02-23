@@ -68,7 +68,16 @@ function randomMsg(key) {
 }
 
 // ── Init ──────────────────────────────────────────────
+const CONFIG_KEY = 'myra_config';
+
 async function init() {
+  // Redirect new users (no saved config) to settings so they configure the app first
+  const stored = localStorage.getItem(CONFIG_KEY);
+  if (!stored || !JSON.parse(stored).setup_complete) {
+    window.location.href = '/settings';
+    return;
+  }
+
   state.config = await fetchConfig();
   state.maxAttempts = state.config.max_attempts ?? 3;
 
@@ -80,20 +89,18 @@ async function init() {
   await loadNextWord();
 }
 
-const CONFIG_KEY = 'myra_config';
-
 async function fetchConfig() {
-  const defaults = { languages: ['telugu', 'assamese'], categories: ['animals', 'colors', 'body_parts', 'numbers', 'food', 'common_objects'], child_name: 'Myra', show_romanized: true, similarity_threshold: 50, max_attempts: 3 };
+  const defaults = { languages: ['telugu'], categories: ['animals', 'colors', 'body_parts', 'numbers', 'food', 'common_objects'], child_name: '', show_romanized: true, similarity_threshold: 50, max_attempts: 3 };
   try {
     const resp = await fetch('/api/config');
     const serverDefaults = await resp.json();
-    const stored = sessionStorage.getItem(CONFIG_KEY);
+    const stored = localStorage.getItem(CONFIG_KEY);
     if (stored) {
       return { ...serverDefaults, ...JSON.parse(stored) };
     }
     return serverDefaults;
   } catch {
-    const stored = sessionStorage.getItem(CONFIG_KEY);
+    const stored = localStorage.getItem(CONFIG_KEY);
     if (stored) return { ...defaults, ...JSON.parse(stored) };
     return defaults;
   }
