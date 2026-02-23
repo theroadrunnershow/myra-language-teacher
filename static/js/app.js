@@ -192,7 +192,7 @@ async function playPromptThenRecord() {
   const { translation, language } = state.currentWord;
 
   setBubble(`${childName}, repeat after me! 🎤`);
-  animateDino('talk');
+  animateDino('ask');
 
   try {
     // 1. Play "<Name>, repeat after me!" in English
@@ -231,6 +231,16 @@ function playAudioUrl(url) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// Play a short reaction sound ("yaaaaay" / "beeeep") with lip-sync
+function playReaction(text) {
+  const teeth = els.dinoTeeth;
+  teeth.style.display = 'block';
+  animateMouth(true);
+  const done = () => { animateMouth(false); teeth.style.display = 'none'; };
+  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`)
+    .then(done).catch(done);
 }
 
 // Schedule a transition (next word, retry, etc.). IDs stored so Stop can cancel them.
@@ -406,6 +416,7 @@ function handleResult(result) {
     els.wordCard.classList.add('correct-flash');
     launchConfetti();
     setBubble(randomMsg('correct'));
+    playReaction('yaaaaay');
 
     // Move to next word after a short delay (cancelled if Stop pressed)
     scheduleTransition(nextWord, 2200);
@@ -423,6 +434,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble("Good try! Let's move on. 🌟");
+    playReaction('beeeep');
 
     scheduleTransition(nextWord, 3000);
 
@@ -436,6 +448,7 @@ function handleResult(result) {
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
     setBubble(randomMsg('wrong'));
+    playReaction('beeeep');
 
     // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
     scheduleTransition(() => {
@@ -512,7 +525,7 @@ function updateDots(index, correct) {
 // ── Dino animations ───────────────────────────────────
 function animateDino(state_name) {
   const svg = els.dinoSvg;
-  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk');
+  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk', 'dino-ask');
 
   const teeth = els.dinoTeeth;
 
@@ -522,6 +535,11 @@ function animateDino(state_name) {
     setTimeout(() => { teeth.style.display = 'none'; }, 1600);
   } else if (state_name === 'shake') {
     svg.classList.add('dino-shake');
+  } else if (state_name === 'ask') {
+    // Dino turns to face the toddler and asks the question
+    svg.classList.add('dino-ask');
+    teeth.style.display = 'block';
+    animateMouth(true);
   } else if (state_name === 'talk') {
     svg.classList.add('dino-talk');
     teeth.style.display = 'block';

@@ -9,3 +9,9 @@ config.json
 
 # Environment variables (secrets)
 .env
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
