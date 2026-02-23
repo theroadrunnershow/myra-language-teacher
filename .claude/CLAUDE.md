@@ -10,14 +10,6 @@ A toddler-friendly web app that teaches Telugu and Assamese to Myra (age 4) thro
 - **Fuzzy matching**: rapidfuzz `token_sort_ratio`, threshold configurable in settings
 - **Frontend**: Vanilla HTML/CSS/JS + Jinja2 templates
 
-## AWS Infrastructure (infra/)
-- **Region**: us-west-2
-- **Prefix**: dino-app (all resources named dino-app-*)
-- ECS Fargate (1 vCPU, 3 GB RAM) behind ALB behind CloudFront + WAF
-- Nightly scale-to-zero: 8 PM PST off, 7:30 AM PST on
-- Budget kill-switch: $40 warning email, $50 Lambda scales ECS to 0
-- State backend: S3 bucket `dino-app-tfstate` with native locking
-
 ## Running Locally
 ```bash
 source venv/bin/activate
