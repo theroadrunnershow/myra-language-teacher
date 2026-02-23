@@ -6,3 +6,9 @@ venv/
 
 # Local config (settings now in browser sessionStorage for multi-user hosting)
 config.json
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
