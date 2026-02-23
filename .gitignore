@@ -15,3 +15,7 @@ __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+
+# Terraform working directory and build artifacts
+infra/.terraform/
+infra/lambda/*.zip
