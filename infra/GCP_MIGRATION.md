@@ -100,8 +100,8 @@ export GOOGLE_APPLICATION_CREDENTIALS=~/terraform-gcp-key.json
 
 ### 1.5 Create GCS Bucket for Terraform State
 ```bash
-gsutil mb -p $PROJECT_ID -l us-west1 gs://myra-tfstate/
-gsutil versioning set on gs://myra-tfstate/
+gsutil mb -p $PROJECT_ID -l us-west1 gs://myra-language-teacher-tfstate/
+gsutil versioning set on gs://myra-language-teacher-tfstate/
 ```
 
 ---
@@ -141,10 +141,10 @@ Replace all existing `infra/*.tf` files. The new structure is simpler — 9 file
 gcloud auth configure-docker us-west1-docker.pkg.dev
 
 # Build image
-docker build -t us-west1-docker.pkg.dev/$PROJECT_ID/myra/dino-app:latest .
+docker build -t us-west1-docker.pkg.dev/$PROJECT_ID/myra-language-teacher/dino-app:latest .
 
 # Push to Artifact Registry
-docker push us-west1-docker.pkg.dev/$PROJECT_ID/myra/dino-app:latest
+docker push us-west1-docker.pkg.dev/$PROJECT_ID/myra-language-teacher/dino-app:latest
 ```
 
 ---

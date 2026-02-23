@@ -13,8 +13,8 @@ terraform {
   }
 
   backend "gcs" {
-    bucket = "myra-tfstate"
-    prefix = "myra/terraform.tfstate"
+    bucket = "myra-language-teacher-tfstate"
+    prefix = "myra-language-teacher/terraform.tfstate"
   }
 }
 

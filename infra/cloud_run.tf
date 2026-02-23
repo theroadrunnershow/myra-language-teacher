@@ -12,7 +12,7 @@ resource "google_cloud_run_v2_service" "app" {
     }
 
     containers {
-      image = "${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app:latest"
+      image = "${var.region}-docker.pkg.dev/${var.project_id}/myra-language-teacher/dino-app:latest"
 
       ports {
         container_port = 8000
