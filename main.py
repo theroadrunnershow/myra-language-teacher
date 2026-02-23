@@ -95,9 +95,9 @@ async def api_get_word(
 
 # ── API: TTS ──────────────────────────────────────────────────────────────────
 @app.get("/api/tts")
-async def api_tts(text: str, language: str = "telugu"):
+async def api_tts(text: str, language: str = "telugu", slow: bool = False):
     try:
-        audio_bytes = await generate_tts(text, language)
+        audio_bytes = await generate_tts(text, language, slow)
         return StreamingResponse(
             io.BytesIO(audio_bytes),
             media_type="audio/mpeg",
