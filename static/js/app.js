@@ -151,7 +151,7 @@ async function playWord() {
   stopExistingAudio();
 
   const { translation, language } = state.currentWord;
-  const url = `/api/tts?text=${encodeURIComponent(translation)}&language=${language}`;
+  const url = `/api/tts?text=${encodeURIComponent(translation)}&language=${language}&slow=true`;
 
   setBubble("Listen carefully! 👂");
   animateDino('talk');
@@ -203,7 +203,7 @@ async function playPromptThenRecord() {
     await sleep(350);
 
     // 3. Play the target-language word
-    await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}`);
+    await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}&slow=true`);
 
     // 4. Short gap, then start recording
     await sleep(500);
@@ -219,10 +219,11 @@ async function playPromptThenRecord() {
 }
 
 // ── Helpers ───────────────────────────────────────────
-function playAudioUrl(url) {
+function playAudioUrl(url, playbackRate = 1.0) {
   return new Promise((resolve, reject) => {
     const audio = new Audio(url);
     state.ttsAudio = audio;
+    audio.playbackRate = playbackRate;
     audio.addEventListener('ended', resolve);
     audio.addEventListener('error', reject);
     audio.play().catch(reject);
@@ -233,13 +234,16 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Play a short reaction sound ("yaaaaay" / "beeeep") with lip-sync
+// Play a short reaction sound ("yaaaaay" / "beeeep") with lip-sync.
+// "yaaaaay" plays faster/higher-pitched (excited); "beeeep" plays slower/lower-pitched (sad).
 function playReaction(text) {
   const teeth = els.dinoTeeth;
   teeth.style.display = 'block';
   animateMouth(true);
   const done = () => { animateMouth(false); teeth.style.display = 'none'; };
-  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`)
+  const isCorrect = text.startsWith('y');
+  const playbackRate = isCorrect ? 1.35 : 0.78;
+  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`, playbackRate)
     .then(done).catch(done);
 }
 
