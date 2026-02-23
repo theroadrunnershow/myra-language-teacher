@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -11,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 
 from speech_service import recognize_speech
 from tts_service import generate_tts
+import reachy_service
 from words_db import ALL_CATEGORIES, WORD_DATABASE, get_random_word
 
 logging.basicConfig(level=logging.INFO)
@@ -38,6 +40,10 @@ DEFAULT_CONFIG = {
     "show_romanized": True,
     "similarity_threshold": 50,  # % match required
     "max_attempts": 3,
+    # Reachy Mini robot integration
+    "reachy_enabled": False,
+    "reachy_host": "reachy.local",
+    "reachy_username": "bedrock",
 }
 
 
@@ -159,6 +165,88 @@ async def api_all_words(
                         "category": cat,
                     })
     return result
+
+
+# ── API: Reachy Mini robot ────────────────────────────────────────────────────
+
+class ReachyConnectRequest(dict):
+    pass
+
+
+@app.post("/api/reachy/connect")
+async def api_reachy_connect(request: Request):
+    """Connect to Reachy Mini robot. Body: {host, username, password}."""
+    body = await request.json()
+    host = body.get("host", "reachy.local")
+    username = body.get("username", "bedrock")
+    password = body.get("password", "bedrock")
+
+    if not host:
+        raise HTTPException(status_code=400, detail="Robot host/IP is required.")
+
+    status = await reachy_service.connect(host, username=username, password=password)
+    return status
+
+
+@app.post("/api/reachy/disconnect")
+async def api_reachy_disconnect():
+    """Disconnect from Reachy Mini robot."""
+    await reachy_service.disconnect()
+    return {"status": "disconnected"}
+
+
+@app.get("/api/reachy/status")
+async def api_reachy_status():
+    """Return current robot connection status."""
+    return reachy_service.get_status()
+
+
+@app.post("/api/reachy/tts")
+async def api_reachy_tts(request: Request):
+    """
+    Generate TTS audio and play it through the robot's speaker.
+    Body: {text, language}
+    Returns: {ok, duration_ms} – frontend uses duration_ms to time its next action.
+    """
+    body = await request.json()
+    text = body.get("text", "")
+    language = body.get("language", "english")
+
+    if not text:
+        raise HTTPException(status_code=400, detail="'text' is required.")
+
+    try:
+        audio_bytes = await generate_tts(text, language)
+    except Exception as exc:
+        logger.error("TTS generation for Reachy failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"TTS failed: {exc}")
+
+    ok = await reachy_service.play_audio_on_robot(audio_bytes, mime_type="audio/mpeg")
+
+    # Estimate playback duration: ~150 bytes/ms for MP3 at 32 kbps (gTTS default)
+    estimated_ms = max(1000, int(len(audio_bytes) / 150))
+
+    return {"ok": ok, "duration_ms": estimated_ms, "bytes": len(audio_bytes)}
+
+
+@app.post("/api/reachy/dance")
+async def api_reachy_dance(request: Request):
+    """
+    Trigger a robot dance.
+    Body: {type: "celebrate" | "sad"}
+    The dance runs asynchronously (fire-and-forget) so this returns immediately.
+    """
+    body = await request.json()
+    dance_type = body.get("type", "celebrate")
+
+    if dance_type == "celebrate":
+        asyncio.create_task(reachy_service.celebration_dance())
+    elif dance_type == "sad":
+        asyncio.create_task(reachy_service.sad_dance())
+    else:
+        raise HTTPException(status_code=400, detail="type must be 'celebrate' or 'sad'")
+
+    return {"status": "dance_started", "type": dance_type}
 
 
 if __name__ == "__main__":
