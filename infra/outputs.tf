@@ -1,34 +1,43 @@
 output "app_url" {
-  description = "App URL — share this with your family!"
-  value       = "https://${aws_cloudfront_distribution.main.domain_name}"
+  description = "App URL via Global HTTPS Load Balancer — share this with your family!"
+  value       = "https://${google_compute_global_address.app.address}.nip.io"
 }
 
-output "ecr_repository_url" {
-  description = "ECR repository URL — used in deploy/build-push.sh"
-  value       = aws_ecr_repository.app.repository_url
+output "cloud_run_url" {
+  description = "Direct Cloud Run URL (no CDN/WAF — use for testing only)"
+  value       = google_cloud_run_v2_service.app.uri
 }
 
-output "alb_dns_name" {
-  description = "ALB DNS (internal — only reachable from CloudFront IPs)"
-  value       = aws_lb.main.dns_name
+output "registry_url" {
+  description = "Artifact Registry URL — used for docker push"
+  value       = "${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app"
 }
 
-output "ecs_cluster_name" {
-  description = "ECS cluster name"
-  value       = aws_ecs_cluster.main.name
+output "cloud_run_service_name" {
+  description = "Cloud Run service name"
+  value       = google_cloud_run_v2_service.app.name
 }
 
-output "ecs_service_name" {
-  description = "ECS service name"
-  value       = aws_ecs_service.app.name
+output "cloud_run_region" {
+  description = "Cloud Run region"
+  value       = var.region
 }
 
-output "cloudwatch_logs_url" {
-  description = "CloudWatch Logs URL for ECS container logs"
-  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#logsV2:log-groups/log-group/%2Fecs%2F${var.prefix}"
+output "logs_url" {
+  description = "GCP Cloud Logging URL for Cloud Run logs"
+  value       = "https://console.cloud.google.com/run/detail/${var.region}/${google_cloud_run_v2_service.app.name}/logs?project=${var.project_id}"
 }
 
 output "restart_command" {
-  description = "Run this to restart the app after a budget kill or manual scale-to-zero"
-  value       = "aws ecs update-service --region ${var.aws_region} --cluster ${aws_ecs_cluster.main.name} --service ${aws_ecs_service.app.name} --desired-count 1"
+  description = "Run this to re-enable Cloud Run after a budget kill-switch"
+  value       = "gcloud run services update ${google_cloud_run_v2_service.app.name} --region=${var.region} --max-instances=${var.max_instances} --project=${var.project_id}"
+}
+
+output "docker_push_command" {
+  description = "Commands to build and push the Docker image"
+  value       = <<-EOT
+    gcloud auth configure-docker ${var.region}-docker.pkg.dev
+    docker build -t ${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app:latest .
+    docker push ${var.region}-docker.pkg.dev/${var.project_id}/myra/dino-app:latest
+  EOT
 }

@@ -1,94 +1,120 @@
-# ── SNS topic for budget alerts ───────────────────────────────────────────────
-resource "aws_sns_topic" "budget_alerts" {
-  name = "${var.prefix}-budget-alerts"
+# Billing budget + Pub/Sub + Cloud Functions kill-switch
+# Mirrors the AWS Budgets + SNS + Lambda pattern:
+#   $40 (80%) → email warning
+#   $50 (100%) → email + Cloud Function scales Cloud Run to 0
+
+# ── Pub/Sub topic for budget alerts ──────────────────────────────────────────
+resource "google_pubsub_topic" "budget_alerts" {
+  name = "dino-app-budget-alerts"
 }
 
-resource "aws_sns_topic_policy" "budget_alerts" {
-  arn = aws_sns_topic.budget_alerts.arn
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Sid    = "AllowBudgetsPublish"
-      Effect = "Allow"
-      Principal = {
-        Service = "budgets.amazonaws.com"
-      }
-      Action   = "SNS:Publish"
-      Resource = aws_sns_topic.budget_alerts.arn
-    }]
-  })
-}
-
-resource "aws_sns_topic_subscription" "email" {
-  topic_arn = aws_sns_topic.budget_alerts.arn
-  protocol  = "email"
-  endpoint  = var.alert_email
-}
-
-# ── Lambda kill-switch ────────────────────────────────────────────────────────
-data "archive_file" "kill_ecs" {
+# ── Cloud Function kill-switch ────────────────────────────────────────────────
+data "archive_file" "kill_run" {
   type        = "zip"
-  source_file = "${path.module}/lambda/kill_ecs.py"
-  output_path = "${path.module}/lambda/kill_ecs.zip"
+  source_file = "${path.module}/lambda/kill_run.py"
+  output_path = "${path.module}/lambda/kill_run.zip"
 }
 
-resource "aws_lambda_function" "kill_ecs" {
-  filename         = data.archive_file.kill_ecs.output_path
-  source_code_hash = data.archive_file.kill_ecs.output_base64sha256
+resource "google_storage_bucket" "functions" {
+  name                        = "${var.project_id}-functions"
+  location                    = var.region
+  uniform_bucket_level_access = true
+  force_destroy               = true
+}
 
-  function_name = "${var.prefix}-kill-ecs"
-  role          = aws_iam_role.kill_lambda.arn
-  handler       = "kill_ecs.handler"
-  runtime       = "python3.11"
-  timeout       = 30
+resource "google_storage_bucket_object" "kill_run" {
+  name   = "kill_run_${data.archive_file.kill_run.output_md5}.zip"
+  bucket = google_storage_bucket.functions.name
+  source = data.archive_file.kill_run.output_path
+}
 
-  environment {
-    variables = {
-      ECS_CLUSTER = aws_ecs_cluster.main.name
-      ECS_SERVICE = aws_ecs_service.app.name
-      ECS_REGION  = var.aws_region
+resource "google_cloudfunctions2_function" "kill_run" {
+  name     = "dino-app-kill-run"
+  location = var.region
+
+  build_config {
+    runtime     = "python311"
+    entry_point = "handler"
+
+    source {
+      storage_source {
+        bucket = google_storage_bucket.functions.name
+        object = google_storage_bucket_object.kill_run.name
+      }
     }
   }
-}
 
-resource "aws_sns_topic_subscription" "kill_lambda" {
-  topic_arn = aws_sns_topic.budget_alerts.arn
-  protocol  = "lambda"
-  endpoint  = aws_lambda_function.kill_ecs.arn
-}
+  service_config {
+    min_instance_count    = 0
+    max_instance_count    = 1
+    available_memory      = "256M"
+    timeout_seconds       = 30
+    service_account_email = google_service_account.kill_run.email
 
-resource "aws_lambda_permission" "sns_invoke" {
-  statement_id  = "AllowSNSInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.kill_ecs.function_name
-  principal     = "sns.amazonaws.com"
-  source_arn    = aws_sns_topic.budget_alerts.arn
-}
-
-# ── Budget: $50/month hard cap ────────────────────────────────────────────────
-resource "aws_budgets_budget" "monthly" {
-  name         = "${var.prefix}-monthly-budget"
-  budget_type  = "COST"
-  limit_amount = tostring(var.budget_limit)
-  limit_unit   = "USD"
-  time_unit    = "MONTHLY"
-
-  # $40 warning (80%) — email only
-  notification {
-    comparison_operator        = "GREATER_THAN"
-    threshold                  = 80
-    threshold_type             = "PERCENTAGE"
-    notification_type          = "ACTUAL"
-    subscriber_email_addresses = [var.alert_email]
+    environment_variables = {
+      CLOUD_RUN_SERVICE = google_cloud_run_v2_service.app.name
+      CLOUD_RUN_REGION  = var.region
+      GCP_PROJECT       = var.project_id
+    }
   }
 
-  # $50 kill (100%) — SNS triggers email + Lambda kill-switch
-  notification {
-    comparison_operator       = "GREATER_THAN"
-    threshold                 = 100
-    threshold_type            = "PERCENTAGE"
-    notification_type         = "ACTUAL"
-    subscriber_sns_topic_arns = [aws_sns_topic.budget_alerts.arn]
+  event_trigger {
+    trigger_region = var.region
+    event_type     = "google.cloud.pubsub.topic.v1.messagePublished"
+    pubsub_topic   = google_pubsub_topic.budget_alerts.id
+    retry_policy   = "RETRY_POLICY_RETRY"
+  }
+}
+
+resource "google_service_account" "kill_run" {
+  account_id   = "dino-app-kill-run"
+  display_name = "Dino App Kill-Switch Function"
+}
+
+resource "google_project_iam_member" "kill_run_cloud_run" {
+  project = var.project_id
+  role    = "roles/run.admin"
+  member  = "serviceAccount:${google_service_account.kill_run.email}"
+}
+
+resource "google_project_iam_member" "kill_run_logs" {
+  project = var.project_id
+  role    = "roles/logging.logWriter"
+  member  = "serviceAccount:${google_service_account.kill_run.email}"
+}
+
+# ── Billing budget ─────────────────────────────────────────────────────────────
+resource "google_billing_budget" "monthly" {
+  billing_account = data.google_project.project.billing_account
+  display_name    = "dino-app-monthly-budget"
+
+  budget_filter {
+    projects = ["projects/${data.google_project.project.number}"]
+  }
+
+  amount {
+    specified_amount {
+      currency_code = "USD"
+      units         = tostring(var.budget_limit)
+    }
+  }
+
+  # 80% ($40) — email warning only
+  threshold_rules {
+    threshold_percent = 0.8
+    spend_basis       = "CURRENT_SPEND"
+  }
+
+  # 100% ($50) — triggers Pub/Sub → Cloud Function kill-switch
+  threshold_rules {
+    threshold_percent = 1.0
+    spend_basis       = "CURRENT_SPEND"
+  }
+
+  all_updates_rule {
+    pubsub_topic                     = google_pubsub_topic.budget_alerts.id
+    schema_version                   = "1.0"
+    monitoring_notification_channels = []
+    disable_default_iam_recipients   = false
   }
 }
