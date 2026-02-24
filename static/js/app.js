@@ -595,7 +595,7 @@ function stopRecording() {
 function setRecordingUI(recording) {
   if (recording) {
     els.btnRecord.classList.add('recording');
-    els.btnRecord.textContent = '⏹ Stop';
+    els.btnRecord.textContent = '⏹ Stop Mic';
     els.btnRecord.onclick = stopRecording;
     els.recIndicator.classList.remove('hidden');
     els.btnPlay.disabled = true;
