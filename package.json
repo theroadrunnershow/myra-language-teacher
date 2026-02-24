@@ -1,0 +1,19 @@
+{
+  "name": "myra-language-teacher",
+  "version": "1.0.0",
+  "description": "Toddler language learning app — teaches Telugu and Assamese with Roo the dino",
+  "private": true,
+  "scripts": {
+    "cap:sync": "npx cap sync",
+    "cap:ios": "npx cap open ios",
+    "cap:build": "npx cap sync ios",
+    "cap:add-ios": "npx cap add ios && npx cap sync"
+  },
+  "dependencies": {
+    "@capacitor/core": "^6.0.0",
+    "@capacitor/ios": "^6.0.0"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^6.0.0"
+  }
+}
