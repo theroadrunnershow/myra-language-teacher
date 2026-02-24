@@ -1,6 +1,6 @@
 output "app_url" {
   description = "App URL via Global HTTPS Load Balancer — share this with your family!"
-  value       = "https://${google_compute_global_address.app.address}.nip.io"
+  value       = var.domain != "" ? "https://${var.domain}" : "https://${google_compute_global_address.app.address}.nip.io"
 }
 
 output "cloud_run_url" {

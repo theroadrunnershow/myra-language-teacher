@@ -74,7 +74,7 @@ resource "google_compute_managed_ssl_certificate" "app" {
   name = "dino-app-cert"
 
   managed {
-    domains = ["${google_compute_global_address.app.address}.nip.io"]
+    domains = var.domain != "" ? [var.domain] : ["${google_compute_global_address.app.address}.nip.io"]
   }
 }
 

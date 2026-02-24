@@ -43,3 +43,9 @@ variable "budget_limit" {
   type        = number
   default     = 50
 }
+
+variable "domain" {
+  description = "Custom domain name (e.g. myra-language-teacher.ai) — leave empty to use nip.io fallback"
+  type        = string
+  default     = ""
+}
