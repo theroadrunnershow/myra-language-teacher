@@ -150,6 +150,14 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
             if NOISE_REDUCTION_ENABLED:
                 audio = _reduce_noise(audio)
 
+            # Whisper needs at least 1 second of audio; pad with silence if shorter
+            # to avoid "reshape tensor of 0 elements" crash on very short recordings
+            MIN_DURATION_MS = 1000
+            if len(audio) < MIN_DURATION_MS:
+                logger.warning(f"Audio too short ({len(audio)}ms), padding to {MIN_DURATION_MS}ms")
+                silence = AudioSegment.silent(duration=MIN_DURATION_MS - len(audio), frame_rate=16000)
+                audio = audio + silence
+
             audio.export(tmp_wav_path, format="wav")
             logger.info(f"WAV written: {tmp_wav_path}  duration={len(audio)/1000:.1f}s")
         finally:
