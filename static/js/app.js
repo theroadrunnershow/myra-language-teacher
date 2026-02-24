@@ -190,7 +190,7 @@ let _audioCtx = null;
 
 function getAudioCtx() {
   if (!_audioCtx) {
-    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    _audioCtx = new (window.AudioContext || window['webkitAudioContext'])();
   }
   if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
   return _audioCtx;
@@ -349,6 +349,7 @@ async function init() {
 
   if (state.config.child_name) {
     els.childTitle.textContent = `🦕 ${state.config.child_name} Learns!`;
+    document.title = `${state.config.child_name} Learns Languages 🦕`;
   }
 
   resetDots();
