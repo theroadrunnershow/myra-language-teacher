@@ -17,6 +17,10 @@ data "archive_file" "kill_run" {
     content  = file("${path.module}/lambda/kill_run.py")
     filename = "main.py"
   }
+  source {
+    content  = file("${path.module}/lambda/requirements.txt")
+    filename = "requirements.txt"
+  }
 }
 
 resource "google_storage_bucket" "functions" {
