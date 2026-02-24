@@ -30,7 +30,7 @@ ROMAN_KEYS = {"telugu": "tel_roman", "assamese": "asm_roman"}
 
 class TestDatabaseIntegrity:
     def test_all_categories_present(self):
-        expected = {"animals", "colors", "body_parts", "numbers", "food", "common_objects"}
+        expected = {"animals", "colors", "body_parts", "numbers", "food", "common_objects", "verbs"}
         assert set(ALL_CATEGORIES) == expected
 
     def test_every_word_has_required_keys(self):

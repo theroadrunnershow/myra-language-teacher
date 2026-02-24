@@ -149,6 +149,80 @@ main {
   70%       { transform: scaleX(-1) translateY(-4px) rotate(1deg); }
 }
 
+/* ── NEW: Head tilt (curious expression on first wrong) ── */
+@keyframes dino-tilt {
+  0%   { transform: rotate(0deg); }
+  20%  { transform: rotate(8deg); }
+  75%  { transform: rotate(8deg); }
+  100% { transform: rotate(0deg); }
+}
+.dino-tilt { animation: dino-tilt 0.85s ease-in-out forwards !important; }
+
+/* ── NEW: Tail wag during celebrate ── */
+@keyframes tailwag {
+  0%, 100% { transform: rotate(0deg); }
+  30%      { transform: rotate(-14deg); }
+  70%      { transform: rotate(14deg); }
+}
+#dino-svg.dino-celebrate #dino-tail {
+  transform-box: fill-box;
+  transform-origin: right bottom;
+  animation: tailwag 0.45s ease-in-out 5;
+}
+
+/* ── NEW: Sparkle particles around dino ── */
+.sparkle {
+  position: absolute;
+  font-size: 1.4rem;
+  pointer-events: none;
+  animation: sparkle-burst 0.75s ease-out forwards;
+  z-index: 20;
+  user-select: none;
+}
+@keyframes sparkle-burst {
+  0%   { opacity: 1; transform: scale(0) translateY(0); }
+  45%  { opacity: 1; transform: scale(1.4) translateY(-18px); }
+  100% { opacity: 0; transform: scale(0.7) translateY(-42px); }
+}
+
+/* ── NEW: Streak display badge ── */
+.streak-display {
+  background: linear-gradient(135deg, #FF69B4, #FF1493);
+  color: white;
+  font-family: var(--font-title);
+  font-size: 1.1rem;
+  padding: 0.4rem 1.4rem;
+  border-radius: 30px;
+  box-shadow: 0 4px 12px rgba(255,20,147,0.35);
+  letter-spacing: 0.5px;
+  text-align: center;
+}
+.streak-display.streak-pop {
+  animation: streak-bounce 0.4s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+@keyframes streak-bounce {
+  0%   { transform: scale(0.6); }
+  100% { transform: scale(1); }
+}
+
+/* ── NEW: Star pop (+1 ⭐) ── */
+.star-pop {
+  position: fixed;
+  font-family: var(--font-title);
+  font-size: 1.5rem;
+  color: var(--yellow);
+  font-weight: 900;
+  text-shadow: 0 2px 6px rgba(0,0,0,0.25);
+  pointer-events: none;
+  z-index: 1000;
+  animation: star-float 1.1s ease-out forwards;
+}
+@keyframes star-float {
+  0%   { opacity: 1; transform: translateY(0) scale(0.7); }
+  35%  { opacity: 1; transform: translateY(-22px) scale(1.25); }
+  100% { opacity: 0; transform: translateY(-65px) scale(0.9); }
+}
+
 /* ── Speech bubble ─────────────────────────────────── */
 .speech-bubble {
   position: absolute;

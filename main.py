@@ -108,6 +108,24 @@ async def api_tts(text: str, language: str = "telugu", slow: bool = False):
         raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
 
 
+# ── API: Roo dino voice lines (English TTS for character voice) ────────────────
+@app.get("/api/dino-voice")
+async def api_dino_voice(text: str, slow: bool = False):
+    """TTS for Roo's English voice lines. Strips leading/trailing whitespace."""
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="text parameter is required")
+    try:
+        audio_bytes = await generate_tts(text.strip(), "english", slow)
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "no-cache"},
+        )
+    except Exception as e:
+        logger.error(f"Dino voice TTS error: {e}")
+        raise HTTPException(status_code=500, detail=f"Dino voice failed: {e}")
+
+
 # ── API: speech recognition ───────────────────────────────────────────────────
 @app.post("/api/recognize")
 async def api_recognize(

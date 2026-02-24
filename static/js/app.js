@@ -1,5 +1,6 @@
 /* ═══════════════════════════════════════════════════════
    Myra Language Teacher – Frontend App
+   Roo UX v2: voice layer, Web Audio SFX, animations, streaks
 ═══════════════════════════════════════════════════════ */
 
 // ── State ─────────────────────────────────────────────
@@ -10,68 +11,333 @@ const state = {
   wordsAttempted: 0,
   attempts: 0,             // current word attempt count
   maxAttempts: 3,
+  streak: 0,               // consecutive correct answers
   isRecording: false,
   mediaRecorder: null,
   audioChunks: [],
   recTimerInterval: null,
-  ttsAudio: null,          // current playing Audio object
+  ttsAudio: null,          // current playing word-pronunciation Audio object
+  voiceAudio: null,        // current playing Roo voice-line Audio object
   pendingTimeoutIds: [],   // timeouts to clear when Stop is pressed
   stopRequested: false,    // true when Stop pressed; skips processAudio after recording
+  blinkTimerId: null,      // handle for the random blink scheduler
 };
 
 // ── DOM refs ──────────────────────────────────────────
 const $ = id => document.getElementById(id);
 
 const els = {
-  dinoWrapper:  $('dino-wrapper'),
-  dinoSvg:      $('dino-svg'),
+  dinoWrapper:    $('dino-wrapper'),
+  dinoSvg:        $('dino-svg'),
   dinoMouth:      $('dino-mouth'),
   dinoTeeth:      $('dino-teeth'),
   dinoMouthInner: $('dino-mouth-inner'),
-  bubble:       $('speech-bubble'),
-  bubbleText:   $('bubble-text'),
-  langBadge:    $('lang-badge'),
-  wordCard:     $('word-card'),
-  wordEmoji:    $('word-emoji'),
-  wordEnglish:  $('word-english'),
+  dinoEyelid:     $('dino-eyelid'),
+  bubble:         $('speech-bubble'),
+  bubbleText:     $('bubble-text'),
+  langBadge:      $('lang-badge'),
+  wordCard:       $('word-card'),
+  wordEmoji:      $('word-emoji'),
+  wordEnglish:    $('word-english'),
   wordTranslation: $('word-translation'),
-  wordRomanized: $('word-romanized'),
+  wordRomanized:  $('word-romanized'),
   feedbackBanner: $('feedback-banner'),
-  feedbackText:  $('feedback-text'),
-  dots:         [$('dot-1'), $('dot-2'), $('dot-3')],
-  btnPlay:      $('btn-play'),
-  btnRecord:    $('btn-record'),
-  btnSkip:      $('btn-skip'),
-  btnStop:      $('btn-stop'),
-  recIndicator: $('recording-indicator'),
-  recTimer:     $('rec-timer'),
-  scoreDisplay: $('score-display'),
-  wordsDisplay: $('words-display'),
-  confetti:     $('confetti-container'),
-  childTitle:   $('child-name-title'),
+  feedbackText:   $('feedback-text'),
+  dots:           [$('dot-1'), $('dot-2'), $('dot-3')],
+  btnPlay:        $('btn-play'),
+  btnRecord:      $('btn-record'),
+  btnSkip:        $('btn-skip'),
+  btnStop:        $('btn-stop'),
+  recIndicator:   $('recording-indicator'),
+  recTimer:       $('rec-timer'),
+  scoreDisplay:   $('score-display'),
+  wordsDisplay:   $('words-display'),
+  confetti:       $('confetti-container'),
+  childTitle:     $('child-name-title'),
+  streakDisplay:  $('streak-display'),
+  streakCount:    $('streak-count'),
 };
 
 // ── Dino speech messages ──────────────────────────────
+// 8+ lines per state. Emojis stripped before TTS so gTTS doesn't choke.
 const MESSAGES = {
-  idle:    ["Hi! Let's learn words! 🌟", "Ready to learn? 🦕", "Let's go! 🎉", "You can do it! 💪"],
-  prompt:  ["Can you say this? 🎤", "Now YOU try! 🌟", "Say it with me! 😊", "Your turn! 🎤"],
-  correct: ["Amazing! ⭐", "Yay!! 🎉", "Super! 🌟", "Brilliant! 🦕", "You're a star! ⭐"],
-  wrong:   ["Try again! 💪", "So close! 🤗", "Almost! Give it another go! 😊", "Keep trying! 🌟"],
-  skip:    ["Next word! Let's go! 🚀", "New word coming! 🌟", "Here we go again! 🦕"],
-  listen:  ["I'm listening… 👂", "Speak up! 🎤", "Go ahead! 🌟"],
-  stop:    ["Stopped. Ready when you are! 🌟", "Paused! Take your time. 🦕", "Whenever you're ready! 😊"],
+  idle: [
+    "Hi! Let's learn words! 🌟",
+    "Ready to learn? 🦕",
+    "Let's go! 🎉",
+    "You can do it! 💪",
+    "What an exciting word! 🦕",
+    "I love learning with you! 💕",
+    "Let's find out together! 🎯",
+    "Ooooh! Look at this one! 🌟",
+  ],
+  prompt: [
+    "Can you say this? 🎤",
+    "Now YOU try! 🌟",
+    "Say it with me! 😊",
+    "Your turn! 🎤",
+    "I believe in you! 💪",
+    "You've got this! 🌟",
+    "Ready? Let's go! 🚀",
+    "Give it your best! 🦕",
+  ],
+  correct: [
+    "Amazing! ⭐",
+    "Yay!! 🎉",
+    "Super! 🌟",
+    "Brilliant! 🦕",
+    "You're a star! ⭐",
+    "ROOOAR-mazing! 🦕",
+    "Incredible! 🌟",
+    "You did it!! 🎉",
+  ],
+  // Escalated celebrations based on which attempt succeeded
+  correct1: [
+    "ROOOAR-mazing! You did it! First try!",
+    "WHOOOOA! First try! You are incredible!",
+    "Yes! First try! I knew you could!",
+    "Wow! Perfect! You are a superstar!",
+  ],
+  correct2: [
+    "Yes! You kept trying and you got it! That is my Myra!",
+    "You did not give up! Amazing!",
+    "Second try! That is the spirit!",
+    "You persisted and won! Brilliant!",
+  ],
+  correct3: [
+    "You did not give up! That is the bravest thing ever!",
+    "Third time is the charm! You are incredible!",
+    "You never quit! That makes me SO happy!",
+    "Persistence wins! You are amazing!",
+  ],
+  streak3: [
+    "Three in a ROWWW! You are on fire!",
+    "Three words! Roo is so proud of you!",
+    "Hat trick! Three correct in a row!",
+  ],
+  streak5: [
+    "FIVE WORDS! You are unstoppable!",
+    "Five in a row! Someone get this kid a trophy!",
+    "Five words! Roo might actually explode from happy!",
+  ],
+  wrong: [
+    "Try again! 💪",
+    "So close! 🤗",
+    "Almost! Give it another go! 😊",
+    "Keep trying! 🌟",
+    "Oopsie! Close though! Let's try one more time!",
+    "Hmmm! I believe in you so much. One more?",
+    "You have almost got it! Let's try again!",
+    "So close! You will get it this time!",
+  ],
+  outOfAttempts: [
+    "Awww! It's a tricky one! You will get it next time!",
+    "That one is a toughie! But you will remember next time!",
+    "Great effort! You will get it next time, I promise!",
+  ],
+  skip: [
+    "Next word! Let's go! 🚀",
+    "New word coming! 🌟",
+    "Here we go again! 🦕",
+    "Ooh next one! Here it comes! Zoom!",
+    "On to the next adventure! 🚀",
+  ],
+  listen: [
+    "I'm listening! 👂",
+    "Speak up! 🎤",
+    "Go ahead! 🌟",
+    "I am all ears! Literally! Big ears!",
+    "Ready when you are! 🎤",
+    "Let me hear your voice! 🌟",
+  ],
+  stop: [
+    "Stopped. Ready when you are! 🌟",
+    "Paused! Take your time. 🦕",
+    "Whenever you're ready! 😊",
+    "No rush! I will wait! 🦕",
+    "Take a breath! I am here! 🌟",
+  ],
 };
+
+// Track last 2 used indices per key to prevent immediate repeats
+const _lastMsgIdx = {};
 
 function randomMsg(key) {
   const arr = MESSAGES[key];
-  return arr[Math.floor(Math.random() * arr.length)];
+  if (!arr || arr.length === 0) return '';
+  if (arr.length <= 2) return arr[Math.floor(Math.random() * arr.length)];
+  const last = _lastMsgIdx[key] || [];
+  let idx;
+  do { idx = Math.floor(Math.random() * arr.length); } while (last.includes(idx));
+  _lastMsgIdx[key] = [...last.slice(-1), idx];
+  return arr[idx];
+}
+
+// Strip emoji characters so gTTS doesn't choke on them
+function stripEmoji(text) {
+  return text
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu, '')
+    .replace(/[\u{2600}-\u{27FF}]/gu, '')
+    .replace(/[\u{FE00}-\u{FEFF}]/gu, '')
+    .replace(/[⭐✨💫🌟🦕🎉💪😊🎤👂🚀💕🎯🔥🤗]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// ── Web Audio API – synthesised SFX ───────────────────
+// All sounds are generated programmatically (no audio files needed).
+let _audioCtx = null;
+
+function getAudioCtx() {
+  if (!_audioCtx) {
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  }
+  if (_audioCtx.state === 'suspended') _audioCtx.resume().catch(() => {});
+  return _audioCtx;
+}
+
+function playTone(freq, durationSec, type = 'sine', peakGain = 0.22) {
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = type;
+    osc.frequency.value = freq;
+    gain.gain.setValueAtTime(0, ctx.currentTime);
+    gain.gain.linearRampToValueAtTime(peakGain, ctx.currentTime + 0.03);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + durationSec);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + durationSec + 0.01);
+  } catch (_) { /* AudioContext unavailable */ }
+}
+
+// D5 marimba pop – fires on every button press
+function playButtonTap() {
+  playTone(587, 0.08, 'sine', 0.10);
+}
+
+// G4 → B4 rising "doo-doot" – fires when a new word card appears
+function playWordReveal() {
+  playTone(392, 0.14, 'sine', 0.16);
+  setTimeout(() => playTone(494, 0.18, 'sine', 0.16), 160);
+}
+
+// E4 → G4 → B4 staccato – fires while waiting for Whisper result
+function playProcessingSound() {
+  [330, 392, 494].forEach((freq, i) => {
+    setTimeout(() => playTone(freq, 0.09, 'sine', 0.12), i * 150);
+  });
+}
+
+// B3 → A3 descending tone – soft "aw shucks" for wrong answer
+function playBeepSound() {
+  try {
+    const ctx = getAudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(247, ctx.currentTime);
+    osc.frequency.linearRampToValueAtTime(220, ctx.currentTime + 0.42);
+    gain.gain.setValueAtTime(0.18, ctx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.52);
+    osc.start(ctx.currentTime);
+    osc.stop(ctx.currentTime + 0.56);
+  } catch (_) { /* AudioContext unavailable */ }
+}
+
+// C4 → E4 → G4 → C5 ascending arpeggio – correct answer fanfare
+function playYaaySound() {
+  [262, 330, 392, 523].forEach((freq, i) => {
+    setTimeout(() => playTone(freq, 0.2, 'sine', 0.20), i * 120);
+  });
+}
+
+// Higher-pitched arpeggio for streak milestones
+function playStreakSound(streakCount) {
+  const notes = streakCount >= 5
+    ? [392, 494, 587, 784]
+    : [330, 415, 494, 659];
+  notes.forEach((freq, i) => {
+    setTimeout(() => playTone(freq, 0.18, 'sine', 0.26), i * 100);
+  });
+}
+
+// ── Roo's voice lines (English TTS) ───────────────────
+// Fetches /api/dino-voice with the given text, plays it with mouth animation.
+// Silently no-ops during recording to avoid Whisper contamination.
+async function playDinoVoice(text) {
+  if (state.isRecording) return;
+
+  const clean = stripEmoji(text);
+  if (!clean.trim()) return;
+
+  // Stop any in-progress voice line
+  if (state.voiceAudio) {
+    state.voiceAudio.pause();
+    state.voiceAudio = null;
+  }
+
+  try {
+    const url = `/api/dino-voice?text=${encodeURIComponent(clean)}`;
+    const audio = new Audio(url);
+    state.voiceAudio = audio;
+
+    animateMouth(true);
+    els.dinoTeeth.style.display = 'block';
+
+    const done = () => {
+      state.voiceAudio = null;
+      if (!state.isRecording) {
+        animateMouth(false);
+        const svg = els.dinoSvg;
+        const stillSpeaking = svg.classList.contains('dino-talk') || svg.classList.contains('dino-ask');
+        if (!stillSpeaking) els.dinoTeeth.style.display = 'none';
+      }
+    };
+
+    audio.addEventListener('ended', done);
+    audio.addEventListener('error', done);
+    await audio.play();
+  } catch (e) {
+    console.warn('Dino voice failed:', e);
+    state.voiceAudio = null;
+    animateMouth(false);
+  }
+}
+
+// ── Blink timer ────────────────────────────────────────
+// Schedules random eye blinks every 3–7 s during idle.
+function blinkDino() {
+  const eyelid = els.dinoEyelid;
+  if (!eyelid || state.isRecording) return;
+  eyelid.setAttribute('ry', '22');
+  setTimeout(() => eyelid.setAttribute('ry', '0'), 150);
+}
+
+function startBlinkTimer() {
+  if (state.blinkTimerId) clearTimeout(state.blinkTimerId);
+  const delay = 3000 + Math.random() * 4000;
+  state.blinkTimerId = setTimeout(() => {
+    blinkDino();
+    startBlinkTimer();
+  }, delay);
+}
+
+function stopBlinkTimer() {
+  if (state.blinkTimerId) {
+    clearTimeout(state.blinkTimerId);
+    state.blinkTimerId = null;
+  }
 }
 
 // ── Init ──────────────────────────────────────────────
 const CONFIG_KEY = 'myra_config';
 
 async function init() {
-  // Redirect new users (no saved config) to settings so they configure the app first
   const stored = localStorage.getItem(CONFIG_KEY);
   if (!stored || !JSON.parse(stored).setup_complete) {
     window.location.href = '/settings';
@@ -86,6 +352,7 @@ async function init() {
   }
 
   resetDots();
+  startBlinkTimer();
   await loadNextWord();
 }
 
@@ -130,6 +397,7 @@ async function loadNextWord() {
   }
 
   displayWord(state.currentWord);
+  playWordReveal();
   setBubble(randomMsg('idle'));
   animateDino('idle');
 }
@@ -137,15 +405,15 @@ async function loadNextWord() {
 function displayWord(word) {
   const showRoman = state.config.show_romanized ?? true;
 
-  // Re-trigger card animation
+  // Re-trigger card slide-in animation
   els.wordCard.style.animation = 'none';
   void els.wordCard.offsetWidth;
   els.wordCard.style.animation = '';
 
-  els.wordEmoji.textContent     = word.emoji || '🌟';
-  els.wordEnglish.textContent   = word.english.toUpperCase();
+  els.wordEmoji.textContent      = word.emoji || '🌟';
+  els.wordEnglish.textContent    = word.english.toUpperCase();
   els.wordTranslation.textContent = word.translation;
-  els.wordRomanized.textContent = (showRoman && word.romanized) ? `(${word.romanized})` : '';
+  els.wordRomanized.textContent  = (showRoman && word.romanized) ? `(${word.romanized})` : '';
 
   const langLabel = word.language === 'telugu' ? 'Telugu 🌟' : 'Assamese 🌿';
   els.langBadge.textContent = langLabel;
@@ -169,7 +437,10 @@ async function playWord() {
 
     audio.addEventListener('ended', () => {
       animateDino('idle');
-      setBubble(randomMsg('prompt'));
+      const promptMsg = randomMsg('prompt');
+      setBubble(promptMsg);
+      // Roo voices the prompt (stripped of emoji)
+      playDinoVoice(promptMsg);
     });
 
     await audio.play();
@@ -185,9 +456,14 @@ function stopExistingAudio() {
     state.ttsAudio.currentTime = 0;
     state.ttsAudio = null;
   }
+  if (state.voiceAudio) {
+    state.voiceAudio.pause();
+    state.voiceAudio = null;
+  }
+  animateMouth(false);
 }
 
-// ── Prompt + record (plays "Name, repeat after me! <word>" then listens) ──
+// ── Prompt + record ────────────────────────────────────
 async function playPromptThenRecord() {
   if (state.isRecording) return;
   if (!state.currentWord) return;
@@ -206,13 +482,11 @@ async function playPromptThenRecord() {
     const promptText = `${childName}, repeat after me!`;
     await playAudioUrl(`/api/tts?text=${encodeURIComponent(promptText)}&language=english`);
 
-    // 2. Short pause between prompt and word
+    // 2. Short gap then the target-language word (slow for clarity)
     await sleep(350);
-
-    // 3. Play the target-language word
     await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}&slow=true`);
 
-    // 4. Short gap, then start recording
+    // 3. Gap then start recording
     await sleep(500);
     animateDino('idle');
     setBubble(randomMsg('listen'));
@@ -220,7 +494,6 @@ async function playPromptThenRecord() {
   } catch (e) {
     console.error('Prompt playback error:', e);
     animateDino('idle');
-    // Still try to record even if TTS failed
     startRecording();
   }
 }
@@ -241,20 +514,7 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-// Play a short reaction sound ("yaaaaay" / "beeeep") with lip-sync.
-// "yaaaaay" plays faster/higher-pitched (excited); "beeeep" plays slower/lower-pitched (sad).
-function playReaction(text) {
-  const teeth = els.dinoTeeth;
-  teeth.style.display = 'block';
-  animateMouth(true);
-  const done = () => { animateMouth(false); teeth.style.display = 'none'; };
-  const isCorrect = text.startsWith('y');
-  const playbackRate = isCorrect ? 1.35 : 0.78;
-  playAudioUrl(`/api/tts?text=${encodeURIComponent(text)}&language=english`, playbackRate)
-    .then(done).catch(done);
-}
-
-// Schedule a transition (next word, retry, etc.). IDs stored so Stop can cancel them.
+// Schedule a transition (next word, retry). IDs stored so Stop can cancel them.
 function scheduleTransition(fn, delayMs) {
   const id = setTimeout(() => {
     state.pendingTimeoutIds = state.pendingTimeoutIds.filter(x => x !== id);
@@ -270,6 +530,7 @@ async function startRecording() {
   if (state.stopRequested) return;
 
   stopExistingAudio();
+  stopBlinkTimer(); // Don't blink while listening
 
   let stream;
   try {
@@ -277,6 +538,7 @@ async function startRecording() {
   } catch (err) {
     setBubble("I can't hear you! 😢 Please allow microphone access.");
     alert('Microphone access denied. Please allow it in your browser settings.');
+    startBlinkTimer();
     return;
   }
 
@@ -297,6 +559,7 @@ async function startRecording() {
     stream.getTracks().forEach(t => t.stop());
     state.isRecording = false;
     setRecordingUI(false);
+    startBlinkTimer(); // Resume blinking
     if (state.stopRequested) {
       state.stopRequested = false;
       return;
@@ -360,14 +623,14 @@ async function processAudio() {
   console.log(`Sending audio: mimeType=${mimeType}, size=${audioBlob.size} bytes`);
 
   setBubble("Hmm, let me think… 🤔");
-  animateDino('think');
+  animateDino('idle');
+  playProcessingSound();
   showDebug('…thinking…', '', '');
 
-  // Pick a file extension that matches the mime type for the filename hint
   const ext = mimeType.includes('mp4') ? 'mp4'
-             : mimeType.includes('ogg') ? 'ogg'
-             : mimeType.includes('wav') ? 'wav'
-             : 'webm';
+            : mimeType.includes('ogg') ? 'ogg'
+            : mimeType.includes('wav') ? 'wav'
+            : 'webm';
 
   const formData = new FormData();
   formData.append('audio', audioBlob, `recording.${ext}`);
@@ -418,6 +681,13 @@ function handleResult(result) {
     state.score += 1;
     state.wordsAttempted += 1;
     updateScore();
+    updateStreak(true);
+
+    // Pick escalated celebration based on which attempt succeeded
+    const celebKey = state.attempts === 1 ? 'correct1'
+                   : state.attempts === 2 ? 'correct2'
+                   : 'correct3';
+    const celebMsg = randomMsg(celebKey);
 
     showFeedback(
       `🎉 ${randomMsg('correct')} You said: "${result.transcribed}"`,
@@ -426,16 +696,19 @@ function handleResult(result) {
     animateDino('celebrate');
     els.wordCard.classList.add('correct-flash');
     launchConfetti();
-    setBubble(randomMsg('correct'));
-    playReaction('yaaaaay');
-
-    // Move to next word after a short delay (cancelled if Stop pressed)
-    scheduleTransition(nextWord, 2200);
+    launchSparkles();
+    showStarPop();
+    playYaaySound();
+    setBubble(celebMsg);
+    // Voice line after the arpeggio has started
+    scheduleTransition(() => playDinoVoice(celebMsg), 350);
+    scheduleTransition(nextWord, 2800);
 
   } else if (state.attempts >= state.maxAttempts) {
-    // ❌ Out of attempts – auto-advance
+    // ❌ Out of attempts — reveal answer and move on
     state.wordsAttempted += 1;
     updateScore();
+    updateStreak(false);
 
     const heard = result.transcribed ? `I heard: "${result.transcribed}". ` : '';
     showFeedback(
@@ -444,28 +717,61 @@ function handleResult(result) {
     );
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
+    const outMsg = randomMsg('outOfAttempts');
     setBubble("Good try! Let's move on. 🌟");
-    playReaction('beeeep');
-
-    scheduleTransition(nextWord, 3000);
+    playBeepSound();
+    scheduleTransition(() => playDinoVoice(outMsg), 250);
+    scheduleTransition(nextWord, 3200);
 
   } else {
-    // ❌ Wrong, but can try again
+    // ❌ Wrong but retries remaining
     const heard = result.transcribed ? `I heard "${result.transcribed}".` : '';
     showFeedback(
       `${heard} ${randomMsg('wrong')} (${state.maxAttempts - state.attempts} tries left)`,
       'wrong'
     );
-    animateDino('shake');
+    // 1st wrong → curious head tilt; 2nd+ → shake
+    animateDino(state.attempts === 1 ? 'tilt' : 'shake');
     els.wordCard.classList.add('wrong-flash');
-    setBubble(randomMsg('wrong'));
-    playReaction('beeeep');
+    const wrongMsg = randomMsg('wrong');
+    setBubble(wrongMsg);
+    playBeepSound();
+    scheduleTransition(() => playDinoVoice(wrongMsg), 250);
 
-    // Say "Myra, repeat after me! <word>" again, then start recording (cancelled if Stop pressed)
     scheduleTransition(() => {
       els.wordCard.classList.remove('wrong-flash');
       playPromptThenRecord();
-    }, 1500);
+    }, 1900);
+  }
+}
+
+// ── Streak management ─────────────────────────────────
+function updateStreak(correct) {
+  if (!correct) {
+    state.streak = 0;
+    if (els.streakDisplay) els.streakDisplay.hidden = true;
+    return;
+  }
+
+  state.streak += 1;
+
+  if (state.streak >= 3) {
+    if (els.streakDisplay && els.streakCount) {
+      els.streakCount.textContent = state.streak;
+      els.streakDisplay.hidden = false;
+      els.streakDisplay.classList.remove('streak-pop');
+      void els.streakDisplay.offsetWidth;
+      els.streakDisplay.classList.add('streak-pop');
+    }
+
+    // Milestone sounds + Roo voice at 3, 5, and every 5 thereafter
+    if (state.streak === 3 || state.streak === 5 || (state.streak > 5 && state.streak % 5 === 0)) {
+      scheduleTransition(() => {
+        playStreakSound(state.streak);
+        const streakMsg = randomMsg(state.streak >= 5 ? 'streak5' : 'streak3');
+        scheduleTransition(() => playDinoVoice(streakMsg), 500);
+      }, 900);
+    }
   }
 }
 
@@ -517,14 +823,9 @@ function updateScore() {
 }
 
 function resetDots() {
-  els.dots.forEach(d => {
-    d.className = 'dot';
-  });
-  // Show only the configured max number of dots
+  els.dots.forEach(d => { d.className = 'dot'; });
   const max = state.maxAttempts || 3;
-  els.dots.forEach((d, i) => {
-    d.style.display = i < max ? '' : 'none';
-  });
+  els.dots.forEach((d, i) => { d.style.display = i < max ? '' : 'none'; });
 }
 
 function updateDots(index, correct) {
@@ -533,38 +834,80 @@ function updateDots(index, correct) {
   }
 }
 
+// ── Sparkle particles ──────────────────────────────────
+function launchSparkles() {
+  const wrapper = els.dinoWrapper;
+  if (!wrapper) return;
+
+  const icons = ['⭐', '✨', '💫', '🌟'];
+  for (let i = 0; i < 8; i++) {
+    const sp = document.createElement('div');
+    sp.className = 'sparkle';
+    sp.textContent = icons[Math.floor(Math.random() * icons.length)];
+    // Spread around dino
+    const angle = (i / 8) * 360;
+    const x = 48 + Math.cos((angle * Math.PI) / 180) * 28;
+    const y = 48 + Math.sin((angle * Math.PI) / 180) * 28;
+    sp.style.left = `${x}%`;
+    sp.style.top  = `${y}%`;
+    sp.style.animationDelay    = `${Math.random() * 0.25}s`;
+    sp.style.animationDuration = `${0.55 + Math.random() * 0.25}s`;
+    wrapper.appendChild(sp);
+    setTimeout(() => sp.remove(), 1100);
+  }
+}
+
+// ── Star pop (+1 ⭐) ──────────────────────────────────
+function showStarPop() {
+  const scoreEl = els.scoreDisplay;
+  if (!scoreEl) return;
+  const rect = scoreEl.getBoundingClientRect();
+
+  const el = document.createElement('div');
+  el.className = 'star-pop';
+  el.textContent = '+1 ⭐';
+  el.style.left = `${rect.left}px`;
+  el.style.top  = `${rect.top - 8}px`;
+  document.body.appendChild(el);
+  setTimeout(() => el.remove(), 1200);
+}
+
 // ── Dino animations ───────────────────────────────────
 function animateDino(state_name) {
   const svg = els.dinoSvg;
-  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk', 'dino-ask');
+  svg.classList.remove('dino-celebrate', 'dino-shake', 'dino-talk', 'dino-ask', 'dino-tilt');
 
   const teeth = els.dinoTeeth;
 
   if (state_name === 'celebrate') {
     svg.classList.add('dino-celebrate');
     teeth.style.display = 'block';
-    setTimeout(() => { teeth.style.display = 'none'; }, 1600);
+    // Keep teeth visible long enough for the voice line to finish
+    setTimeout(() => {
+      if (!state.voiceAudio) teeth.style.display = 'none';
+    }, 2500);
   } else if (state_name === 'shake') {
     svg.classList.add('dino-shake');
+  } else if (state_name === 'tilt') {
+    svg.classList.add('dino-tilt');
+    // Auto-remove after animation completes
+    setTimeout(() => svg.classList.remove('dino-tilt'), 950);
   } else if (state_name === 'ask') {
-    // Dino turns to face the toddler and asks the question
     svg.classList.add('dino-ask');
     teeth.style.display = 'block';
     animateMouth(true);
   } else if (state_name === 'talk') {
     svg.classList.add('dino-talk');
     teeth.style.display = 'block';
-    // Talk animation: alternate mouth shape
     animateMouth(true);
   } else {
+    // idle / default
     teeth.style.display = 'none';
     animateMouth(false);
-    // idle – default CSS handles it
   }
 }
 
 // Lip-sync frames: [upper-lip path d, inner-mouth ry, inner-mouth cy]
-// Upper lip flattens as jaw drops; inner cavity grows to fill the gap.
 const MOUTH_FRAMES = [
   ['M 330,162 Q 355,170 375,162',  0,    0],   // closed
   ['M 330,161 Q 355,164 375,161',  7,  170],   // slightly open
@@ -628,5 +971,16 @@ function launchConfetti() {
   setTimeout(() => { container.innerHTML = ''; }, 4000);
 }
 
+// ── Button tap sounds ─────────────────────────────────
+function attachButtonSounds() {
+  ['btn-play', 'btn-record', 'btn-skip', 'btn-stop'].forEach(id => {
+    const btn = $(id);
+    if (btn) btn.addEventListener('mousedown', playButtonTap);
+  });
+}
+
 // ── Start ─────────────────────────────────────────────
-window.addEventListener('DOMContentLoaded', init);
+window.addEventListener('DOMContentLoaded', () => {
+  init();
+  attachButtonSounds();
+});

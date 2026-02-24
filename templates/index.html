@@ -36,9 +36,11 @@
       <!-- Pink Dino SVG -->
       <svg id="dino-svg" viewBox="0 0 380 430" xmlns="http://www.w3.org/2000/svg" aria-label="Pink Dino Stuffy mascot">
 
-        <!-- ── TAIL ── -->
-        <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FF69B4"/>
-        <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FFB6C1" opacity="0.4"/>
+        <!-- ── TAIL (grouped for tail-wag animation) ── -->
+        <g id="dino-tail">
+          <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FF69B4"/>
+          <path d="M 55,330 Q 10,360 8,310 Q 20,265 62,290 Z" fill="#FFB6C1" opacity="0.4"/>
+        </g>
 
         <!-- ── BACK SPIKES ── -->
         <polygon points="105,195 82,128 128,195" fill="#FF1493" opacity="0.85"/>
@@ -96,6 +98,9 @@
 
         <!-- ── UPPER LIP (drawn last → renders on top of cavity and teeth) ── -->
         <path id="dino-mouth" d="M 330,162 Q 355,178 375,162" stroke="#CC4488" stroke-width="4" fill="none" stroke-linecap="round"/>
+
+        <!-- ── EYELID (for blink animation — drawn over eye) ── -->
+        <ellipse id="dino-eyelid" cx="335" cy="118" rx="22" ry="0" fill="#FF69B4"/>
 
         <!-- ── LEFT ARM (slightly raised) ── -->
         <ellipse cx="100" cy="295" rx="28" ry="45" fill="#FF69B4" transform="rotate(-15 100 295)"/>
@@ -208,6 +213,11 @@
     <div class="score-row">
       <span>⭐ Score: <strong id="score-display">0</strong></span>
       <span>📚 Words: <strong id="words-display">0</strong></span>
+    </div>
+
+    <!-- Streak display (hidden until 3+ in a row) -->
+    <div id="streak-display" class="streak-display" hidden aria-live="polite">
+      <span id="streak-count">0</span> in a row! 🔥
     </div>
 
   </section><!-- end lesson-col -->

@@ -205,7 +205,7 @@ class TestTtsEndpoint:
     def test_generate_tts_called_with_text_and_language(self, client):
         with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3) as mock_tts:
             client.get("/api/tts?text=hello&language=telugu")
-        mock_tts.assert_called_once_with("hello", "telugu")
+        mock_tts.assert_called_once_with("hello", "telugu", False)
 
     def test_telugu_text_forwarded(self, client):
         with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3) as mock_tts:
@@ -363,3 +363,44 @@ class TestAllWordsEndpoint:
         data = resp.json()
         for lang in DEFAULT_CONFIG["languages"]:
             assert lang in data
+
+
+# ---------------------------------------------------------------------------
+# GET /api/dino-voice
+# ---------------------------------------------------------------------------
+
+
+class TestDinoVoiceEndpoint:
+    def test_returns_audio_mpeg(self, client):
+        with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3):
+            resp = client.get("/api/dino-voice?text=Hello+Myra")
+        assert resp.status_code == 200
+        assert resp.headers["content-type"] == "audio/mpeg"
+        assert resp.content == FAKE_MP3
+
+    def test_always_calls_english_language(self, client):
+        with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3) as mock_tts:
+            client.get("/api/dino-voice?text=Amazing")
+        mock_tts.assert_called_once()
+        _, called_lang, _ = mock_tts.call_args[0]
+        assert called_lang == "english"
+
+    def test_empty_text_returns_400(self, client):
+        with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3):
+            resp = client.get("/api/dino-voice?text=")
+        assert resp.status_code == 400
+
+    def test_slow_param_forwarded(self, client):
+        with patch("main.generate_tts", new_callable=AsyncMock, return_value=FAKE_MP3) as mock_tts:
+            client.get("/api/dino-voice?text=Hello&slow=true")
+        _, _, called_slow = mock_tts.call_args[0]
+        assert called_slow is True
+
+    def test_service_failure_returns_500(self, client):
+        with patch(
+            "main.generate_tts",
+            new_callable=AsyncMock,
+            side_effect=Exception("gTTS error"),
+        ):
+            resp = client.get("/api/dino-voice?text=Hello")
+        assert resp.status_code == 500
