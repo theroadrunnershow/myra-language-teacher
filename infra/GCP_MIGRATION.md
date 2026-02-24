@@ -36,7 +36,7 @@ App code (Python/Docker) is unchanged — only infrastructure changes.
 
 ## Architecture Comparison
 
-**AWS (current):**
+**AWS (old):**
 ```
 Internet → CloudFront → WAF → ALB → VPC → Private Subnet → ECS → NAT → internet
 ```
@@ -52,21 +52,28 @@ Internet → Cloud Armor → Global HTTPS LB → Cloud CDN → Cloud Run (auto s
 
 ### 1.1 Create GCP Project
 1. Go to https://console.cloud.google.com
-2. Create new project — suggested name: `myra-language-teacher`
+2. Create new project — name: `myra-language-teacher`
 3. Note your **Project ID** (e.g., `myra-language-teacher`)
 4. Go to Billing → link a billing account (credit card required)
+5. Note your **Billing Account ID** (format `XXXXXX-XXXXXX-XXXXXX`) — needed for `terraform.tfvars`
 
-### 1.2 Install gcloud CLI
+### 1.2 Install gcloud CLI and authenticate
 ```bash
 brew install --cask google-cloud-sdk
-gcloud init
-# Select your project when prompted
-gcloud auth application-default login
+gcloud init                              # select project when prompted
+gcloud auth application-default login   # ADC for Terraform
+
+# REQUIRED: set quota project or Billing Budgets API will return 403
+gcloud auth application-default set-quota-project myra-language-teacher
 ```
 
-### 1.3 Enable Required APIs
+### 1.3 Enable Required APIs (bootstrap — one-time only)
 ```bash
-export PROJECT_ID=myra-language-teacher   # e.g. myra-language-teacher
+export PROJECT_ID=myra-language-teacher
+
+# cloudresourcemanager MUST be enabled first — Terraform's data.google_project depends on it
+# This is a bootstrap prerequisite; all other APIs are then managed by Terraform (apis.tf)
+gcloud services enable cloudresourcemanager.googleapis.com --project=$PROJECT_ID
 
 gcloud services enable \
   run.googleapis.com \
@@ -82,7 +89,11 @@ gcloud services enable \
   --project=$PROJECT_ID
 ```
 
-### 1.4 Create Terraform Service Account
+> After the first `terraform apply`, all of the above are managed by `infra/apis.tf`.
+> The `cloudresourcemanager` bootstrap stays manual — it's a chicken-and-egg requirement
+> (Terraform needs it enabled to even read project metadata).
+
+### 1.4 Create Terraform Service Account (for GitHub Actions CI/CD)
 ```bash
 gcloud iam service-accounts create terraform-deploy \
   --display-name="Terraform Deploy" \
@@ -94,9 +105,10 @@ gcloud projects add-iam-policy-binding $PROJECT_ID \
 
 gcloud iam service-accounts keys create ~/terraform-gcp-key.json \
   --iam-account=terraform-deploy@$PROJECT_ID.iam.gserviceaccount.com
-
-export GOOGLE_APPLICATION_CREDENTIALS=~/terraform-gcp-key.json
 ```
+
+> For **local Terraform runs**, ADC (step 1.2) is used — no key file needed.
+> The key file is only needed for GitHub Actions secrets.
 
 ### 1.5 Create GCS Bucket for Terraform State
 ```bash
@@ -106,56 +118,110 @@ gsutil versioning set on gs://myra-language-teacher-tfstate/
 
 ---
 
-## Step 2: Terraform Rewrite
+## Step 2: Terraform Files
 
-Replace all existing `infra/*.tf` files. The new structure is simpler — 9 files instead of 12.
+All infra is in `infra/`. The structure is GCP-native — simpler than AWS (no VPC, no NAT, no scheduler).
 
-### Files eliminated (not needed in GCP):
-- `vpc.tf` — Cloud Run is serverless, no VPC/subnets/NAT needed
-- `ecs.tf` — replaced by `cloud_run.tf`
-- `ecr.tf` — replaced by `artifact_registry.tf`
-- `alb.tf` — replaced by `load_balancer.tf`
-- `scheduler.tf` — Cloud Run scales to zero natively
-- `ssm.tf` — replaced by `secret_manager.tf`
-- `iam.tf` — IAM defined inline per resource
+### Files and their purpose:
+| File | Purpose |
+|---|---|
+| `providers.tf` | Google provider (with `user_project_override`), GCS backend |
+| `variables.tf` | `project_id`, `billing_account_id`, `region`, `budget_limit`, etc. |
+| `terraform.tfvars` | Actual values for required vars — **gitignored**, create locally |
+| `apis.tf` | All `google_project_service` resources — enables APIs via Terraform |
+| `artifact_registry.tf` | Docker image repository |
+| `cloud_run.tf` | Cloud Run service, auto scale 0–2, IAM for public access |
+| `load_balancer.tf` | Global HTTPS LB + Cloud CDN + HTTP→HTTPS redirect |
+| `cloud_armor.tf` | Rate limiting / WAF rules |
+| `secret_manager.tf` | Secrets: `child-name`, `similarity-threshold`, `max-attempts`, `languages` |
+| `budgets.tf` | Billing budget + Pub/Sub + Cloud Functions kill-switch |
+| `outputs.tf` | `app_url`, `cloud_run_url`, `registry_url` |
 
-### New files:
-| File | Replaces | Purpose |
-|---|---|---|
-| `providers.tf` | `providers.tf` | Google provider, GCS backend |
-| `variables.tf` | `variables.tf` | project_id, region, alert_email, budget_limit |
-| `artifact_registry.tf` | `ecr.tf` | Container image repository |
-| `cloud_run.tf` | `ecs.tf` + `vpc.tf` + `scheduler.tf` | Serverless container, auto scale 0–2 |
-| `load_balancer.tf` | `alb.tf` + `cloudfront.tf` | Global HTTPS LB + Cloud CDN |
-| `cloud_armor.tf` | WAF in `cloudfront.tf` | Rate limiting rules |
-| `secret_manager.tf` | `ssm.tf` | child_name, thresholds config |
-| `budgets.tf` | `budgets.tf` | Billing budget + Pub/Sub + Cloud Functions kill-switch |
-| `outputs.tf` | `outputs.tf` | app URL, registry URL |
+### Create `infra/terraform.tfvars` (gitignored — do not commit)
+```hcl
+project_id         = "myra-language-teacher"
+billing_account_id = "XXXXXX-XXXXXX-XXXXXX"   # from GCP Console → Billing
+```
 
 ---
 
-## Step 3: Build & Push Docker Image to GCP
+## Step 3: Build & Push Docker Image
+
+> **All commands run from the project root** (`myra-language-teacher/`), not from `infra/`.
 
 ```bash
-# Authenticate Docker to Artifact Registry
+# Authenticate Docker to Artifact Registry (one-time)
 gcloud auth configure-docker us-west1-docker.pkg.dev
-
-# Build image
-docker build -t us-west1-docker.pkg.dev/$PROJECT_ID/myra-language-teacher/dino-app:latest .
-
-# Push to Artifact Registry
-docker push us-west1-docker.pkg.dev/$PROJECT_ID/myra-language-teacher/dino-app:latest
 ```
+
+### Apple Silicon Mac (M1/M2/M3) — use multi-arch build
+Cloud Run requires `linux/amd64`. Build a multi-arch image so the same tag works both
+locally (arm64) and on Cloud Run (amd64):
+
+```bash
+# One-time: create a buildx builder
+docker buildx create --name multiarch --use
+
+# Build and push in one step (includes both arm64 + amd64 variants)
+docker buildx build \
+  --platform linux/amd64,linux/arm64 \
+  --push \
+  -t us-west1-docker.pkg.dev/myra-language-teacher/myra-language-teacher/dino-app:latest \
+  .
+```
+
+### Intel Mac / Linux
+```bash
+docker build -t us-west1-docker.pkg.dev/myra-language-teacher/myra-language-teacher/dino-app:latest .
+docker push us-west1-docker.pkg.dev/myra-language-teacher/myra-language-teacher/dino-app:latest
+```
+
+### Why is the image ~3GB?
+The large size is expected — it's dominated by:
+- PyTorch (~1.5GB, pulled in by Whisper)
+- Whisper `base.pt` model baked in (~140MB — avoids slow cold-start downloads)
+- ffmpeg + Python runtime (~250MB)
+
+> **Tip:** GitHub Actions (Step 5) builds natively on amd64 — no emulation, no multi-arch needed.
+> For day-to-day deploys, just push to `main` and let CI handle it.
 
 ---
 
 ## Step 4: Deploy with Terraform
 
+> All `terraform` commands must be run from the `infra/` directory.
+
 ```bash
 cd infra/
-terraform init
-terraform plan
-terraform apply
+terraform init      # connects to GCS backend
+terraform plan      # review what will be created
+terraform apply     # create all resources (~3-5 min)
+```
+
+To check the app URL after apply:
+```bash
+terraform output app_url          # from within infra/
+# or from project root:
+terraform -chdir=infra output app_url
+```
+
+### If resources already exist (409 conflicts)
+If `terraform apply` fails with `already exists` errors, import the conflicting resources
+rather than trying to delete them:
+
+```bash
+# Examples — adjust resource names to match error output
+terraform import google_artifact_registry_repository.app \
+  "projects/myra-language-teacher/locations/us-west1/repositories/myra-language-teacher"
+
+terraform import google_compute_security_policy.app \
+  "projects/myra-language-teacher/global/securityPolicies/dino-app-armor"
+
+terraform import google_compute_global_address.app \
+  "projects/myra-language-teacher/global/addresses/dino-app-ip"
+
+terraform import google_secret_manager_secret.child_name \
+  "projects/myra-language-teacher/secrets/child-name"
 ```
 
 ---
@@ -165,7 +231,7 @@ terraform apply
 CI/CD is handled by GitHub Actions — free, no GCP cost, 2,000 min/month included.
 Workflow file: `.github/workflows/deploy.yml`
 
-**Trigger**: Push to `main` → build Docker image → push to Artifact Registry → deploy to Cloud Run.
+**Trigger**: Push to `main` → build Docker image (amd64, native) → push to Artifact Registry → deploy to Cloud Run.
 
 ### One-time GitHub Secrets setup
 Go to: GitHub repo → Settings → Secrets and variables → Actions → New repository secret
@@ -173,7 +239,7 @@ Go to: GitHub repo → Settings → Secrets and variables → Actions → New re
 | Secret | Value |
 |---|---|
 | `GCP_SA_KEY` | Full JSON contents of `~/terraform-gcp-key.json` |
-| `GCP_PROJECT_ID` | Your GCP project ID (e.g. `myra-language-teacher-123456`) |
+| `GCP_PROJECT_ID` | `myra-language-teacher` |
 | `GCP_REGION` | `us-west1` |
 
 > Cloud Run service name (`dino-app`) is hardcoded in the workflow since it's fixed by Terraform.
@@ -182,7 +248,7 @@ Go to: GitHub repo → Settings → Secrets and variables → Actions → New re
 1. Checkout code
 2. Authenticate to GCP via service account key
 3. Configure Docker for `us-west1-docker.pkg.dev`
-4. Build image tagged with both `:latest` and `:<git-sha>`
+4. Build image tagged with both `:latest` and `:<git-sha>` (native amd64 — no emulation)
 5. Push both tags to Artifact Registry
 6. Deploy new revision to Cloud Run using the SHA-tagged image
 
@@ -197,12 +263,13 @@ Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
 - [ ] `terraform init` succeeds with GCS backend
 - [ ] `terraform plan` shows expected resources, no errors
 - [ ] `terraform apply` completes without errors
-- [ ] Cloud Run URL (from `terraform output app_url`) returns HTTP 200
+- [ ] `terraform output app_url` returns the nip.io URL
+- [ ] Navigating to the URL returns HTTP 200 (SSL cert takes up to 15 min to provision)
 - [ ] TTS works: click a word, hear audio in Telugu/Assamese
 - [ ] STT works: record speech, get recognition result
 - [ ] Cloud Armor rate limits visible in GCP Console → Cloud Armor
 - [ ] Scale-to-zero: wait 15 min idle → Cloud Run instances drop to 0
-- [ ] Billing budget alert configured in GCP Console → Billing → Budgets
+- [ ] Billing budget visible in GCP Console → Billing → Budgets & alerts
 
 ---
 
@@ -220,7 +287,7 @@ Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
 | Service | Free Tier | Notes |
 |---|---|---|
 | Cloud Run | 2M req/mo, 360K vCPU-sec, 180K GB-sec | Likely free for personal use |
-| Artifact Registry | 0.5 GB free | Image is ~500MB, may incur small cost |
+| Artifact Registry | 0.5 GB free | Image is ~3GB — expect ~$0.30/mo storage |
 | Cloud Load Balancing | 5 rules free | Global HTTPS LB |
 | Cloud CDN | First 10GB egress free/mo | |
 | Secret Manager | 6 active versions free | |
@@ -228,3 +295,17 @@ Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
 | Cloud Storage (tfstate) | 5GB free | |
 
 **Estimated monthly cost: $0–$5** for light personal use.
+
+---
+
+## Known Issues & Fixes Applied
+
+| Issue | Fix |
+|---|---|
+| `terraform init` backend changed error | Run `terraform init -reconfigure` when switching backends |
+| `cloudresourcemanager` 403 on `terraform plan` | Enable manually first: `gcloud services enable cloudresourcemanager.googleapis.com` |
+| `billing_account` missing on budget resource | Use `var.billing_account_id` in `variables.tf` instead of `data.google_project` lookup |
+| Billing Budgets API 403 quota project error | Add `user_project_override = true` + `billing_project` to provider; run `gcloud auth application-default set-quota-project` |
+| Cloud Run rejects ARM64 image | Use `docker buildx --platform linux/amd64,linux/arm64` on Apple Silicon |
+| `terraform output` returns no outputs | Must run from `infra/` directory, not project root |
+| `docker build` can't find Dockerfile | Must run from project root, not `infra/` |

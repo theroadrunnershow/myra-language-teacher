@@ -19,6 +19,7 @@ __pycache__/
 # Terraform working directory and build artifacts
 infra/.terraform/
 infra/lambda/*.zip
+infra/terraform.tfvars
 
 # GCP service account credentials (never commit)
 *-gcp-key.json

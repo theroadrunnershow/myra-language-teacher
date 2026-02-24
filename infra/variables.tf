@@ -33,6 +33,11 @@ variable "max_instances" {
   default     = 2
 }
 
+variable "billing_account_id" {
+  description = "GCP billing account ID (format: XXXXXX-XXXXXX-XXXXXX) — find in Console → Billing"
+  type        = string
+}
+
 variable "budget_limit" {
   description = "Monthly budget limit in USD - kill-switch fires when this is hit"
   type        = number

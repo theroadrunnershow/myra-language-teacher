@@ -85,7 +85,7 @@ resource "google_project_iam_member" "kill_run_logs" {
 
 # ── Billing budget ─────────────────────────────────────────────────────────────
 resource "google_billing_budget" "monthly" {
-  billing_account = data.google_project.project.billing_account
+  billing_account = var.billing_account_id
   display_name    = "dino-app-monthly-budget"
 
   budget_filter {

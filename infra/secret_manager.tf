@@ -58,4 +58,5 @@ resource "google_project_iam_member" "cloud_run_secret_accessor" {
 
 data "google_project" "project" {
   project_id = var.project_id
+  depends_on = [google_project_service.cloudresourcemanager]
 }
