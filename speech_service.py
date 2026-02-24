@@ -40,7 +40,7 @@ INITIAL_PROMPT_ENABLED = True
 
 # Lazy-loaded Whisper model
 _whisper_model = None
-_whisper_model_size = "base"  # upgrade to "small" for better regional-language accuracy
+_whisper_model_size = "tiny"  # upgrade to "base" or "small" for better regional-language accuracy
 
 
 def get_whisper_model():

@@ -16,13 +16,13 @@ variable "alert_email" {
 }
 
 variable "container_cpu" {
-  description = "Cloud Run CPU allocation (1 = 1 vCPU)"
+  description = "Cloud Run CPU allocation (2 = 2 vCPU)"
   type        = string
-  default     = "1"
+  default     = "2"
 }
 
 variable "container_memory" {
-  description = "Cloud Run memory allocation (Whisper base needs ~2GB)"
+  description = "Cloud Run memory allocation (Whisper tiny needs ~1GB)"
   type        = string
   default     = "3Gi"
 }
