@@ -595,7 +595,7 @@ function stopRecording() {
 function setRecordingUI(recording) {
   if (recording) {
     els.btnRecord.classList.add('recording');
-    els.btnRecord.textContent = '⏹ Stop';
+    els.btnRecord.textContent = '⏹ Stop Mic';
     els.btnRecord.onclick = stopRecording;
     els.recIndicator.classList.remove('hidden');
     els.btnPlay.disabled = true;
@@ -791,7 +791,10 @@ function stopFlow() {
   els.wordCard.classList.remove('correct-flash', 'wrong-flash');
   hideFeedback();
   animateDino('idle');
-  setBubble(randomMsg('stop'));
+  const breakMsg = "Let's take a break together! 🌟";
+  setBubble(breakMsg);
+  // Small delay lets the mic fully stop before Roo speaks
+  setTimeout(() => playDinoVoice(breakMsg), 300);
 }
 
 // ── Navigation ────────────────────────────────────────
