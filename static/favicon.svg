@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Body -->
+  <ellipse cx="45" cy="62" rx="28" ry="24" fill="#FF69B4"/>
+  <!-- Tail -->
+  <path d="M 17,72 Q 0,85 8,95 Q 18,80 25,78" fill="#FF69B4"/>
+  <!-- Neck -->
+  <ellipse cx="60" cy="42" rx="14" ry="18" fill="#FF69B4"/>
+  <!-- Head -->
+  <ellipse cx="68" cy="26" rx="18" ry="15" fill="#FF69B4"/>
+  <!-- Snout -->
+  <ellipse cx="83" cy="32" rx="10" ry="7" fill="#FF8DC7"/>
+  <!-- Eye -->
+  <circle cx="72" cy="20" r="5" fill="white"/>
+  <circle cx="73" cy="20" r="3" fill="#3B0A6B"/>
+  <circle cx="74" cy="19" r="1" fill="white"/>
+  <!-- Smile -->
+  <path d="M 76,34 Q 83,39 90,34" stroke="#CC4488" stroke-width="2" fill="none" stroke-linecap="round"/>
+  <!-- Belly -->
+  <ellipse cx="44" cy="65" rx="16" ry="14" fill="#FFB6D9"/>
+  <!-- Front leg -->
+  <rect x="30" y="82" width="10" height="14" rx="5" fill="#FF69B4"/>
+  <!-- Back leg -->
+  <rect x="50" y="82" width="10" height="14" rx="5" fill="#FF69B4"/>
+  <!-- Spikes -->
+  <polygon points="48,18 52,30 44,30" fill="#FF1493"/>
+  <polygon points="56,14 60,26 52,26" fill="#FF1493"/>
+  <polygon points="64,12 66,24 60,22" fill="#FF1493"/>
+</svg>
