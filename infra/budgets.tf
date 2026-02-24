@@ -11,8 +11,12 @@ resource "google_pubsub_topic" "budget_alerts" {
 # ── Cloud Function kill-switch ────────────────────────────────────────────────
 data "archive_file" "kill_run" {
   type        = "zip"
-  source_file = "${path.module}/lambda/kill_run.py"
   output_path = "${path.module}/lambda/kill_run.zip"
+  # Cloud Functions Gen2 requires main.py — set filename inside zip accordingly
+  source {
+    content  = file("${path.module}/lambda/kill_run.py")
+    filename = "main.py"
+  }
 }
 
 resource "google_storage_bucket" "functions" {
