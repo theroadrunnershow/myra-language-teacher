@@ -82,6 +82,7 @@ gcloud services enable \
   secretmanager.googleapis.com \
   cloudscheduler.googleapis.com \
   cloudfunctions.googleapis.com \
+  eventarc.googleapis.com \
   pubsub.googleapis.com \
   billingbudgets.googleapis.com \
   compute.googleapis.com \
@@ -306,6 +307,7 @@ Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
 | `cloudresourcemanager` 403 on `terraform plan` | Enable manually first: `gcloud services enable cloudresourcemanager.googleapis.com` |
 | `billing_account` missing on budget resource | Use `var.billing_account_id` in `variables.tf` instead of `data.google_project` lookup |
 | Billing Budgets API 403 quota project error | Add `user_project_override = true` + `billing_project` to provider; run `gcloud auth application-default set-quota-project` |
+| Eventarc API 403 on Cloud Function create | Enable manually: `gcloud services enable eventarc.googleapis.com`; now also in `apis.tf` with `depends_on` on the function |
 | Cloud Run rejects ARM64 image | Use `docker buildx --platform linux/amd64,linux/arm64` on Apple Silicon |
 | `terraform output` returns no outputs | Must run from `infra/` directory, not project root |
 | `docker build` can't find Dockerfile | Must run from project root, not `infra/` |

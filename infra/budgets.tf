@@ -64,6 +64,11 @@ resource "google_cloudfunctions2_function" "kill_run" {
     pubsub_topic   = google_pubsub_topic.budget_alerts.id
     retry_policy   = "RETRY_POLICY_RETRY"
   }
+
+  depends_on = [
+    google_project_service.eventarc,
+    google_project_service.cloudfunctions,
+  ]
 }
 
 resource "google_service_account" "kill_run" {
