@@ -791,7 +791,10 @@ function stopFlow() {
   els.wordCard.classList.remove('correct-flash', 'wrong-flash');
   hideFeedback();
   animateDino('idle');
-  setBubble(randomMsg('stop'));
+  const breakMsg = "Let's take a break together! 🌟";
+  setBubble(breakMsg);
+  // Small delay lets the mic fully stop before Roo speaks
+  setTimeout(() => playDinoVoice(breakMsg), 300);
 }
 
 // ── Navigation ────────────────────────────────────────
