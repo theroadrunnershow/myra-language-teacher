@@ -274,6 +274,63 @@ Requires one-time `gcloud iam workload-identity-pools create` setup when ready.
 
 ---
 
+## Step 7: Custom Domain (Optional)
+
+The default setup uses a `{ip}.nip.io` URL. To use a real domain (e.g. `myra-language-teacher.ai`):
+
+### 7.1 Buy the domain
+
+Register at any registrar. Recommendations:
+- **Cloudflare Registrar** — at-cost pricing, no markup
+- `.app` / `.dev` — ~$12/yr, HTTPS-enforced TLDs
+- `.ai` — ~$70/yr
+
+### 7.2 Get the static IP
+
+The global IP is already provisioned by Terraform:
+```bash
+gcloud compute addresses describe dino-app-ip --global --format='value(address)'
+# or
+cd infra && terraform output
+```
+
+### 7.3 Add DNS A record at your registrar
+
+| Type | Name | Value |
+|------|------|-------|
+| A | `@` (root) | `<IP from 7.2>` |
+| A | `www` | `<IP from 7.2>` (optional) |
+
+### 7.4 Set the domain in Terraform
+
+Add to `infra/terraform.tfvars`:
+```hcl
+domain = "myra-language-teacher.ai"
+```
+
+### 7.5 Apply
+
+```bash
+cd infra
+terraform apply -var="project_id=myra-language-teacher"
+```
+
+This updates the managed SSL certificate to use your domain instead of nip.io. GCP verifies ownership via the A record and auto-provisions the cert.
+
+### 7.6 Wait and verify
+
+SSL cert provisioning takes **15–30 minutes** after DNS propagates.
+
+```bash
+terraform output app_url   # → https://myra-language-teacher.ai
+curl -I https://myra-language-teacher.ai   # → HTTP/2 200
+```
+
+> **Note:** Once `domain` is set, the nip.io URL stops working — the managed cert is single-domain.
+> Add `www.your-domain.com` to the cert domains list in `load_balancer.tf` if you want both.
+
+---
+
 ## App Code Changes
 
 **None.** The following files are unchanged:
