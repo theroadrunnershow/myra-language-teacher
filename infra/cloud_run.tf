@@ -5,6 +5,10 @@ resource "google_cloud_run_v2_service" "app" {
   name     = "dino-app"
   location = var.region
 
+  # Only accept traffic from the Global Load Balancer (and internal GCP services).
+  # This prevents direct *.run.app URL access that would bypass Cloud Armor WAF.
+  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+
   template {
     scaling {
       min_instance_count = 0   # scale to zero when idle
@@ -39,7 +43,7 @@ resource "google_cloud_run_v2_service" "app" {
       # Startup probe — Whisper model load takes ~30s
       startup_probe {
         http_get {
-          path = "/"
+          path = "/health"
           port = 8000
         }
         initial_delay_seconds = 10
@@ -49,7 +53,7 @@ resource "google_cloud_run_v2_service" "app" {
 
       liveness_probe {
         http_get {
-          path = "/"
+          path = "/health"
           port = 8000
         }
         period_seconds    = 30
