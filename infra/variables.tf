@@ -44,6 +44,12 @@ variable "budget_limit" {
   default     = 50
 }
 
+variable "daily_budget_limit" {
+  description = "Daily spend limit in USD - kill-switch fires when 24-hour cost delta exceeds this"
+  type        = number
+  default     = 20
+}
+
 variable "domain" {
   description = "Custom domain name (e.g. myra-language-teacher.ai) — leave empty to use nip.io fallback"
   type        = string
