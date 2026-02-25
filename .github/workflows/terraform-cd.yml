@@ -1,0 +1,136 @@
+# Terraform CD — validates and applies infrastructure changes end-to-end.
+#
+# Triggers on any change to Terraform files, Lambda source, or the provider
+# lock file merged into main.  Can also be triggered manually via
+# workflow_dispatch (e.g. to force a sync after a manual state change).
+#
+# Required GitHub Secrets
+# -----------------------
+#   GCP_SA_KEY              — Service account JSON key.  The SA needs the
+#                             following roles on the project:
+#                               roles/editor                 (core infra)
+#                               roles/iam.securityAdmin      (IAM bindings)
+#                               roles/billing.costsManager   (budget resources)
+#                               roles/storage.objectAdmin    (tfstate bucket)
+#   GCP_PROJECT_ID          — GCP project ID (already used by deploy.yml)
+#   GCP_REGION              — GCP region, e.g. us-west1 (already used by deploy.yml)
+#   GCP_BILLING_ACCOUNT_ID  — Billing account ID, format XXXXXX-XXXXXX-XXXXXX
+#                             (find in GCP Console → Billing → Account overview)
+#
+# Concurrency
+# -----------
+# Only one apply runs at a time.  A second push while apply is in progress
+# queues rather than cancels, preventing partial-apply race conditions.
+
+name: Terraform CD
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'infra/**.tf'
+      - 'infra/.terraform.lock.hcl'
+      - 'infra/lambda/**'
+  workflow_dispatch:
+
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+env:
+  TF_VERSION: '1.10.0'
+
+jobs:
+  terraform:
+    name: Terraform Plan & Apply
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: ./infra
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Authenticate to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      # terraform_wrapper: false gives us raw exit codes so -detailed-exitcode
+      # works correctly (exit 2 = changes present, not an error).
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Backend is fully configured in providers.tf (GCS bucket).
+      # GCP Application Default Credentials set by the auth step above are
+      # picked up automatically by the GCS backend.
+      - name: Terraform Init
+        run: terraform init
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      # -detailed-exitcode semantics:
+      #   0 = success, no changes
+      #   1 = error
+      #   2 = success, changes present
+      #
+      # We capture the exit code manually so we can:
+      #   a) fail the job on exit 1
+      #   b) conditionally apply on exit 2
+      #   c) succeed cleanly on exit 0
+      - name: Terraform Plan
+        id: plan
+        run: |
+          set +e
+          terraform plan \
+            -var="project_id=${{ secrets.GCP_PROJECT_ID }}" \
+            -var="region=${{ secrets.GCP_REGION }}" \
+            -var="billing_account_id=${{ secrets.GCP_BILLING_ACCOUNT_ID }}" \
+            -detailed-exitcode \
+            -out=tfplan \
+            -no-color 2>&1 | tee /tmp/plan_output.txt
+          PLAN_EXIT=${PIPESTATUS[0]}
+          echo "exitcode=${PLAN_EXIT}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Terraform Plan"
+            if [ "$PLAN_EXIT" -eq 0 ]; then
+              echo "No changes. Infrastructure matches configuration."
+            elif [ "$PLAN_EXIT" -eq 2 ]; then
+              echo "Changes detected — terraform apply will run."
+              printf '```\n'
+              cat /tmp/plan_output.txt
+              printf '```\n'
+            else
+              echo "Plan failed with errors — see logs above."
+              printf '```\n'
+              cat /tmp/plan_output.txt
+              printf '```\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$PLAN_EXIT" -eq 1 ]; then
+            echo "Terraform plan failed."
+            exit 1
+          fi
+
+      - name: No Changes
+        if: steps.plan.outputs.exitcode == '0'
+        run: echo "Infrastructure is up to date — no apply needed."
+
+      - name: Terraform Apply
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          terraform apply -auto-approve tfplan
+          {
+            echo "## Terraform Apply"
+            echo "Apply completed successfully."
+          } >> "$GITHUB_STEP_SUMMARY"
