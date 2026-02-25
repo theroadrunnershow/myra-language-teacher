@@ -63,3 +63,8 @@ resource "google_project_service" "eventarc" {
   service            = "eventarc.googleapis.com"
   disable_on_destroy = false
 }
+
+resource "google_project_service" "monitoring" {
+  service            = "monitoring.googleapis.com"
+  disable_on_destroy = false
+}
