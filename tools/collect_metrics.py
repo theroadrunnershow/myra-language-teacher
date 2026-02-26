@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """Collect [TIMING] metrics from a local log file or GCP Cloud Logging.
 
 Usage
