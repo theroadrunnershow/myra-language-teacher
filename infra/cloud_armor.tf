@@ -3,7 +3,27 @@
 
 resource "google_compute_security_policy" "app" {
   name        = "dino-app-armor"
-  description = "Rate limiting for Myra language teacher app"
+  description = "Rate limiting and OWASP protection for Myra language teacher app"
+
+  # ── OWASP preconfigured rule set (priority 900, before rate limits) ───────────
+  # Blocks requests matching known XSS, SQLi, LFI, RFI, and scanner signatures.
+  # These evaluate request bodies + headers against OWASP ModSecurity CRS rules.
+  rule {
+    action   = "deny(403)"
+    priority = 900
+    match {
+      expr {
+        expression = join(" || ", [
+          "evaluatePreconfiguredExpr('xss-stable')",
+          "evaluatePreconfiguredExpr('sqli-stable')",
+          "evaluatePreconfiguredExpr('lfi-stable')",
+          "evaluatePreconfiguredExpr('rfi-stable')",
+          "evaluatePreconfiguredExpr('scannerdetection-stable')",
+        ])
+      }
+    }
+    description = "OWASP CRS: XSS, SQLi, LFI, RFI, scanner detection"
+  }
 
   # STT endpoint — most expensive, tightest limit (10 req/min per IP)
   rule {
@@ -49,10 +69,32 @@ resource "google_compute_security_policy" "app" {
     description = "Rate limit TTS: 30 req/min per IP"
   }
 
-  # General API (100 req/min per IP)
+  # Dino voice TTS endpoint — same cost as /api/tts, same budget (30 req/min per IP)
   rule {
     action   = "rate_based_ban"
     priority = 1002
+    match {
+      expr {
+        expression = "request.path.matches('/api/dino-voice')"
+      }
+    }
+    rate_limit_options {
+      rate_limit_threshold {
+        count        = 30
+        interval_sec = 60
+      }
+      ban_duration_sec = 120
+      conform_action   = "allow"
+      exceed_action    = "deny(429)"
+      enforce_on_key   = "IP"
+    }
+    description = "Rate limit dino-voice TTS: 30 req/min per IP"
+  }
+
+  # General API (100 req/min per IP)
+  rule {
+    action   = "rate_based_ban"
+    priority = 1003
     match {
       expr {
         expression = "request.path.matches('/api/')"

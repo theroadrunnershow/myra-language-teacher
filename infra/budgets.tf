@@ -84,10 +84,14 @@ resource "google_service_account" "kill_run" {
   display_name = "Dino App Kill-Switch Function"
 }
 
-resource "google_project_iam_member" "kill_run_cloud_run" {
-  project = var.project_id
-  role    = "roles/run.admin"
-  member  = "serviceAccount:${google_service_account.kill_run.email}"
+# Scoped to this specific Cloud Run service only (not project-wide).
+# Removes the ability to create/delete/modify any other Cloud Run service in the project.
+resource "google_cloud_run_v2_service_iam_member" "kill_run_admin" {
+  project  = var.project_id
+  location = var.region
+  name     = google_cloud_run_v2_service.app.name
+  role     = "roles/run.admin"
+  member   = "serviceAccount:${google_service_account.kill_run.email}"
 }
 
 resource "google_project_iam_member" "kill_run_logs" {

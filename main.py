@@ -8,6 +8,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from speech_service import recognize_speech
 from tts_service import generate_tts
@@ -16,7 +18,36 @@ from words_db import ALL_CATEGORIES, WORD_DATABASE, get_random_word
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# ── Security constants ────────────────────────────────────────────────────────
+MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB — prevents OOM on Cloud Run
+MAX_TEXT_LEN = 200                   # characters — prevents gTTS quota abuse
+MAX_CONFIG_BODY = 4096               # 4 KB — prevents large JSON body abuse
+VALID_LANGUAGES = {"telugu", "assamese", "english"}
+
 app = FastAPI(title="Myra Language Teacher")
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add defensive security headers to every response."""
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "media-src 'self' blob:; "
+            "img-src 'self' data:; "
+            "connect-src 'self'"
+        )
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +70,13 @@ DEFAULT_CONFIG = {
     "similarity_threshold": 50,  # % match required
     "max_attempts": 3,
 }
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+@app.get("/health")
+async def health():
+    """Lightweight probe endpoint for Cloud Run startup/liveness checks."""
+    return {"status": "ok"}
 
 
 # ── Page routes ───────────────────────────────────────────────────────────────
@@ -64,6 +102,9 @@ async def api_get_config():
 @app.post("/api/config")
 async def api_save_config(request: Request):
     """Validate config. Client persists to sessionStorage; no server-side storage."""
+    content_length = int(request.headers.get("content-length", 0))
+    if content_length > MAX_CONFIG_BODY:
+        raise HTTPException(status_code=413, detail="Request body too large")
     body = await request.json()
     if "languages" in body and not isinstance(body["languages"], list):
         raise HTTPException(status_code=400, detail="'languages' must be a list")
@@ -96,6 +137,10 @@ async def api_get_word(
 # ── API: TTS ──────────────────────────────────────────────────────────────────
 @app.get("/api/tts")
 async def api_tts(text: str, language: str = "telugu", slow: bool = False):
+    if len(text) > MAX_TEXT_LEN:
+        raise HTTPException(status_code=400, detail=f"text too long (max {MAX_TEXT_LEN} characters)")
+    if language not in VALID_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Invalid language '{language}'")
     try:
         audio_bytes = await generate_tts(text, language, slow)
         return StreamingResponse(
@@ -114,6 +159,8 @@ async def api_dino_voice(text: str, slow: bool = False):
     """TTS for Roo's English voice lines. Strips leading/trailing whitespace."""
     if not text.strip():
         raise HTTPException(status_code=400, detail="text parameter is required")
+    if len(text) > MAX_TEXT_LEN:
+        raise HTTPException(status_code=400, detail=f"text too long (max {MAX_TEXT_LEN} characters)")
     try:
         audio_bytes = await generate_tts(text.strip(), "english", slow)
         return StreamingResponse(
@@ -136,11 +183,24 @@ async def api_recognize(
     audio_format: str = Form(default="audio/webm"),
     similarity_threshold: str = Form(default="50"),  # from client sessionStorage
 ):
-    threshold = float(similarity_threshold)
+    if language not in VALID_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Invalid language '{language}'")
+
+    try:
+        threshold = float(similarity_threshold)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="similarity_threshold must be a number")
+    if not (0.0 <= threshold <= 100.0):
+        raise HTTPException(status_code=400, detail="similarity_threshold must be between 0 and 100")
 
     audio_data = await audio.read()
     if not audio_data:
         raise HTTPException(status_code=400, detail="Empty audio file received.")
+    if len(audio_data) > MAX_AUDIO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Audio file too large (max {MAX_AUDIO_BYTES // (1024 * 1024)} MB)",
+        )
 
     logger.info(f"Recognize request: language={language}, expected='{expected_word}', "
                 f"mime='{audio_format}', audio_size={len(audio_data)} bytes")
