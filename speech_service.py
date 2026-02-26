@@ -2,6 +2,7 @@ import os
 import tempfile
 import asyncio
 import logging
+import time
 import unicodedata
 
 import numpy as np
@@ -52,12 +53,15 @@ def get_whisper_model():
             f"Loading faster-whisper model '{_whisper_model_size}' "
             f"(device=cpu, compute={_whisper_compute_type})…"
         )
+        t0 = time.perf_counter()
         _whisper_model = WhisperModel(
             _whisper_model_size,
             device="cpu",
             compute_type=_whisper_compute_type,
         )
-        logger.info("faster-whisper model loaded.")
+        logger.info(f"[TIMING] whisper_model: COLD LOAD {time.perf_counter() - t0:.2f}s")
+    else:
+        logger.info("[TIMING] whisper_model: cached (warm)")
     return _whisper_model
 
 
@@ -152,8 +156,10 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
         tmp_wav_path = tmp_in_path.rsplit(".", 1)[0] + ".wav"
         try:
             # Let ffmpeg auto-detect the actual format from file contents
+            t_decode = time.perf_counter()
             audio = AudioSegment.from_file(tmp_in_path)
             audio = audio.set_frame_rate(16000).set_channels(1)
+            elapsed_decode = time.perf_counter() - t_decode
 
             if NOISE_REDUCTION_ENABLED:
                 audio = _reduce_noise(audio)
@@ -166,7 +172,13 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
                 silence = AudioSegment.silent(duration=MIN_DURATION_MS - len(audio), frame_rate=16000)
                 audio = audio + silence
 
+            t_export = time.perf_counter()
             audio.export(tmp_wav_path, format="wav")
+            elapsed_export = time.perf_counter() - t_export
+            logger.info(
+                f"[TIMING] audio_convert: decode+resample={elapsed_decode:.2f}s  "
+                f"wav_export={elapsed_export:.2f}s  duration={len(audio)/1000:.1f}s"
+            )
             logger.info(f"WAV written: {tmp_wav_path}  duration={len(audio)/1000:.1f}s")
         finally:
             os.unlink(tmp_in_path)
@@ -190,6 +202,7 @@ async def recognize_speech(
     Also tries romanized fallback comparison if native-script similarity is low,
     which handles cases where Whisper outputs Latin transliteration.
     """
+    t_start = time.perf_counter()
     lang_code = LANGUAGE_CODES.get(language, "te")
     ext = mime_to_ext(mime_type)
     wav_path = None
@@ -208,6 +221,7 @@ async def recognize_speech(
 
             # Pass 1: force target language (native-script output, e.g. Telugu/Assamese glyphs).
             # faster-whisper returns (segments_generator, TranscriptionInfo); consume immediately.
+            t_p1 = time.perf_counter()
             segments_native, _ = model.transcribe(
                 wav_path,
                 language=lang_code,
@@ -215,11 +229,15 @@ async def recognize_speech(
                 **kw_native,
             )
             transcribed_native = " ".join(seg.text for seg in segments_native).strip()
-            logger.info(f"Whisper pass-1 (lang={lang_code}): '{transcribed_native}'")
+            logger.info(
+                f"[TIMING] whisper_pass1_native ({lang_code}): {time.perf_counter() - t_p1:.2f}s "
+                f"→ '{transcribed_native}'"
+            )
 
             # Pass 2: force English — Whisper reliably produces a phonetic / romanized
             # approximation of Indic speech in English mode.  This is what we compare
             # against the `romanized` pronunciation guide.
+            t_p2 = time.perf_counter()
             segments_roman, _ = model.transcribe(
                 wav_path,
                 language="en",
@@ -227,7 +245,10 @@ async def recognize_speech(
                 **kw_roman,
             )
             transcribed_roman = " ".join(seg.text for seg in segments_roman).strip()
-            logger.info(f"Whisper pass-2 (lang=en/phonetic): '{transcribed_roman}'")
+            logger.info(
+                f"[TIMING] whisper_pass2_english: {time.perf_counter() - t_p2:.2f}s "
+                f"→ '{transcribed_roman}'"
+            )
 
             return transcribed_native, transcribed_roman
 
@@ -256,6 +277,10 @@ async def recognize_speech(
             f"Script sim: {similarity:.1f}% | Roman sim: {roman_similarity:.1f}% | "
             f"Best: {best_similarity:.1f}% | Correct: {is_correct}"
         )
+        logger.info(
+            f"[TIMING] recognize_total: {time.perf_counter() - t_start:.2f}s | "
+            f"word={expected_word!r} | correct={is_correct} | sim={best_similarity:.1f}"
+        )
 
         return {
             "transcribed": transcribed,
@@ -269,6 +294,9 @@ async def recognize_speech(
 
     except Exception as e:
         logger.error(f"Speech recognition error: {e}", exc_info=True)
+        logger.info(
+            f"[TIMING] recognize_total: {time.perf_counter() - t_start:.2f}s (ERROR: {e})"
+        )
         return {
             "transcribed": "",
             "expected": expected_word,

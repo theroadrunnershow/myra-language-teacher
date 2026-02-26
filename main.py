@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import random
+import time
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -183,6 +184,7 @@ async def api_recognize(
     audio_format: str = Form(default="audio/webm"),
     similarity_threshold: str = Form(default="50"),  # from client sessionStorage
 ):
+    t_start = time.perf_counter()
     if language not in VALID_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"Invalid language '{language}'")
 
@@ -212,6 +214,11 @@ async def api_recognize(
         romanized=romanized,
         mime_type=audio_format,
         similarity_threshold=threshold,
+    )
+    logger.info(
+        f"[TIMING] api_recognize_total: {time.perf_counter() - t_start:.2f}s | "
+        f"language={language} | word={expected_word!r} | "
+        f"correct={result.get('is_correct')} | sim={result.get('similarity')}"
     )
     return result
 
