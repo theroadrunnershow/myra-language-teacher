@@ -500,3 +500,48 @@ class TestRecognizeSpeech:
                 similarity_threshold=50.0,
             )
         assert result["transcribed"] == "పిల్లి"
+
+    async def test_both_passes_always_executed(self, patch_convert):
+        """model.transcribe must be called exactly twice per recognize_speech call."""
+        model = _make_model_mock("పిల్లి", "pilli")
+        with patch("speech_service.get_whisper_model", return_value=model):
+            await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="pilli",
+                similarity_threshold=50.0,
+            )
+        assert model.transcribe.call_count == 2
+
+    async def test_passes_run_concurrently(self, patch_convert):
+        """Both Whisper passes must run in parallel, not sequentially.
+
+        threading.Barrier(2) requires exactly 2 threads to call barrier.wait()
+        simultaneously before either is released.  If the passes were sequential,
+        the first thread would block forever (timeout → BrokenBarrierError) because
+        the second thread never starts while the first is blocked.
+        """
+        import threading
+
+        barrier = threading.Barrier(2, timeout=5.0)
+        model = MagicMock(name="WhisperModel")
+
+        def transcribe_side_effect(wav_path, language=None, **kwargs):
+            barrier.wait()  # both threads must arrive before either proceeds
+            text = "పిల్లి" if language != "en" else "pilli"
+            return ([_make_segment(text)], MagicMock())
+
+        model.transcribe.side_effect = transcribe_side_effect
+
+        with patch("speech_service.get_whisper_model", return_value=model):
+            result = await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="pilli",
+                similarity_threshold=50.0,
+            )
+
+        # Reaching here means the barrier was released — both threads ran at once
+        assert result["is_correct"] is True
