@@ -286,14 +286,20 @@ async def recognize_speech(
             )
             return result
 
-        # Run both passes concurrently — each occupies one CPU via the thread pool.
+        # Run both passes concurrently when multiple CPUs are available.
         # CTranslate2 (faster-whisper's backend) is documented as thread-safe for
         # concurrent inference on the same model instance.
+        # On a single-CPU host spawning two competing threads adds overhead with no
+        # benefit, so fall back to sequential execution in that case.
         t0 = time.perf_counter()
-        transcribed_native, transcribed_roman = await asyncio.gather(
-            loop.run_in_executor(None, _transcribe_native),
-            loop.run_in_executor(None, _transcribe_roman),
-        )
+        if (os.cpu_count() or 1) > 1:
+            transcribed_native, transcribed_roman = await asyncio.gather(
+                loop.run_in_executor(None, _transcribe_native),
+                loop.run_in_executor(None, _transcribe_roman),
+            )
+        else:
+            transcribed_native = await loop.run_in_executor(None, _transcribe_native)
+            transcribed_roman = await loop.run_in_executor(None, _transcribe_roman)
         logger.info(
             f"[TIMING] step=total_transcribe lang={language} "
             f"duration_ms={1000*(time.perf_counter()-t0):.1f}"
