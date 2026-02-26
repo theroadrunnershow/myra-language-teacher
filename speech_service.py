@@ -40,7 +40,7 @@ INITIAL_PROMPT_ENABLED = True
 
 # Lazy-loaded faster-whisper model (CTranslate2 backend, ~4× faster on CPU)
 _whisper_model = None
-_whisper_model_size = "tiny"  # upgrade to "base" or "small" for better regional-language accuracy
+_whisper_model_size = "base"  # ~140 MB; better accuracy on Indic languages vs tiny (~39 MB)
 _whisper_compute_type = "int8"  # int8 quantization for CPU; use "float16" for GPU
 
 

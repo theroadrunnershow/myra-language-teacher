@@ -17,9 +17,10 @@ COPY main.py words_db.py speech_service.py tts_service.py ./
 COPY templates/ templates/
 COPY static/ static/
 
-# Pre-download faster-whisper tiny model (~39 MB CTranslate2 format) so first request isn't slow
+# Pre-download faster-whisper base model (~140 MB CTranslate2 format) so first request isn't slow
+# base offers meaningfully better accuracy on Telugu/Assamese vs tiny (~39 MB) at modest CPU cost
 # Model saved to /root/.cache/huggingface/hub/ inside the image
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8'); print('faster-whisper tiny model cached.')"
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('base', device='cpu', compute_type='int8'); print('faster-whisper base model cached.')"
 
 EXPOSE 8000
 
