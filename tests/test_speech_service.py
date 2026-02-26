@@ -484,3 +484,77 @@ class TestRecognizeSpeech:
                 similarity_threshold=50.0,
             )
         assert result["transcribed"] == "పిల్లి"
+
+
+# ---------------------------------------------------------------------------
+# PyTorch dynamic quantization
+# ---------------------------------------------------------------------------
+
+
+class TestQuantizedModel:
+    """Tests for the QUANTIZE_MODEL feature flag and quantize_dynamic integration."""
+
+    def _make_whisper_stub(self):
+        stub = MagicMock()
+        stub.load_model.return_value = MagicMock(name="WhisperModel")
+        return stub
+
+    def _make_torch_stub(self):
+        """Return a torch stub where quantize_dynamic is a no-op identity."""
+        stub = MagicMock()
+        stub.quantization.quantize_dynamic.side_effect = (
+            lambda model, *args, **kwargs: model
+        )
+        return stub
+
+    def test_quantize_dynamic_called_when_flag_enabled(self):
+        """quantize_dynamic is invoked with the loaded model when QUANTIZE_MODEL=True."""
+        whisper_stub = self._make_whisper_stub()
+        torch_stub = self._make_torch_stub()
+        with (
+            patch.dict(sys.modules, {"whisper": whisper_stub, "torch": torch_stub}),
+            patch.object(speech_service, "QUANTIZE_MODEL", True),
+        ):
+            get_whisper_model()
+        torch_stub.quantization.quantize_dynamic.assert_called_once()
+        call_args = torch_stub.quantization.quantize_dynamic.call_args
+        assert call_args[0][0] is whisper_stub.load_model.return_value
+
+    def test_quantize_dynamic_not_called_when_flag_disabled(self):
+        """quantize_dynamic is skipped entirely when QUANTIZE_MODEL=False."""
+        whisper_stub = self._make_whisper_stub()
+        torch_stub = self._make_torch_stub()
+        with (
+            patch.dict(sys.modules, {"whisper": whisper_stub, "torch": torch_stub}),
+            patch.object(speech_service, "QUANTIZE_MODEL", False),
+        ):
+            get_whisper_model()
+        torch_stub.quantization.quantize_dynamic.assert_not_called()
+
+    def test_quantize_called_with_linear_layers_and_qint8(self):
+        """quantize_dynamic targets nn.Linear layers with dtype=torch.qint8."""
+        whisper_stub = self._make_whisper_stub()
+        torch_stub = self._make_torch_stub()
+        with (
+            patch.dict(sys.modules, {"whisper": whisper_stub, "torch": torch_stub}),
+            patch.object(speech_service, "QUANTIZE_MODEL", True),
+        ):
+            get_whisper_model()
+        call_kwargs = torch_stub.quantization.quantize_dynamic.call_args
+        # second positional arg is the set of layer types to quantize
+        layer_set = call_kwargs[0][1]
+        assert torch_stub.nn.Linear in layer_set
+        # dtype kwarg should be torch.qint8
+        assert call_kwargs[1].get("dtype") is torch_stub.qint8
+
+    def test_load_failure_before_quantize_propagates(self):
+        """A whisper.load_model error propagates even with quantization enabled."""
+        whisper_stub = self._make_whisper_stub()
+        whisper_stub.load_model.side_effect = RuntimeError("load failed")
+        torch_stub = self._make_torch_stub()
+        with (
+            patch.dict(sys.modules, {"whisper": whisper_stub, "torch": torch_stub}),
+            patch.object(speech_service, "QUANTIZE_MODEL", True),
+        ):
+            with pytest.raises(RuntimeError, match="load failed"):
+                get_whisper_model()

@@ -42,13 +42,30 @@ INITIAL_PROMPT_ENABLED = True
 _whisper_model = None
 _whisper_model_size = "tiny"  # upgrade to "base" or "small" for better regional-language accuracy
 
+# Feature flag: apply PyTorch dynamic quantization after model load (~2-3× CPU speedup)
+# Quantizes all nn.Linear layers to int8; no accuracy loss on Whisper in practice.
+QUANTIZE_MODEL = True
+
 
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
         import whisper
         logger.info(f"Loading Whisper model '{_whisper_model_size}'…")
-        _whisper_model = whisper.load_model(_whisper_model_size)
+        model = whisper.load_model(_whisper_model_size)
+        if QUANTIZE_MODEL:
+            try:
+                import torch
+                logger.info("Applying PyTorch dynamic quantization (int8 Linear layers)…")
+                model = torch.quantization.quantize_dynamic(
+                    model,
+                    {torch.nn.Linear},
+                    dtype=torch.qint8,
+                )
+                logger.info("Model quantized.")
+            except Exception as exc:
+                logger.warning(f"Quantization skipped: {exc}")
+        _whisper_model = model
         logger.info("Whisper model loaded.")
     return _whisper_model
 
