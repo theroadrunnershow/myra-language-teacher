@@ -2,6 +2,7 @@ import io
 import logging
 import os
 import random
+import time
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -141,8 +142,13 @@ async def api_tts(text: str, language: str = "telugu", slow: bool = False):
         raise HTTPException(status_code=400, detail=f"text too long (max {MAX_TEXT_LEN} characters)")
     if language not in VALID_LANGUAGES:
         raise HTTPException(status_code=400, detail=f"Invalid language '{language}'")
+    t0 = time.perf_counter()
     try:
         audio_bytes = await generate_tts(text, language, slow)
+        logger.info(
+            f"[TIMING] step=api_tts lang={language} text_len={len(text)} "
+            f"duration_ms={1000*(time.perf_counter()-t0):.1f}"
+        )
         return StreamingResponse(
             io.BytesIO(audio_bytes),
             media_type="audio/mpeg",
@@ -193,7 +199,15 @@ async def api_recognize(
     if not (0.0 <= threshold <= 100.0):
         raise HTTPException(status_code=400, detail="similarity_threshold must be between 0 and 100")
 
+    t_request_start = time.perf_counter()
+
+    t0 = time.perf_counter()
     audio_data = await audio.read()
+    logger.info(
+        f"[TIMING] step=audio_upload_read size_bytes={len(audio_data)} "
+        f"duration_ms={1000*(time.perf_counter()-t0):.1f}"
+    )
+
     if not audio_data:
         raise HTTPException(status_code=400, detail="Empty audio file received.")
     if len(audio_data) > MAX_AUDIO_BYTES:
@@ -212,6 +226,10 @@ async def api_recognize(
         romanized=romanized,
         mime_type=audio_format,
         similarity_threshold=threshold,
+    )
+    logger.info(
+        f"[TIMING] step=api_recognize lang={language} correct={result.get('is_correct')} "
+        f"duration_ms={1000*(time.perf_counter()-t_request_start):.1f}"
     )
     return result
 
