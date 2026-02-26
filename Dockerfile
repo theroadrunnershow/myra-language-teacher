@@ -17,9 +17,9 @@ COPY main.py words_db.py speech_service.py tts_service.py ./
 COPY templates/ templates/
 COPY static/ static/
 
-# Pre-download Whisper tiny model (~39 MB) so first request isn't slow
-# Model saved to /root/.cache/whisper/tiny.pt inside the image
-RUN python -c "import whisper; whisper.load_model('tiny'); print('Whisper tiny model cached.')"
+# Pre-download faster-whisper tiny model (~39 MB CTranslate2 format) so first request isn't slow
+# Model saved to /root/.cache/huggingface/hub/ inside the image
+RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8'); print('faster-whisper tiny model cached.')"
 
 EXPOSE 8000
 

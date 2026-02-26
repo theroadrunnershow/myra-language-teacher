@@ -20,6 +20,7 @@ import speech_service
 from speech_service import (
     MIME_TO_EXT,
     _convert_to_wav,
+    _whisper_compute_type,
     calculate_similarity,
     get_whisper_model,
     mime_to_ext,
@@ -162,40 +163,44 @@ class TestMimeToExt:
 
 
 class TestGetWhisperModel:
-    def _make_whisper_stub(self):
-        """Return a fake whisper module with a tracked load_model."""
+    def _make_faster_whisper_stub(self):
+        """Return a fake faster_whisper module with a tracked WhisperModel class."""
         stub = MagicMock()
-        stub.load_model.return_value = MagicMock(name="WhisperModel")
+        stub.WhisperModel.return_value = MagicMock(name="FasterWhisperModel")
         return stub
 
     def test_loads_model_with_configured_size(self):
-        stub = self._make_whisper_stub()
-        with patch.dict(sys.modules, {"whisper": stub}):
+        stub = self._make_faster_whisper_stub()
+        with patch.dict(sys.modules, {"faster_whisper": stub}):
             model = get_whisper_model()
-        stub.load_model.assert_called_once_with(speech_service._whisper_model_size)
-        assert model is stub.load_model.return_value
+        stub.WhisperModel.assert_called_once_with(
+            speech_service._whisper_model_size,
+            device="cpu",
+            compute_type=_whisper_compute_type,
+        )
+        assert model is stub.WhisperModel.return_value
 
     def test_second_call_returns_cached_model_without_reloading(self):
-        stub = self._make_whisper_stub()
-        with patch.dict(sys.modules, {"whisper": stub}):
+        stub = self._make_faster_whisper_stub()
+        with patch.dict(sys.modules, {"faster_whisper": stub}):
             m1 = get_whisper_model()
             m2 = get_whisper_model()
         assert m1 is m2
-        stub.load_model.assert_called_once()
+        stub.WhisperModel.assert_called_once()
 
     def test_pre_cached_model_never_calls_load_model(self):
         existing = MagicMock(name="PreCachedModel")
         speech_service._whisper_model = existing
-        stub = self._make_whisper_stub()
-        with patch.dict(sys.modules, {"whisper": stub}):
+        stub = self._make_faster_whisper_stub()
+        with patch.dict(sys.modules, {"faster_whisper": stub}):
             result = get_whisper_model()
         assert result is existing
-        stub.load_model.assert_not_called()
+        stub.WhisperModel.assert_not_called()
 
     def test_load_model_failure_propagates(self):
-        stub = self._make_whisper_stub()
-        stub.load_model.side_effect = RuntimeError("CUDA OOM")
-        with patch.dict(sys.modules, {"whisper": stub}):
+        stub = self._make_faster_whisper_stub()
+        stub.WhisperModel.side_effect = RuntimeError("CUDA OOM")
+        with patch.dict(sys.modules, {"faster_whisper": stub}):
             with pytest.raises(RuntimeError, match="CUDA OOM"):
                 get_whisper_model()
 
@@ -260,12 +265,23 @@ class TestConvertToWav:
 # ---------------------------------------------------------------------------
 
 
+def _make_segment(text: str) -> MagicMock:
+    """Return a fake faster-whisper Segment with a .text attribute."""
+    seg = MagicMock()
+    seg.text = text
+    return seg
+
+
 def _make_model_mock(native_text: str, roman_text: str) -> MagicMock:
-    """Build a Whisper model mock returning two specific transcriptions."""
+    """Build a faster-whisper model mock returning two specific transcriptions.
+
+    faster-whisper's model.transcribe() returns (segments_generator, TranscriptionInfo).
+    We return a list (also iterable) to keep mocks simple.
+    """
     model = MagicMock(name="WhisperModel")
     model.transcribe.side_effect = [
-        {"text": native_text},   # pass-1: native script
-        {"text": roman_text},    # pass-2: romanized / English phonetic
+        ([_make_segment(native_text)], MagicMock()),   # pass-1: native script
+        ([_make_segment(roman_text)], MagicMock()),    # pass-2: romanized / English phonetic
     ]
     return model
 

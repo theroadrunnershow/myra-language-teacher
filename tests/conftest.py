@@ -6,15 +6,15 @@ import pytest
 from unittest.mock import MagicMock
 
 # ---------------------------------------------------------------------------
-# Provide a lightweight whisper stub in sys.modules so that
+# Provide a lightweight faster_whisper stub in sys.modules so that
 #   import speech_service
-# works even when openai-whisper is NOT installed (e.g. lightweight CI image).
-# The real whisper import happens lazily inside get_whisper_model(); tests that
-# exercise that path patch sys.modules['whisper'] themselves.
+# works even when faster-whisper is NOT installed (e.g. lightweight CI image).
+# The real faster_whisper import happens lazily inside get_whisper_model(); tests
+# that exercise that path patch sys.modules['faster_whisper'] themselves.
 # ---------------------------------------------------------------------------
-if "whisper" not in sys.modules:
-    _whisper_stub = MagicMock()
-    sys.modules["whisper"] = _whisper_stub
+if "faster_whisper" not in sys.modules:
+    _faster_whisper_stub = MagicMock()
+    sys.modules["faster_whisper"] = _faster_whisper_stub
 
 # ---------------------------------------------------------------------------
 # noisereduce is optional; stub it out so importing speech_service never fails
