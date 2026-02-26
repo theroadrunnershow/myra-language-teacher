@@ -237,56 +237,63 @@ async def recognize_speech(
 
         loop = asyncio.get_event_loop()
 
-        def _transcribe():
-            t_model = time.perf_counter()
-            model = get_whisper_model()
-            # Only emit a warm-model timing line (cold-start is logged inside get_whisper_model)
-            logger.info(
-                f"[TIMING] step=whisper_model_ready "
-                f"duration_ms={1000*(time.perf_counter()-t_model):.1f}"
-            )
+        # Pre-load model once to avoid a lazy-init race between the two parallel threads.
+        t_model = time.perf_counter()
+        model = await loop.run_in_executor(None, get_whisper_model)
+        logger.info(
+            f"[TIMING] step=whisper_model_ready "
+            f"duration_ms={1000*(time.perf_counter()-t_model):.1f}"
+        )
 
-            # Optional prompt to bias Whisper toward expected word (when flag on)
-            kw_native = {"initial_prompt": expected_word} if INITIAL_PROMPT_ENABLED else {}
-            kw_roman = {"initial_prompt": (romanized or expected_word).strip()} if INITIAL_PROMPT_ENABLED else {}
+        # Optional prompt to bias Whisper toward expected word (when flag on)
+        kw_native = {"initial_prompt": expected_word} if INITIAL_PROMPT_ENABLED else {}
+        kw_roman = {"initial_prompt": (romanized or expected_word).strip()} if INITIAL_PROMPT_ENABLED else {}
 
-            # Pass 1: force target language (native-script output, e.g. Telugu/Assamese glyphs).
-            # faster-whisper returns (segments_generator, TranscriptionInfo); consume immediately.
+        # Pass 1: force target language (native-script output, e.g. Telugu/Assamese glyphs).
+        # faster-whisper returns (segments_generator, TranscriptionInfo); consume immediately.
+        def _transcribe_native():
             t0_p1 = time.perf_counter()
-            segments_native, _ = model.transcribe(
+            segments, _ = model.transcribe(
                 wav_path,
                 language=lang_code,
                 task="transcribe",
                 **kw_native,
             )
-            transcribed_native = " ".join(seg.text for seg in segments_native).strip()
+            result = " ".join(seg.text for seg in segments).strip()
             logger.info(
                 f"[TIMING] step=whisper_pass1 lang={lang_code} "
-                f"result='{transcribed_native}' "
+                f"result='{result}' "
                 f"duration_ms={1000*(time.perf_counter()-t0_p1):.1f}"
             )
+            return result
 
-            # Pass 2: force English — Whisper reliably produces a phonetic / romanized
-            # approximation of Indic speech in English mode.  This is what we compare
-            # against the `romanized` pronunciation guide.
+        # Pass 2: force English — Whisper reliably produces a phonetic / romanized
+        # approximation of Indic speech in English mode.  This is what we compare
+        # against the `romanized` pronunciation guide.
+        def _transcribe_roman():
             t0_p2 = time.perf_counter()
-            segments_roman, _ = model.transcribe(
+            segments, _ = model.transcribe(
                 wav_path,
                 language="en",
                 task="transcribe",
                 **kw_roman,
             )
-            transcribed_roman = " ".join(seg.text for seg in segments_roman).strip()
+            result = " ".join(seg.text for seg in segments).strip()
             logger.info(
                 f"[TIMING] step=whisper_pass2 lang=en "
-                f"result='{transcribed_roman}' "
+                f"result='{result}' "
                 f"duration_ms={1000*(time.perf_counter()-t0_p2):.1f}"
             )
+            return result
 
-            return transcribed_native, transcribed_roman
-
+        # Run both passes concurrently — each occupies one CPU via the thread pool.
+        # CTranslate2 (faster-whisper's backend) is documented as thread-safe for
+        # concurrent inference on the same model instance.
         t0 = time.perf_counter()
-        transcribed_native, transcribed_roman = await loop.run_in_executor(None, _transcribe)
+        transcribed_native, transcribed_roman = await asyncio.gather(
+            loop.run_in_executor(None, _transcribe_native),
+            loop.run_in_executor(None, _transcribe_roman),
+        )
         logger.info(
             f"[TIMING] step=total_transcribe lang={language} "
             f"duration_ms={1000*(time.perf_counter()-t0):.1f}"
