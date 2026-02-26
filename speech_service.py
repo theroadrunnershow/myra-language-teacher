@@ -38,18 +38,26 @@ NOISE_REDUCTION_ENABLED = False
 # Feature flag: use initial_prompt to guide Whisper toward expected word (helps Telugu/Assamese)
 INITIAL_PROMPT_ENABLED = True
 
-# Lazy-loaded Whisper model
+# Lazy-loaded faster-whisper model (CTranslate2 backend, ~4× faster on CPU)
 _whisper_model = None
 _whisper_model_size = "tiny"  # upgrade to "base" or "small" for better regional-language accuracy
+_whisper_compute_type = "int8"  # int8 quantization for CPU; use "float16" for GPU
 
 
 def get_whisper_model():
     global _whisper_model
     if _whisper_model is None:
-        import whisper
-        logger.info(f"Loading Whisper model '{_whisper_model_size}'…")
-        _whisper_model = whisper.load_model(_whisper_model_size)
-        logger.info("Whisper model loaded.")
+        from faster_whisper import WhisperModel
+        logger.info(
+            f"Loading faster-whisper model '{_whisper_model_size}' "
+            f"(device=cpu, compute={_whisper_compute_type})…"
+        )
+        _whisper_model = WhisperModel(
+            _whisper_model_size,
+            device="cpu",
+            compute_type=_whisper_compute_type,
+        )
+        logger.info("faster-whisper model loaded.")
     return _whisper_model
 
 
@@ -199,29 +207,26 @@ async def recognize_speech(
             kw_roman = {"initial_prompt": (romanized or expected_word).strip()} if INITIAL_PROMPT_ENABLED else {}
 
             # Pass 1: force target language (native-script output, e.g. Telugu/Assamese glyphs).
-            # The base model has sparse Indic training data so this can hallucinate, but it's
-            # the best path when Whisper does know the word.
-            result_native = model.transcribe(
+            # faster-whisper returns (segments_generator, TranscriptionInfo); consume immediately.
+            segments_native, _ = model.transcribe(
                 wav_path,
                 language=lang_code,
                 task="transcribe",
-                fp16=False,
                 **kw_native,
             )
-            transcribed_native = result_native["text"].strip()
+            transcribed_native = " ".join(seg.text for seg in segments_native).strip()
             logger.info(f"Whisper pass-1 (lang={lang_code}): '{transcribed_native}'")
 
             # Pass 2: force English — Whisper reliably produces a phonetic / romanized
             # approximation of Indic speech in English mode.  This is what we compare
             # against the `romanized` pronunciation guide.
-            result_roman = model.transcribe(
+            segments_roman, _ = model.transcribe(
                 wav_path,
                 language="en",
                 task="transcribe",
-                fp16=False,
                 **kw_roman,
             )
-            transcribed_roman = result_roman["text"].strip()
+            transcribed_roman = " ".join(seg.text for seg in segments_roman).strip()
             logger.info(f"Whisper pass-2 (lang=en/phonetic): '{transcribed_roman}'")
 
             return transcribed_native, transcribed_roman
