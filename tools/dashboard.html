@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Myra — Performance Metrics Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 24px;
+    }
+
+    h1 { font-size: 1.4rem; font-weight: 700; color: #f8fafc; letter-spacing: -0.02em; }
+    h2 { font-size: 1rem; font-weight: 600; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 12px; }
+    h3 { font-size: 0.85rem; font-weight: 600; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 28px;
+      border-bottom: 1px solid #1e293b;
+      padding-bottom: 20px;
+    }
+    .header .subtitle { font-size: 0.85rem; color: #64748b; margin-top: 2px; }
+
+    /* ── File loaders ── */
+    .loaders {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .loader-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 18px 20px;
+      transition: border-color 0.2s;
+    }
+    .loader-card.loaded { border-color: #22d3ee; }
+    .loader-card label { display: block; font-size: 0.8rem; color: #94a3b8; margin-bottom: 8px; }
+    .loader-card input[type=file] { width: 100%; font-size: 0.8rem; color: #e2e8f0; }
+    .loader-card input[type=file]::file-selector-button {
+      background: #334155; border: none; color: #e2e8f0; padding: 5px 12px;
+      border-radius: 5px; cursor: pointer; font-size: 0.78rem; margin-right: 10px;
+    }
+    .loader-card input[type=file]::file-selector-button:hover { background: #475569; }
+    .env-badge {
+      display: inline-block; margin-top: 10px;
+      padding: 3px 10px; border-radius: 20px; font-size: 0.72rem; font-weight: 600;
+    }
+    .badge-local  { background: #14532d; color: #4ade80; }
+    .badge-gcp    { background: #1e3a5f; color: #60a5fa; }
+    .badge-custom { background: #3b1e6e; color: #c084fc; }
+    .meta-text { font-size: 0.72rem; color: #64748b; margin-top: 4px; }
+
+    /* ── Stat cards ── */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 12px;
+      margin-bottom: 28px;
+    }
+    .stat-card {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 14px 16px;
+    }
+    .stat-label { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 6px; }
+    .stat-values { display: flex; gap: 14px; align-items: baseline; }
+    .stat-val { font-size: 1.25rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+    .stat-val.local  { color: #4ade80; }
+    .stat-val.gcp    { color: #60a5fa; }
+    .stat-val.custom { color: #c084fc; }
+    .stat-unit { font-size: 0.7rem; color: #64748b; }
+
+    /* ── Sections ── */
+    .section { margin-bottom: 32px; }
+    .chart-wrap {
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 10px;
+      padding: 20px;
+      position: relative;
+    }
+    .chart-wrap canvas { max-height: 320px; }
+
+    /* ── Legend ── */
+    .legend {
+      display: flex; gap: 18px; margin-bottom: 14px;
+      font-size: 0.78rem; color: #94a3b8;
+    }
+    .legend-dot {
+      display: inline-block; width: 10px; height: 10px;
+      border-radius: 50%; margin-right: 5px; vertical-align: middle;
+    }
+    .dot-local  { background: #4ade80; }
+    .dot-gcp    { background: #60a5fa; }
+    .dot-custom { background: #c084fc; }
+
+    /* ── Raw table ── */
+    .table-wrap { overflow-x: auto; }
+    table {
+      width: 100%; border-collapse: collapse;
+      font-size: 0.78rem; font-variant-numeric: tabular-nums;
+    }
+    thead tr { background: #0f172a; }
+    th, td { padding: 7px 12px; border-bottom: 1px solid #1e293b; white-space: nowrap; }
+    th { color: #64748b; text-align: left; font-weight: 600; }
+    td.step { color: #e2e8f0; font-weight: 500; }
+    td.env-local  { color: #4ade80; }
+    td.env-gcp    { color: #60a5fa; }
+    td.env-custom { color: #c084fc; }
+    tr:hover td { background: #1e293b; }
+
+    /* ── Empty / hint states ── */
+    .hint {
+      text-align: center; padding: 48px 0;
+      color: #475569; font-size: 0.9rem; line-height: 2;
+    }
+    .hint code { font-size: 0.78rem; background: #1e293b; padding: 2px 6px; border-radius: 4px; color: #94a3b8; }
+
+    .filter-row {
+      display: flex; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; align-items: center;
+      font-size: 0.8rem;
+    }
+    .filter-row label { color: #94a3b8; }
+    .filter-row select {
+      background: #1e293b; border: 1px solid #334155; color: #e2e8f0;
+      padding: 4px 8px; border-radius: 5px; font-size: 0.78rem;
+    }
+  </style>
+</head>
+<body>
+
+<div class="header">
+  <div>
+    <h1>🦕 Performance Metrics Dashboard</h1>
+    <div class="subtitle">Compare timings across local and GCP Cloud Run — load up to two JSON exports</div>
+  </div>
+</div>
+
+<!-- File loaders -->
+<div class="loaders">
+  <div class="loader-card" id="card-a">
+    <label>Environment A (e.g. local)</label>
+    <input type="file" id="file-a" accept=".json" />
+    <div id="meta-a"></div>
+  </div>
+  <div class="loader-card" id="card-b">
+    <label>Environment B (e.g. GCP)</label>
+    <input type="file" id="file-b" accept=".json" />
+    <div id="meta-b"></div>
+  </div>
+</div>
+
+<!-- Empty hint -->
+<div class="hint" id="hint">
+  Load one or two <code>*_metrics.json</code> files produced by <code>tools/collect_metrics.py</code> to see charts here.<br>
+  <code>python main.py 2>&1 | tee local.log</code><br>
+  <code>python tools/collect_metrics.py --source local --input local.log --output local_metrics.json</code>
+</div>
+
+<!-- Dashboard (hidden until data loaded) -->
+<div id="dashboard" style="display:none">
+
+  <!-- Summary stats -->
+  <div class="section">
+    <h2>Key Metrics</h2>
+    <div class="stats-grid" id="stats-grid"></div>
+  </div>
+
+  <!-- Median chart -->
+  <div class="section">
+    <h2>Median Duration per Step</h2>
+    <div class="chart-wrap">
+      <div class="legend" id="legend-median"></div>
+      <canvas id="chart-median"></canvas>
+    </div>
+  </div>
+
+  <!-- p95 chart -->
+  <div class="section">
+    <h2>p95 Duration per Step</h2>
+    <div class="chart-wrap">
+      <div class="legend" id="legend-p95"></div>
+      <canvas id="chart-p95"></canvas>
+    </div>
+  </div>
+
+  <!-- Raw samples table -->
+  <div class="section">
+    <h2>Raw Samples</h2>
+    <div class="filter-row">
+      <label>Step:</label>
+      <select id="filter-step"><option value="">All</option></select>
+      <label>Env:</label>
+      <select id="filter-env"><option value="">All</option></select>
+    </div>
+    <div class="chart-wrap">
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>env</th><th>step</th><th>duration_ms</th><th>lang</th>
+              <th>correct</th><th>best_sim</th><th>timestamp</th>
+            </tr>
+          </thead>
+          <tbody id="raw-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+// ─────────────────────────────────────────────
+// Palette
+// ─────────────────────────────────────────────
+const PALETTE = {
+  local:  { solid: '#4ade80', alpha: 'rgba(74,222,128,0.8)',  dim: 'rgba(74,222,128,0.25)' },
+  gcp:    { solid: '#60a5fa', alpha: 'rgba(96,165,250,0.8)',  dim: 'rgba(96,165,250,0.25)' },
+  custom: { solid: '#c084fc', alpha: 'rgba(192,132,252,0.8)', dim: 'rgba(192,132,252,0.25)' },
+};
+
+function envColor(env) {
+  if (env === 'local')  return PALETTE.local;
+  if (env === 'gcp')    return PALETTE.gcp;
+  return PALETTE.custom;
+}
+function envClass(env) {
+  if (env === 'local') return 'env-local';
+  if (env === 'gcp')   return 'env-gcp';
+  return 'env-custom';
+}
+function badgeClass(env) {
+  if (env === 'local') return 'badge-local';
+  if (env === 'gcp')   return 'badge-gcp';
+  return 'badge-custom';
+}
+
+// ─────────────────────────────────────────────
+// Stats helpers
+// ─────────────────────────────────────────────
+const STEP_ORDER = [
+  'tts_generate', 'api_tts',
+  'audio_upload_read', 'audio_decode', 'audio_resample', 'noise_reduction',
+  'wav_export', 'total_audio_convert', 'convert_to_wav',
+  'whisper_model_load', 'whisper_model_ready',
+  'whisper_pass1', 'whisper_pass2', 'total_transcribe',
+  'total_recognize', 'api_recognize',
+];
+
+const KEY_METRICS = [
+  { key: 'whisper_pass1',      label: 'Whisper Pass 1' },
+  { key: 'whisper_pass2',      label: 'Whisper Pass 2' },
+  { key: 'total_transcribe',   label: 'Total Transcribe' },
+  { key: 'tts_generate',       label: 'TTS Generate' },
+  { key: 'total_audio_convert', label: 'Audio Convert' },
+  { key: 'api_recognize',      label: 'Full Recognize' },
+];
+
+function percentile(arr, p) {
+  if (!arr.length) return null;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const idx = Math.ceil((p / 100) * sorted.length) - 1;
+  return sorted[Math.max(0, idx)];
+}
+function median(arr) { return percentile(arr, 50); }
+
+function groupByStep(samples) {
+  // returns { stepName: [duration_ms, ...] }
+  const out = {};
+  for (const s of samples) {
+    if (s.duration_ms == null) continue;
+    (out[s.step] = out[s.step] || []).push(s.duration_ms);
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────
+// State
+// ─────────────────────────────────────────────
+let datasets = {}; // { envLabel: { meta, samples } }
+let charts = {};
+
+function allEnvs()     { return Object.keys(datasets); }
+function allSamples()  { return allEnvs().flatMap(e => datasets[e].samples.map(s => ({ ...s, _env: e }))); }
+function allSteps() {
+  const set = new Set(allSamples().map(s => s.step));
+  return STEP_ORDER.filter(s => set.has(s)).concat([...set].filter(s => !STEP_ORDER.includes(s)));
+}
+
+// ─────────────────────────────────────────────
+// Chart.js helpers
+// ─────────────────────────────────────────────
+Chart.defaults.color = '#94a3b8';
+Chart.defaults.borderColor = '#1e293b';
+
+function makeBarChart(canvasId, labels, envDatasets) {
+  const ctx = document.getElementById(canvasId).getContext('2d');
+  if (charts[canvasId]) charts[canvasId].destroy();
+  charts[canvasId] = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: envDatasets.map(({ env, data }) => ({
+        label: env,
+        data,
+        backgroundColor: envColor(env).alpha,
+        borderColor: envColor(env).solid,
+        borderWidth: 1.5,
+        borderRadius: 4,
+      })),
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { font: { size: 11 }, maxRotation: 40 }, grid: { color: '#1e293b' } },
+        y: { title: { display: true, text: 'ms', color: '#64748b' }, grid: { color: '#1e293b' } },
+      },
+    },
+  });
+}
+
+// ─────────────────────────────────────────────
+// Render helpers
+// ─────────────────────────────────────────────
+function renderLegend(containerId) {
+  const el = document.getElementById(containerId);
+  el.innerHTML = allEnvs().map(env => {
+    const cls = env === 'local' ? 'dot-local' : env === 'gcp' ? 'dot-gcp' : 'dot-custom';
+    return `<span><span class="legend-dot ${cls}"></span>${env}</span>`;
+  }).join('');
+}
+
+function renderStats() {
+  const grid = document.getElementById('stats-grid');
+  grid.innerHTML = '';
+  for (const { key, label } of KEY_METRICS) {
+    const card = document.createElement('div');
+    card.className = 'stat-card';
+    let valHtml = '';
+    for (const env of allEnvs()) {
+      const durations = (datasets[env].samples || [])
+        .filter(s => s.step === key && s.duration_ms != null)
+        .map(s => s.duration_ms);
+      const med = median(durations);
+      const cls = envClass(env);
+      valHtml += med != null
+        ? `<span class="stat-val ${cls}">${med.toFixed(0)}</span>`
+        : `<span class="stat-val" style="color:#475569">—</span>`;
+    }
+    card.innerHTML = `
+      <div class="stat-label">${label}</div>
+      <div class="stat-values">${valHtml}<span class="stat-unit">ms median</span></div>`;
+    grid.appendChild(card);
+  }
+}
+
+function renderCharts() {
+  const steps = allSteps();
+  const envs  = allEnvs();
+
+  function buildDatasets(statFn) {
+    return envs.map(env => {
+      const byStep = groupByStep(datasets[env].samples);
+      return { env, data: steps.map(s => { const v = statFn(byStep[s] || []); return v ?? null; }) };
+    });
+  }
+
+  renderLegend('legend-median');
+  makeBarChart('chart-median', steps, buildDatasets(median));
+
+  renderLegend('legend-p95');
+  makeBarChart('chart-p95', steps, buildDatasets(arr => percentile(arr, 95)));
+}
+
+function renderTable() {
+  const tbody = document.getElementById('raw-tbody');
+  const stepSel = document.getElementById('filter-step').value;
+  const envSel  = document.getElementById('filter-env').value;
+
+  let rows = allSamples();
+  if (stepSel) rows = rows.filter(r => r.step === stepSel);
+  if (envSel)  rows = rows.filter(r => r._env === envSel);
+
+  // Sort newest first (if timestamp present), else leave order
+  rows.sort((a, b) => {
+    if (a.timestamp && b.timestamp) return b.timestamp.localeCompare(a.timestamp);
+    return 0;
+  });
+
+  tbody.innerHTML = rows.slice(0, 500).map(r => {
+    const envCls = envClass(r._env);
+    const ms = r.duration_ms != null ? r.duration_ms.toFixed(1) : '—';
+    const ts = r.timestamp ? r.timestamp.replace('T', ' ').replace(/\.\d+Z$/, 'Z') : '—';
+    const correct = r.correct != null ? (r.correct ? '✓' : '✗') : '—';
+    return `<tr>
+      <td class="${envCls}">${r._env}</td>
+      <td class="step">${r.step}</td>
+      <td>${ms}</td>
+      <td>${r.lang ?? r.language ?? '—'}</td>
+      <td>${correct}</td>
+      <td>${r.best_sim != null ? r.best_sim.toFixed(1) : '—'}</td>
+      <td>${ts}</td>
+    </tr>`;
+  }).join('');
+}
+
+function populateFilters() {
+  const steps = allSteps();
+  const stepSel = document.getElementById('filter-step');
+  stepSel.innerHTML = '<option value="">All steps</option>' +
+    steps.map(s => `<option value="${s}">${s}</option>`).join('');
+
+  const envSel = document.getElementById('filter-env');
+  envSel.innerHTML = '<option value="">All envs</option>' +
+    allEnvs().map(e => `<option value="${e}">${e}</option>`).join('');
+}
+
+function renderAll() {
+  if (!allEnvs().length) return;
+  document.getElementById('hint').style.display = 'none';
+  document.getElementById('dashboard').style.display = 'block';
+  renderStats();
+  renderCharts();
+  populateFilters();
+  renderTable();
+}
+
+// ─────────────────────────────────────────────
+// File loading
+// ─────────────────────────────────────────────
+function loadFile(file, slot) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    let data;
+    try {
+      data = JSON.parse(e.target.result);
+    } catch (err) {
+      alert(`Could not parse ${file.name} as JSON: ${err.message}`);
+      return;
+    }
+
+    const env    = data.env || slot;
+    const samples = Array.isArray(data.samples) ? data.samples : [];
+    const count  = data.sample_count ?? samples.length;
+    const collAt = data.collected_at ? data.collected_at.slice(0, 16).replace('T', ' ') : '—';
+
+    datasets[env] = { meta: data, samples };
+
+    const card   = document.getElementById(`card-${slot}`);
+    const metaEl = document.getElementById(`meta-${slot}`);
+    card.classList.add('loaded');
+    metaEl.innerHTML = `
+      <span class="env-badge ${badgeClass(env)}">${env}</span>
+      <div class="meta-text">${count} samples · collected ${collAt} UTC</div>`;
+
+    renderAll();
+  };
+  reader.readAsText(file);
+}
+
+document.getElementById('file-a').addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0], 'a');
+});
+document.getElementById('file-b').addEventListener('change', e => {
+  if (e.target.files[0]) loadFile(e.target.files[0], 'b');
+});
+
+document.getElementById('filter-step').addEventListener('change', renderTable);
+document.getElementById('filter-env').addEventListener('change', renderTable);
+</script>
+</body>
+</html>
