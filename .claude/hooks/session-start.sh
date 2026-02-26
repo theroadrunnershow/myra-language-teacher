@@ -6,6 +6,8 @@ if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ]; then
   exit 0
 fi
 
+echo '{"async": true, "asyncTimeout": 300000}'
+
 echo "=== SessionStart: Setting up Myra Language Teacher environment ==="
 
 PROJECT_DIR="${CLAUDE_PROJECT_DIR:-$(pwd)}"
