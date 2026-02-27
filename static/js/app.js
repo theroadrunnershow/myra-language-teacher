@@ -258,6 +258,65 @@ function playYaaySound() {
   });
 }
 
+// Celebratory burst played under confetti: synthesised claps + rising run + chord bloom.
+// All generated via Web Audio – no audio files needed.
+function playCelebrationBurst() {
+  try {
+    const ctx = getAudioCtx();
+    const now = ctx.currentTime;
+
+    // Synthesised handclap: short filtered-noise burst with exponential decay
+    function clap(t) {
+      const size = Math.ceil(ctx.sampleRate * 0.08);
+      const buf  = ctx.createBuffer(1, size, ctx.sampleRate);
+      const d    = buf.getChannelData(0);
+      for (let i = 0; i < size; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / size);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      const hp  = ctx.createBiquadFilter();
+      hp.type   = 'highpass';
+      hp.frequency.value = 1200;
+      const g   = ctx.createGain();
+      g.gain.setValueAtTime(0.30, t);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.12);
+      src.connect(hp); hp.connect(g); g.connect(ctx.destination);
+      src.start(t); src.stop(t + 0.14);
+    }
+
+    // 4 claps spread over ~1 second
+    [0, 0.25, 0.50, 0.75].forEach(dt => clap(now + dt));
+
+    // Rising melodic run G4 → G5, starting slightly after first clap
+    const run = [392, 440, 494, 523, 587, 659, 784];
+    run.forEach((freq, i) => {
+      const osc = ctx.createOscillator();
+      const g   = ctx.createGain();
+      osc.connect(g); g.connect(ctx.destination);
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      const t  = now + 0.1 + i * 0.08;
+      g.gain.setValueAtTime(0, t);
+      g.gain.linearRampToValueAtTime(0.13, t + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.001, t + 0.22);
+      osc.start(t); osc.stop(t + 0.25);
+    });
+
+    // C major chord bloom at the peak of the run
+    const ct = now + 0.1 + run.length * 0.08;
+    [523, 659, 784].forEach(freq => {
+      const osc = ctx.createOscillator();
+      const g   = ctx.createGain();
+      osc.connect(g); g.connect(ctx.destination);
+      osc.type = 'triangle';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.10, ct);
+      g.gain.exponentialRampToValueAtTime(0.001, ct + 0.8);
+      osc.start(ct); osc.stop(ct + 0.85);
+    });
+
+  } catch (_) { /* AudioContext unavailable */ }
+}
+
 // Higher-pitched arpeggio for streak milestones
 function playStreakSound(streakCount) {
   const notes = streakCount >= 5
@@ -724,6 +783,7 @@ function handleResult(result) {
     launchSparkles();
     showStarPop();
     playYaaySound();
+    playCelebrationBurst();
     setBubble(celebMsg);
     // Voice line after the arpeggio has started; next word loads AFTER voice finishes.
     const celebGen = state.generation;
