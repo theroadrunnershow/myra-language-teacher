@@ -277,11 +277,14 @@ def _make_model_mock(native_text: str, roman_text: str) -> MagicMock:
 
     faster-whisper's model.transcribe() returns (segments_generator, TranscriptionInfo).
     We return a list (also iterable) to keep mocks simple.
+
+    Call order matches the optimised pipeline: pass-2 (English/romanized) runs FIRST;
+    pass-1 (native script) only runs as a fallback when pass-2 score is below threshold.
     """
     model = MagicMock(name="WhisperModel")
     model.transcribe.side_effect = [
-        ([_make_segment(native_text)], MagicMock()),   # pass-1: native script
-        ([_make_segment(roman_text)], MagicMock()),    # pass-2: romanized / English phonetic
+        ([_make_segment(roman_text)], MagicMock()),    # pass-2: romanized / English phonetic (first)
+        ([_make_segment(native_text)], MagicMock()),   # pass-1: native script (fallback only)
     ]
     return model
 
@@ -306,6 +309,8 @@ class TestRecognizeSpeech:
     # --- success paths ---
 
     async def test_exact_native_match_is_correct(self, patch_convert):
+        # pass-2 (roman) runs first and matches "pilli" at 100% → short-circuit.
+        # script_similarity is 0.0 because pass-1 is skipped; is_correct is still True.
         model = _make_model_mock("పిల్లి", "pilli")
         with patch("speech_service.get_whisper_model", return_value=model):
             result = await recognize_speech(
@@ -316,7 +321,7 @@ class TestRecognizeSpeech:
                 similarity_threshold=50.0,
             )
         assert result["is_correct"] is True
-        assert result["script_similarity"] == 100.0
+        assert result["roman_similarity"] == 100.0
 
     async def test_exact_roman_match_is_correct(self, patch_convert):
         model = _make_model_mock("some_noise", "pilli")
@@ -500,3 +505,65 @@ class TestRecognizeSpeech:
                 similarity_threshold=50.0,
             )
         assert result["transcribed"] == "పిల్లి"
+
+    # --- short-circuit and optimisation paths ---
+
+    async def test_short_circuit_skips_pass1_when_roman_matches(self, patch_convert):
+        """When pass-2 roman score meets threshold, model.transcribe is called only once."""
+        model = _make_model_mock("పిల్లి", "pilli")
+        with patch("speech_service.get_whisper_model", return_value=model):
+            result = await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="pilli",
+                similarity_threshold=50.0,
+            )
+        assert result["is_correct"] is True
+        assert model.transcribe.call_count == 1, "Pass-1 should be skipped on short-circuit"
+
+    async def test_fallback_runs_pass1_when_roman_insufficient(self, patch_convert):
+        """When pass-2 roman score is below threshold, both passes run."""
+        # pass-2 returns "wrong_roman" (low score vs "pilli"); pass-1 returns correct native
+        model = _make_model_mock("పిల్లి", "wrong_roman")
+        with patch("speech_service.get_whisper_model", return_value=model):
+            result = await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="pilli",
+                similarity_threshold=50.0,
+            )
+        assert model.transcribe.call_count == 2, "Pass-1 fallback should run when pass-2 fails"
+        assert result["script_similarity"] == 100.0
+
+    async def test_whisper_opts_passed_to_pass2_call(self, patch_convert):
+        """beam_size=1 and other optimisation flags are forwarded to the pass-2 transcribe call."""
+        model = _make_model_mock("పిల్లి", "pilli")
+        with patch("speech_service.get_whisper_model", return_value=model):
+            await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="pilli",
+                similarity_threshold=50.0,
+            )
+        call_kwargs = model.transcribe.call_args_list[0][1]
+        assert call_kwargs.get("beam_size") == 1
+        assert call_kwargs.get("without_timestamps") is True
+        assert call_kwargs.get("condition_on_previous_text") is False
+        assert call_kwargs.get("max_new_tokens") == 50
+
+    async def test_no_romanized_never_short_circuits(self, patch_convert):
+        """With no romanized hint, roman_sim is always 0 → pass-1 always runs."""
+        model = _make_model_mock("పిల్లి", "pilli")
+        with patch("speech_service.get_whisper_model", return_value=model):
+            result = await recognize_speech(
+                audio_data=b"audio",
+                language="telugu",
+                expected_word="పిల్లి",
+                romanized="",
+                similarity_threshold=50.0,
+            )
+        assert model.transcribe.call_count == 2, "Pass-1 must run when romanized is empty"
+        assert result["script_similarity"] == 100.0
