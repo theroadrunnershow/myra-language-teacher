@@ -51,7 +51,7 @@ variable "daily_budget_limit" {
 }
 
 variable "domain" {
-  description = "Custom domain name (e.g. myra-language-teacher.ai) — leave empty to use nip.io fallback"
+  description = "Custom domain name (e.g. kiddos-telugu-teacher.com) — leave empty to use nip.io fallback"
   type        = string
   default     = ""
 }

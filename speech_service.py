@@ -39,6 +39,11 @@ NOISE_REDUCTION_ENABLED = False
 # Feature flag: use initial_prompt to guide Whisper toward expected word (helps Telugu/Assamese)
 INITIAL_PROMPT_ENABLED = True
 
+# Feature flag: skip native-language pass1 entirely (set DISABLE_PASS1=true on GCP Cloud Run
+# where pass1 produces hallucinations and takes 27–31s due to single vCPU).
+# When disabled, only pass2 (romanized/English) is used for recognition.
+DISABLE_PASS1: bool = os.environ.get("DISABLE_PASS1", "").lower() in ("1", "true", "yes")
+
 # Whisper inference optimization flags applied to every transcribe() call.
 # These collectively prevent runaway token generation and cut latency 3–5×.
 _WHISPER_OPTS: dict = dict(
@@ -279,7 +284,7 @@ async def recognize_speech(
             # Short-circuit: if romanized match already meets threshold, skip native pass.
             # Saves ~6s on the happy path (pass1 was ~6262ms, pass2 is ~198ms).
             roman_sim_early = calculate_similarity(romanized, transcribed_roman) if romanized else 0.0
-            if roman_sim_early >= similarity_threshold:
+            if DISABLE_PASS1 or roman_sim_early >= similarity_threshold:
                 logger.info(
                     f"[TIMING] step=whisper_pass1 lang={lang_code} result='' "
                     f"duration_ms=0 skipped=true"

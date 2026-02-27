@@ -69,12 +69,24 @@ resource "google_compute_url_map" "https_redirect" {
   }
 }
 
+# Regenerates a new suffix when the domain changes, enabling create_before_destroy
+resource "random_id" "cert" {
+  byte_length = 4
+  keepers = {
+    domain = var.domain != "" ? var.domain : "nip.io"
+  }
+}
+
 # Managed SSL certificate (auto-provisioned by GCP)
 resource "google_compute_managed_ssl_certificate" "app" {
-  name = "dino-app-cert"
+  name = "dino-app-cert-${random_id.cert.hex}"
 
   managed {
     domains = var.domain != "" ? [var.domain] : ["${google_compute_global_address.app.address}.nip.io"]
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 

@@ -39,6 +39,10 @@ resource "google_cloud_run_v2_service" "app" {
         name  = "GCP_PROJECT"
         value = var.project_id
       }
+      env {
+        name  = "DISABLE_PASS1"
+        value = "true"
+      }
 
       # Startup probe — Whisper model load takes ~30s
       startup_probe {

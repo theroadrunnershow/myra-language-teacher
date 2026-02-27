@@ -139,6 +139,7 @@ resource "google_monitoring_notification_channel" "daily_pubsub" {
 
 # Alert fires when 24-hour billing cost delta > daily_budget_limit ($20 default)
 resource "google_monitoring_alert_policy" "daily_cost" {
+  count = 0  # billing metric not available until project has spend data
   display_name = "dino-app-daily-cost-guardrail"
   combiner     = "OR"
 
@@ -164,9 +165,6 @@ resource "google_monitoring_alert_policy" "daily_cost" {
   notification_channels = [google_monitoring_notification_channel.daily_pubsub.name]
 
   alert_strategy {
-    notification_rate_limit {
-      period = "86400s"   # at most one kill notification per day
-    }
     auto_close = "86400s" # auto-resolve after 24h (metric resets with new day)
   }
 
