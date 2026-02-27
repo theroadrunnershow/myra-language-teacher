@@ -21,6 +21,8 @@ const state = {
   pendingTimeoutIds: [],   // timeouts to clear when Stop is pressed
   stopRequested: false,    // true when Stop pressed; skips processAudio after recording
   blinkTimerId: null,      // handle for the random blink scheduler
+  generation: 0,           // incremented on each new word/stop; lets async callbacks self-cancel
+  _voiceResolve: null,     // stored resolver for current playDinoVoice Promise; called by stopExistingAudio
 };
 
 // ── DOM refs ──────────────────────────────────────────
@@ -268,45 +270,61 @@ function playStreakSound(streakCount) {
 
 // ── Roo's voice lines (English TTS) ───────────────────
 // Fetches /api/dino-voice with the given text, plays it with mouth animation.
+// Returns a Promise that resolves only when audio fully ends (or errors).
+// stopExistingAudio() resolves the Promise early if Stop is pressed.
 // Silently no-ops during recording to avoid Whisper contamination.
-async function playDinoVoice(text) {
-  if (state.isRecording) return;
+function playDinoVoice(text) {
+  if (state.isRecording) return Promise.resolve();
 
   const clean = stripEmoji(text);
-  if (!clean.trim()) return;
+  if (!clean.trim()) return Promise.resolve();
 
-  // Stop any in-progress voice line
+  // Resolve any in-progress voice Promise and stop its audio
+  if (state._voiceResolve) {
+    state._voiceResolve();
+    state._voiceResolve = null;
+  }
   if (state.voiceAudio) {
     state.voiceAudio.pause();
     state.voiceAudio = null;
   }
 
-  try {
-    const url = `/api/dino-voice?text=${encodeURIComponent(clean)}`;
-    const audio = new Audio(url);
-    state.voiceAudio = audio;
+  return new Promise((resolve) => {
+    state._voiceResolve = resolve;
 
-    animateMouth(true);
-    els.dinoTeeth.style.display = 'block';
+    try {
+      const url = `/api/dino-voice?text=${encodeURIComponent(clean)}`;
+      const audio = new Audio(url);
+      state.voiceAudio = audio;
 
-    const done = () => {
+      animateMouth(true);
+      els.dinoTeeth.style.display = 'block';
+
+      const done = () => {
+        if (state.voiceAudio === audio) state.voiceAudio = null;
+        if (state._voiceResolve === resolve) state._voiceResolve = null;
+        if (!state.isRecording) {
+          animateMouth(false);
+          const svg = els.dinoSvg;
+          const stillSpeaking = svg.classList.contains('dino-talk') || svg.classList.contains('dino-ask');
+          if (!stillSpeaking) els.dinoTeeth.style.display = 'none';
+        }
+        resolve();
+      };
+
+      // Only resolve on natural completion (ended) or failure (error/play-rejection).
+      // Stop-triggered resolution is handled by stopExistingAudio() via state._voiceResolve.
+      audio.addEventListener('ended', done);
+      audio.addEventListener('error', done);
+      audio.play().catch(done);
+    } catch (e) {
+      console.warn('Dino voice failed:', e);
       state.voiceAudio = null;
-      if (!state.isRecording) {
-        animateMouth(false);
-        const svg = els.dinoSvg;
-        const stillSpeaking = svg.classList.contains('dino-talk') || svg.classList.contains('dino-ask');
-        if (!stillSpeaking) els.dinoTeeth.style.display = 'none';
-      }
-    };
-
-    audio.addEventListener('ended', done);
-    audio.addEventListener('error', done);
-    await audio.play();
-  } catch (e) {
-    console.warn('Dino voice failed:', e);
-    state.voiceAudio = null;
-    animateMouth(false);
-  }
+      state._voiceResolve = null;
+      animateMouth(false);
+      resolve();
+    }
+  });
 }
 
 // ── Blink timer ────────────────────────────────────────
@@ -376,6 +394,7 @@ async function fetchConfig() {
 
 // ── Word loading ──────────────────────────────────────
 async function loadNextWord() {
+  state.generation += 1;
   state.attempts = 0;
   resetDots();
   hideFeedback();
@@ -460,6 +479,11 @@ function stopExistingAudio() {
   if (state.voiceAudio) {
     state.voiceAudio.pause();
     state.voiceAudio = null;
+  }
+  // Unblock any async chain awaiting playDinoVoice; generation check prevents nextWord()
+  if (state._voiceResolve) {
+    state._voiceResolve();
+    state._voiceResolve = null;
   }
   animateMouth(false);
 }
@@ -701,9 +725,12 @@ function handleResult(result) {
     showStarPop();
     playYaaySound();
     setBubble(celebMsg);
-    // Voice line after the arpeggio has started
-    scheduleTransition(() => playDinoVoice(celebMsg), 350);
-    scheduleTransition(nextWord, 2800);
+    // Voice line after the arpeggio has started; next word loads AFTER voice finishes.
+    const celebGen = state.generation;
+    scheduleTransition(async () => {
+      await playDinoVoice(celebMsg);
+      if (state.generation === celebGen) nextWord();
+    }, 350);
 
   } else if (state.attempts >= state.maxAttempts) {
     // ❌ Out of attempts — reveal answer and move on
@@ -721,8 +748,11 @@ function handleResult(result) {
     const outMsg = randomMsg('outOfAttempts');
     setBubble("Good try! Let's move on. 🌟");
     playBeepSound();
-    scheduleTransition(() => playDinoVoice(outMsg), 250);
-    scheduleTransition(nextWord, 3200);
+    const outGen = state.generation;
+    scheduleTransition(async () => {
+      await playDinoVoice(outMsg);
+      if (state.generation === outGen) nextWord();
+    }, 250);
 
   } else {
     // ❌ Wrong but retries remaining
@@ -778,6 +808,7 @@ function updateStreak(correct) {
 
 // ── Stop flow ─────────────────────────────────────────
 function stopFlow() {
+  state.generation += 1;
   state.pendingTimeoutIds.forEach(id => clearTimeout(id));
   state.pendingTimeoutIds = [];
 

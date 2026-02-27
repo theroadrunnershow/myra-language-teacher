@@ -310,8 +310,8 @@ main {
 
 .word-english {
   font-family: var(--font-title);
-  font-size: clamp(1.6rem, 3vw, 2.4rem);
-  color: var(--purple-dark);
+  font-size: clamp(2.2rem, 4.5vw, 3.2rem);
+  color: #C0392B;
   letter-spacing: 2px;
   text-transform: uppercase;
   margin-bottom: 0.4rem;
@@ -652,7 +652,7 @@ hr { border: none; border-top: 2px dashed var(--pink-light); margin: 1.4rem 0; }
 
   .speech-bubble { font-size: 0.82rem; max-width: 160px; left: -5px; }
 
-  .word-english     { font-size: 1.8rem; }
+  .word-english     { font-size: 2.2rem; }
   .word-translation { font-size: 2rem; }
   .word-emoji       { font-size: 3rem; }
 
