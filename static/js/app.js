@@ -335,7 +335,11 @@ function playStreakSound(streakCount) {
 function playDinoVoice(text) {
   if (state.isRecording) return Promise.resolve();
 
-  const clean = stripEmoji(text);
+  // gTTS spells out ALL-CAPS words as acronyms; lowercase them first.
+  // Also collapse 3+ repeated letters so "ROOOAR" → "roar" sounds natural.
+  const clean = stripEmoji(text)
+    .replace(/\b[A-Z]{3,}\b/g, w => w.toLowerCase())
+    .replace(/([a-zA-Z])\1{2,}/g, '$1');
   if (!clean.trim()) return Promise.resolve();
 
   // Resolve any in-progress voice Promise and stop its audio
@@ -738,7 +742,7 @@ async function processAudio() {
   }
 }
 
-// ── Debug panel ───────────────────────────────────────
+// ── Heard / score panel ───────────────────────────────
 function showDebug(heard, similarity, error) {
   const panel = document.getElementById('debug-panel');
   if (!panel) return;
@@ -747,11 +751,32 @@ function showDebug(heard, similarity, error) {
   const simEl   = document.getElementById('debug-sim');
   const errEl   = document.getElementById('debug-error');
 
-  heardEl.textContent = heard  ? `🎙️ Whisper heard: "${heard}"` : '';
-  simEl.textContent   = (similarity !== '' && similarity !== undefined)
-                        ? `📊 Match score: ${similarity}%` : '';
-  errEl.textContent   = error  ? `⚠️ Error: ${error}` : '';
+  // "Roo heard" pill
+  if (heard) {
+    heardEl.innerHTML =
+      `<span class="debug-label">🎙️ Roo heard</span><span class="debug-pill">${heard}</span>`;
+  } else {
+    heardEl.innerHTML = '';
+  }
 
+  // Animated score bar — colour shifts green / amber / pink by score
+  if (similarity !== '' && similarity !== undefined) {
+    const pct   = parseFloat(similarity) || 0;
+    const color = pct >= 80 ? '#2ECC71' : pct >= 50 ? '#F39C12' : '#E74C3C';
+    const icon  = pct >= 80 ? '🎯' : pct >= 50 ? '🤔' : '😅';
+    simEl.innerHTML =
+      `<div class="debug-score-row">` +
+        `<span class="debug-label">${icon} Match</span>` +
+        `<div class="debug-bar-wrap">` +
+          `<div class="debug-bar" style="width:${pct}%;background:${color}"></div>` +
+        `</div>` +
+        `<span class="debug-pct" style="color:${color}">${pct}%</span>` +
+      `</div>`;
+  } else {
+    simEl.innerHTML = '';
+  }
+
+  errEl.textContent = error ? `⚠️ ${error}` : '';
   panel.classList.remove('hidden');
 }
 
