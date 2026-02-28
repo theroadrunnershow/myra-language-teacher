@@ -81,9 +81,16 @@ async def health():
 
 
 # ── Page routes ───────────────────────────────────────────────────────────────
+_NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
 @app.get("/")
 async def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request, "config": DEFAULT_CONFIG})
+    return templates.TemplateResponse(
+        "index.html",
+        {"request": request, "config": DEFAULT_CONFIG},
+        headers=_NO_CACHE,
+    )
 
 
 @app.get("/settings")
@@ -91,6 +98,7 @@ async def settings_page(request: Request):
     return templates.TemplateResponse(
         "config.html",
         {"request": request, "config": DEFAULT_CONFIG, "all_categories": ALL_CATEGORIES},
+        headers=_NO_CACHE,
     )
 
 
@@ -102,11 +110,17 @@ async def api_get_config():
 
 @app.post("/api/config")
 async def api_save_config(request: Request):
-    """Validate config. Client persists to sessionStorage; no server-side storage."""
-    content_length = int(request.headers.get("content-length", 0))
+    """Validate config. Client persists to localStorage; no server-side storage."""
+    try:
+        content_length = int(request.headers.get("content-length") or 0)
+    except (ValueError, TypeError):
+        content_length = 0
     if content_length > MAX_CONFIG_BODY:
         raise HTTPException(status_code=413, detail="Request body too large")
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
     if "languages" in body and not isinstance(body["languages"], list):
         raise HTTPException(status_code=400, detail="'languages' must be a list")
     if "categories" in body and not isinstance(body["categories"], list):

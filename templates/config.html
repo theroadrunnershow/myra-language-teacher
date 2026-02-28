@@ -197,11 +197,17 @@ async function saveSettings() {
     setup_complete: true,
   };
 
-  const resp = await fetch('/api/config', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(config),
-  });
+  let resp;
+  try {
+    resp = await fetch('/api/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(config),
+    });
+  } catch (err) {
+    alert(`Network error – could not reach server.\n${err.message}`);
+    return;
+  }
 
   if (resp.ok) {
     localStorage.setItem(CONFIG_KEY, JSON.stringify(config));
@@ -209,7 +215,14 @@ async function saveSettings() {
     fb.classList.remove('hidden');
     setTimeout(() => { fb.classList.add('hidden'); window.location.href = '/'; }, 1500);
   } else {
-    alert('Save failed – check the server console.');
+    let detail = '';
+    try {
+      const body = await resp.json();
+      detail = body.detail || JSON.stringify(body);
+    } catch (_) {
+      detail = await resp.text().catch(() => '');
+    }
+    alert(`Save failed (HTTP ${resp.status})${detail ? ':\n' + detail : '.'}`);
   }
 }
 </script>
