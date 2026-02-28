@@ -5,6 +5,20 @@ resource "google_compute_security_policy" "app" {
   name        = "dino-app-armor"
   description = "Rate limiting and OWASP protection for Myra language teacher app"
 
+  # ── Allow safe internal endpoints before OWASP scan ──────────────────────────
+  # POST /api/config only receives simple settings JSON (no user-generated HTML).
+  # The xss-stable rule false-positives on JSON bodies, so we allow it explicitly.
+  rule {
+    action   = "allow"
+    priority = 100
+    match {
+      expr {
+        expression = "request.path == '/api/config'"
+      }
+    }
+    description = "Allow config save — safe endpoint, exempt from OWASP body scan"
+  }
+
   # ── OWASP preconfigured rule set (priority 900, before rate limits) ───────────
   # Blocks requests matching known XSS, SQLi, LFI, RFI, and scanner signatures.
   # These evaluate request bodies + headers against OWASP ModSecurity CRS rules.

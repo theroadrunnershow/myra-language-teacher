@@ -73,7 +73,7 @@ resource "google_compute_url_map" "https_redirect" {
 resource "random_id" "cert" {
   byte_length = 4
   keepers = {
-    domain = var.domain != "" ? var.domain : "nip.io"
+    domain = var.domain != "" ? "www.${var.domain}" : "nip.io"
   }
 }
 
@@ -82,7 +82,7 @@ resource "google_compute_managed_ssl_certificate" "app" {
   name = "dino-app-cert-${random_id.cert.hex}"
 
   managed {
-    domains = var.domain != "" ? [var.domain] : ["${google_compute_global_address.app.address}.nip.io"]
+    domains = var.domain != "" ? [var.domain, "www.${var.domain}"] : ["${google_compute_global_address.app.address}.nip.io"]
   }
 
   lifecycle {
