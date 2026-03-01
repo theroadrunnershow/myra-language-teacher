@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speech_service import recognize_speech
+from translate_service import translate_word
 from tts_service import generate_tts
 from words_db import ALL_CATEGORIES, WORD_DATABASE, get_random_word
 
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB — prevents OOM on Cloud Run
 MAX_TEXT_LEN = 200                   # characters — prevents gTTS quota abuse
 MAX_CONFIG_BODY = 4096               # 4 KB — prevents large JSON body abuse
+MAX_TRANSLATE_WORD_LEN = 50          # characters — prevents abuse of /api/translate
 VALID_LANGUAGES = {"telugu", "assamese", "english"}
 
 app = FastAPI(title="Myra Language Teacher")
@@ -147,6 +149,34 @@ async def api_get_word(
     category = random.choice(cats)
     word = get_random_word(category, language)
     return word
+
+
+# ── API: on-demand translation ────────────────────────────────────────────────
+@app.get("/api/translate")
+async def api_translate(word: str = "", language: str = "telugu"):
+    """Translate any English word to Telugu or Assamese on demand.
+    Checks words_db first; falls back to Google Cloud Translate API."""
+    word = word.strip()
+    if not word:
+        raise HTTPException(status_code=400, detail="word parameter is required")
+    if len(word) > MAX_TRANSLATE_WORD_LEN:
+        raise HTTPException(
+            status_code=400,
+            detail=f"word too long (max {MAX_TRANSLATE_WORD_LEN} characters)",
+        )
+    if language not in {"telugu", "assamese"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid language '{language}'. Must be 'telugu' or 'assamese'.",
+        )
+    try:
+        return await translate_word(word, language)
+    except ValueError as exc:
+        logger.error(f"Translate config error: {exc}")
+        raise HTTPException(status_code=503, detail="Translation service not configured.")
+    except Exception as exc:
+        logger.error(f"Translate error for '{word}': {exc}")
+        raise HTTPException(status_code=503, detail=f"Translation failed: {exc}")
 
 
 # ── API: TTS ──────────────────────────────────────────────────────────────────

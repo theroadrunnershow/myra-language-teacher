@@ -9,6 +9,7 @@ resource "google_compute_security_policy" "app" {
   # /api/tts, /api/dino-voice: Telugu/Assamese text in URL query string triggers xss-stable.
   # /api/recognize: Telugu expected_word in multipart POST body triggers xss-stable.
   # /api/config: JSON settings body triggers xss-stable.
+  # /api/translate: precautionary — query param is ASCII English but Indic in response.
   # All other routes (/, /settings, /api/word, /api/words/all) remain OWASP-protected.
   rule {
     action   = "allow"
@@ -20,10 +21,11 @@ resource "google_compute_security_policy" "app" {
           "request.path == '/api/dino-voice'",
           "request.path == '/api/recognize'",
           "request.path == '/api/config'",
+          "request.path == '/api/translate'",
         ])
       }
     }
-    description = "Exempt TTS, dino-voice, recognize, config from OWASP scan (Indic script false-positives)"
+    description = "Exempt TTS, dino-voice, recognize, config, translate from OWASP scan (Indic script false-positives)"
   }
 
   # ── OWASP preconfigured rule set (priority 900, before rate limits) ───────────
@@ -112,10 +114,32 @@ resource "google_compute_security_policy" "app" {
     description = "Rate limit dino-voice TTS: 30 req/min per IP"
   }
 
-  # General API (100 req/min per IP)
+  # Translate endpoint — tighter limit (20 req/min) because each miss hits Google Translate API
   rule {
     action   = "rate_based_ban"
     priority = 1003
+    match {
+      expr {
+        expression = "request.path.matches('/api/translate')"
+      }
+    }
+    rate_limit_options {
+      rate_limit_threshold {
+        count        = 20
+        interval_sec = 60
+      }
+      ban_duration_sec = 120
+      conform_action   = "allow"
+      exceed_action    = "deny(429)"
+      enforce_on_key   = "IP"
+    }
+    description = "Rate limit translate: 20 req/min per IP (external API cost)"
+  }
+
+  # General API (100 req/min per IP)
+  rule {
+    action   = "rate_based_ban"
+    priority = 1004
     match {
       expr {
         expression = "request.path.matches('/api/')"

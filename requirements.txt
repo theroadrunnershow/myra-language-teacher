@@ -10,3 +10,4 @@ aiofiles==24.1.0
 rapidfuzz==3.10.1
 noisereduce==3.0.3
 scipy==1.13.1
+google-cloud-translate==3.15.5

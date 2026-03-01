@@ -404,3 +404,68 @@ class TestDinoVoiceEndpoint:
         ):
             resp = client.get("/api/dino-voice?text=Hello")
         assert resp.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# GET /api/translate
+# ---------------------------------------------------------------------------
+
+_FAKE_TRANSLATE_RESULT = {
+    "english": "umbrella",
+    "translation": "గొడుగు",
+    "romanized": "godugu",
+    "emoji": "✏️",
+    "language": "telugu",
+    "category": "custom",
+}
+
+
+class TestTranslateEndpoint:
+    def test_known_db_word_returns_200(self, client):
+        resp = client.get("/api/translate?word=cat&language=telugu")
+        assert resp.status_code == 200
+
+    def test_known_db_word_correct_translation(self, client):
+        data = client.get("/api/translate?word=cat&language=telugu").json()
+        assert data["translation"] == "పిల్లి"
+
+    def test_response_has_required_fields(self, client):
+        data = client.get("/api/translate?word=dog&language=assamese").json()
+        for field in ("english", "translation", "romanized", "emoji", "language", "category"):
+            assert field in data
+
+    def test_language_field_in_response(self, client):
+        data = client.get("/api/translate?word=cat&language=assamese").json()
+        assert data["language"] == "assamese"
+
+    def test_empty_word_returns_400(self, client):
+        resp = client.get("/api/translate?word=&language=telugu")
+        assert resp.status_code == 400
+
+    def test_word_too_long_returns_400(self, client):
+        resp = client.get(f"/api/translate?word={'a' * 51}&language=telugu")
+        assert resp.status_code == 400
+
+    def test_invalid_language_returns_400(self, client):
+        resp = client.get("/api/translate?word=cat&language=english")
+        assert resp.status_code == 400
+
+    def test_unknown_word_calls_translate_service(self, client):
+        with patch("main.translate_word", new_callable=AsyncMock, return_value=_FAKE_TRANSLATE_RESULT):
+            resp = client.get("/api/translate?word=umbrella&language=telugu")
+        assert resp.status_code == 200
+        assert resp.json()["translation"] == "గొడుగు"
+
+    def test_translate_api_failure_returns_503(self, client):
+        with patch("main.translate_word", new_callable=AsyncMock, side_effect=Exception("API down")):
+            resp = client.get("/api/translate?word=umbrella&language=telugu")
+        assert resp.status_code == 503
+
+    def test_missing_gcp_project_returns_503(self, client):
+        with patch("main.translate_word", new_callable=AsyncMock, side_effect=ValueError("GCP_PROJECT")):
+            resp = client.get("/api/translate?word=umbrella&language=telugu")
+        assert resp.status_code == 503
+
+    def test_default_language_is_telugu(self, client):
+        data = client.get("/api/translate?word=cat").json()
+        assert data["language"] == "telugu"

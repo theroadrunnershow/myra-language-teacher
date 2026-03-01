@@ -221,6 +221,16 @@
       <span id="streak-count">0</span> in a row! 🔥
     </div>
 
+    <!-- Teach Me: custom word lookup -->
+    <div class="teach-row">
+      <input type="text" id="teach-input" class="teach-input"
+             placeholder="Type any English word…" maxlength="50"
+             onkeydown="if(event.key==='Enter') teachCustomWord()" />
+      <button class="btn btn-teach" id="btn-teach" onclick="teachCustomWord()">
+        ✏️ Teach Me!
+      </button>
+    </div>
+
   </section><!-- end lesson-col -->
 
 </main>

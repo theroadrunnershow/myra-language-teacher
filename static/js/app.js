@@ -23,6 +23,7 @@ const state = {
   blinkTimerId: null,      // handle for the random blink scheduler
   generation: 0,           // incremented on each new word/stop; lets async callbacks self-cancel
   _voiceResolve: null,     // stored resolver for current playDinoVoice Promise; called by stopExistingAudio
+  _audioResolve: null,     // stored resolver for current playAudioUrl Promise; called by stopExistingAudio
 };
 
 // ── DOM refs ──────────────────────────────────────────
@@ -591,10 +592,14 @@ function playAudioUrl(url, playbackRate = 1.0) {
   return new Promise((resolve, reject) => {
     const audio = new Audio(url);
     state.ttsAudio = audio;
+    state._audioResolve = resolve;   // allows stopExistingAudio() to abort cleanly
     audio.playbackRate = playbackRate;
-    audio.addEventListener('ended', resolve);
-    audio.addEventListener('error', reject);
-    audio.play().catch(reject);
+    const cleanup = () => {
+      if (state._audioResolve === resolve) state._audioResolve = null;
+    };
+    audio.addEventListener('ended', () => { cleanup(); resolve(); });
+    audio.addEventListener('error', e => { cleanup(); reject(e); });
+    audio.play().catch(e => { cleanup(); reject(e); });
   });
 }
 
@@ -1096,9 +1101,49 @@ function launchConfetti() {
   setTimeout(() => { container.innerHTML = ''; }, 4000);
 }
 
+// ── Teach Me: custom word lookup ──────────────────────
+async function teachCustomWord() {
+  const input = document.getElementById('teach-input');
+  const word = input.value.trim();
+  if (!word) return;
+
+  const language = (state.config.languages || ['telugu'])[0];
+  const btn = document.getElementById('btn-teach');
+  if (btn) btn.disabled = true;
+
+  setBubble('Let me look that up! 🔍');
+  animateDino('idle');
+
+  try {
+    const resp = await fetch(
+      `/api/translate?word=${encodeURIComponent(word)}&language=${encodeURIComponent(language)}`
+    );
+    if (!resp.ok) {
+      setBubble("I don't know that word! 😅 Try another one.");
+      animateDino('shake');
+      return;
+    }
+    const wordData = await resp.json();
+    state.currentWord = wordData;
+    state.attempts = 0;
+    state.generation += 1;
+    resetDots();
+    hideFeedback();
+    displayWord(wordData);
+    input.value = '';
+    setTimeout(() => playWord(), 400);
+  } catch (e) {
+    console.error('Teach Me error:', e);
+    setBubble('Something went wrong! 😅');
+    animateDino('idle');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 // ── Button tap sounds ─────────────────────────────────
 function attachButtonSounds() {
-  ['btn-play', 'btn-record', 'btn-skip', 'btn-stop'].forEach(id => {
+  ['btn-play', 'btn-record', 'btn-skip', 'btn-stop', 'btn-teach'].forEach(id => {
     const btn = $(id);
     if (btn) btn.addEventListener('mousedown', playButtonTap);
   });

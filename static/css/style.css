@@ -488,6 +488,39 @@ main {
   font-weight: 700;
 }
 
+/* ── Teach Me row ─────────────────────────────────── */
+.teach-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  width: 100%;
+}
+
+.teach-input {
+  flex: 1;
+  font-family: var(--font-body);
+  font-size: 1rem;
+  padding: 0.6rem 1rem;
+  border: 2px solid var(--pink-light);
+  border-radius: 50px;
+  outline: none;
+  color: var(--purple-dark);
+  background: #fff;
+  transition: border-color 0.2s;
+}
+
+.teach-input:focus { border-color: var(--pink); }
+
+.btn-teach {
+  background: linear-gradient(135deg, #F39C12, #E67E22);
+  color: var(--white);
+  font-size: 1rem;
+  padding: 0.6rem 1.2rem;
+  white-space: nowrap;
+}
+
+.btn-teach:hover { filter: brightness(1.08); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(230,126,34,0.4); }
+
 /* ── Confetti ──────────────────────────────────────── */
 #confetti-container {
   position: fixed;
