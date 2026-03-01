@@ -811,9 +811,14 @@ function handleResult(result) {
     playCelebrationBurst();
     setBubble(celebMsg);
     // Voice line after the arpeggio has started; next word loads AFTER voice finishes.
+    // Also enforce a 1800ms minimum so the dino-celebrate animation (0.8s × 2 = 1.6s)
+    // and celebration burst (~1.5s) always complete, even if the voice is short or fails.
     const celebGen = state.generation;
     scheduleTransition(async () => {
-      await playDinoVoice(celebMsg);
+      await Promise.all([
+        playDinoVoice(celebMsg),
+        new Promise(r => setTimeout(r, 1800)),
+      ]);
       if (state.generation === celebGen) nextWord();
     }, 350);
 
