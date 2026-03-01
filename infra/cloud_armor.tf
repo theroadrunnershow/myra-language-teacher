@@ -5,18 +5,25 @@ resource "google_compute_security_policy" "app" {
   name        = "dino-app-armor"
   description = "Rate limiting and OWASP protection for Myra language teacher app"
 
-  # ── Allow safe internal endpoints before OWASP scan ──────────────────────────
-  # POST /api/config only receives simple settings JSON (no user-generated HTML).
-  # The xss-stable rule false-positives on JSON bodies, so we allow it explicitly.
+  # ── Exempt specific API endpoints from OWASP xss-stable false-positives ───────
+  # /api/tts, /api/dino-voice: Telugu/Assamese text in URL query string triggers xss-stable.
+  # /api/recognize: Telugu expected_word in multipart POST body triggers xss-stable.
+  # /api/config: JSON settings body triggers xss-stable.
+  # All other routes (/, /settings, /api/word, /api/words/all) remain OWASP-protected.
   rule {
     action   = "allow"
     priority = 100
     match {
       expr {
-        expression = "request.path == '/api/config'"
+        expression = join(" || ", [
+          "request.path == '/api/tts'",
+          "request.path == '/api/dino-voice'",
+          "request.path == '/api/recognize'",
+          "request.path == '/api/config'",
+        ])
       }
     }
-    description = "Allow config save — safe endpoint, exempt from OWASP body scan"
+    description = "Exempt TTS, dino-voice, recognize, config from OWASP scan (Indic script false-positives)"
   }
 
   # ── OWASP preconfigured rule set (priority 900, before rate limits) ───────────
