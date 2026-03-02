@@ -67,6 +67,27 @@ Open **http://localhost:8000** in your browser.
 
 ---
 
+## 🤖 Raspberry Pi / Reachy Mini (Robot Mode)
+
+For running Myra on a **Raspberry Pi** with a **Reachy Mini** robot (toddler-led lessons with physical dino), use the robot-specific dependencies:
+
+### Remote install on Raspberry Pi
+
+```bash
+# On the Raspberry Pi (e.g. Pi 5), clone the repo and install both dependency sets:
+pip install -r requirements.txt -r requirements-robot.txt
+```
+
+| File | Purpose |
+|------|---------|
+| `requirements-robot.txt` | Reachy Mini SDK (wireless), `soundfile` (WAV I/O), `requests` (HTTP to Myra API). Install **in addition to** `requirements.txt` for robot mode. |
+| `robot_teacher.py` | Drives the lesson loop on the Pi: starts the Myra server on port 8765, uses robot mics/speaker, and calls `/api/recognize` and `/api/tts`. |
+| `test_bridge.py` | Verifies audio bridge (mic → WAV → API) and TTS without the robot attached. Run with the server already running on port 8765. |
+
+Port **8765** is used to avoid conflict with the Reachy Mini daemon (port 8000). See `robot_teacher.py --help` for options (language, categories, threshold, etc.).
+
+---
+
 ## 📖 How It Works
 
 ### Learning loop
@@ -134,7 +155,10 @@ myra-language-teacher/
 ├── speech_service.py    # Whisper STT, MIME detection, romanized fallback
 ├── tts_service.py       # gTTS text-to-speech (async wrapper)
 ├── requirements.txt
-├── config.json          # Auto-created on first run; stores your settings
+├── requirements-robot.txt # Robot mode deps (Reachy Mini, soundfile, requests) — install on Raspberry Pi
+├── robot_teacher.py       # Reachy Mini lesson driver (runs on Pi)
+├── test_bridge.py         # Tests audio/TTS bridge (no robot required)
+├── config.json            # Auto-created on first run; stores your settings
 ├── templates/
 │   ├── index.html       # Main learning page (pink dino SVG + lesson UI)
 │   └── config.html      # Settings page
