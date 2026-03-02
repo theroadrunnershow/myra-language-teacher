@@ -24,6 +24,10 @@ const state = {
   generation: 0,           // incremented on each new word/stop; lets async callbacks self-cancel
   _voiceResolve: null,     // stored resolver for current playDinoVoice Promise; called by stopExistingAudio
   _audioResolve: null,     // stored resolver for current playAudioUrl Promise; called by stopExistingAudio
+  activeMascot: 'dino',
+  activeMouthFrames: null, // null = use MOUTH_FRAMES (dino default)
+  activeMouthClosed: null, // null = use dino default closed path
+  _dinoOriginalSvg: null,  // captured once; used to restore dino SVG
 };
 
 // ── DOM refs ──────────────────────────────────────────
@@ -429,6 +433,9 @@ async function init() {
   state.config = await fetchConfig();
   state.maxAttempts = state.config.max_attempts ?? 3;
 
+  applyTheme(state.config.theme ?? 'pink');
+  applyMascot(state.config.mascot ?? 'dino');
+
   if (state.config.child_name) {
     els.childTitle.textContent = `🦕 ${state.config.child_name} Learns!`;
     document.title = `${state.config.child_name} Learns Languages 🦕`;
@@ -507,6 +514,7 @@ function displayWord(word) {
 async function playWord() {
   if (!state.currentWord) return;
   state.stopRequested = false;
+  state.generation += 1;   // preempt any in-flight playPromptThenRecord coroutine
   stopExistingAudio();
 
   const { translation, language } = state.currentWord;
@@ -540,6 +548,11 @@ function stopExistingAudio() {
     state.ttsAudio.currentTime = 0;
     state.ttsAudio = null;
   }
+  // Unblock any async chain awaiting playAudioUrl; generation check prevents startRecording()
+  if (state._audioResolve) {
+    state._audioResolve();
+    state._audioResolve = null;
+  }
   if (state.voiceAudio) {
     state.voiceAudio.pause();
     state.voiceAudio = null;
@@ -560,6 +573,7 @@ async function playPromptThenRecord() {
 
   stopExistingAudio();
 
+  const myGen = state.generation;  // snapshot — if Hear It! / Skip / Stop fires, generation changes
   const childName = state.config.child_name || 'Myra';
   const { translation, language } = state.currentWord;
 
@@ -570,17 +584,22 @@ async function playPromptThenRecord() {
     // 1. Play "<Name>, repeat after me!" in English
     const promptText = `${childName}, repeat after me!`;
     await playAudioUrl(`/api/tts?text=${encodeURIComponent(promptText)}&language=english`);
+    if (state.generation !== myGen) return;  // preempted by Hear It! / Skip / Stop
 
     // 2. Short gap then the target-language word (slow for clarity)
     await sleep(350);
+    if (state.generation !== myGen) return;
     await playAudioUrl(`/api/tts?text=${encodeURIComponent(translation)}&language=${language}&slow=true`);
+    if (state.generation !== myGen) return;
 
     // 3. Gap then start recording
     await sleep(500);
+    if (state.generation !== myGen) return;
     animateDino('idle');
     setBubble(randomMsg('listen'));
     startRecording();
   } catch (e) {
+    if (state.generation !== myGen) return;  // preempted — don't start recording
     console.error('Prompt playback error:', e);
     animateDino('idle');
     startRecording();
@@ -1052,16 +1071,18 @@ function animateMouth(open) {
   clearInterval(mouthInterval);
   const mouth = els.dinoMouth;
   const inner = els.dinoMouthInner;
+  const frames = state.activeMouthFrames ?? MOUTH_FRAMES;
+  const closedPath = state.activeMouthClosed ?? 'M 330,162 Q 355,178 375,162';
 
   if (!open) {
-    mouth.setAttribute('d', 'M 330,162 Q 355,178 375,162');
+    mouth.setAttribute('d', closedPath);
     if (inner) inner.style.display = 'none';
     return;
   }
 
   _mouthFrameIdx = 0;
   mouthInterval = setInterval(() => {
-    const [d, ry, cy] = MOUTH_FRAMES[_mouthFrameIdx % MOUTH_FRAMES.length];
+    const [d, ry, cy] = frames[_mouthFrameIdx % frames.length];
     _mouthFrameIdx++;
     mouth.setAttribute('d', d);
     if (inner) {
@@ -1074,6 +1095,33 @@ function animateMouth(open) {
       }
     }
   }, 130);
+}
+
+// ── Theme & Mascot ────────────────────────────────────
+function applyTheme(theme) {
+  document.documentElement.setAttribute('data-theme', theme ?? 'pink');
+}
+
+function applyMascot(mascot) {
+  const svgEl = els.dinoSvg;
+  if (!state._dinoOriginalSvg) state._dinoOriginalSvg = svgEl.innerHTML;
+
+  if (mascot === 'dino' || !window.MASCOTS || !MASCOTS[mascot]) {
+    svgEl.innerHTML = state._dinoOriginalSvg;
+    state.activeMouthFrames = null;
+    state.activeMouthClosed = null;
+  } else {
+    const m = MASCOTS[mascot];
+    svgEl.innerHTML = m.svg;
+    state.activeMouthFrames = m.mouthFrames;
+    state.activeMouthClosed = m.mouthClosed;
+  }
+  // Re-hydrate stale els refs after innerHTML swap
+  els.dinoMouth      = $('dino-mouth');
+  els.dinoTeeth      = $('dino-teeth');
+  els.dinoMouthInner = $('dino-mouth-inner');
+  els.dinoEyelid     = $('dino-eyelid');
+  state.activeMascot = mascot;
 }
 
 // ── Confetti ──────────────────────────────────────────

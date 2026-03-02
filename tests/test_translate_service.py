@@ -155,7 +155,8 @@ class TestTranslateWord:
 # ---------------------------------------------------------------------------
 
 class TestRomanizationFallback:
-    def test_romanize_exception_returns_empty_string(self):
+    def test_romanize_exception_falls_back_to_indic(self):
+        """When romanize_text throws, indic_transliteration fallback is used for Telugu."""
         client_mock = MagicMock()
         client_mock.translate_text.return_value.translations = [
             MagicMock(translated_text="ఏనుగు")
@@ -166,6 +167,23 @@ class TestRomanizationFallback:
             result = translate_service._translate_and_romanize_sync(
                 "elephant", "telugu", "test-project"
             )
+        # Indic fallback should produce a non-empty romanization (e.g. "enugu")
+        assert result["romanized"] != ""
+        assert result["translation"] == "ఏనుగు"
+
+    def test_romanize_exception_returns_empty_when_fallback_also_fails(self):
+        """When both romanize_text and indic fallback fail, romanized is empty."""
+        client_mock = MagicMock()
+        client_mock.translate_text.return_value.translations = [
+            MagicMock(translated_text="ఏనుగు")
+        ]
+        client_mock.romanize_text.side_effect = Exception("not supported")
+
+        with patch.object(translate_service, "_get_translate_client", return_value=client_mock):
+            with patch.object(translate_service, "_romanize_indic_fallback", return_value=""):
+                result = translate_service._translate_and_romanize_sync(
+                    "elephant", "telugu", "test-project"
+                )
         assert result["romanized"] == ""
         assert result["translation"] == "ఏనుగు"
 

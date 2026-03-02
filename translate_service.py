@@ -55,6 +55,30 @@ def _lookup_in_db(english_word: str, language: str) -> Optional[dict]:
     return None
 
 
+def _romanize_indic_fallback(text: str, lang_code: str) -> str:
+    """Fallback romanization using indic_transliteration (ITRANS scheme → lowercase ASCII).
+
+    Google's romanize_text API silently returns empty for some complex Telugu consonant
+    clusters (e.g. "తండ్రి" with anusvara+consonant, "అమ్మ"). indic_transliteration
+    handles these correctly via ITRANS: uppercase retroflex markers (N, D) become
+    ordinary n/d when lowercased, giving simple phonetic strings that match Whisper's
+    English-mode transcription (e.g. "తండ్రి" → "taMDri" → "tamdri").
+
+    Scoped to Telugu only: Assamese has unique characters (ৰ, ৱ) not in the BENGALI
+    scheme so fallback would produce incomplete romanizations there.
+    """
+    if lang_code != "te":
+        return ""
+    try:
+        from indic_transliteration import sanscript  # type: ignore
+        roman = sanscript.transliterate(text, sanscript.TELUGU, sanscript.ITRANS)
+        # Keep only ASCII letters and lowercase so "taMDri" → "tamdri"
+        return "".join(c for c in roman if c.isascii() and c.isalpha()).lower()
+    except Exception as exc:
+        logger.warning(f"indic_transliteration fallback failed for '{text}': {exc}")
+        return ""
+
+
 def _translate_and_romanize_sync(english_word: str, language: str, project_id: str) -> dict:
     """Blocking Google Translate call — run via run_in_executor."""
     client = _get_translate_client()
@@ -72,7 +96,9 @@ def _translate_and_romanize_sync(english_word: str, language: str, project_id: s
     )
     translation = translate_resp.translations[0].translated_text
 
-    # Step 2: romanize native script → phonetic (best-effort; empty string on failure)
+    # Step 2: romanize native script → phonetic
+    # Try Google's romanize_text first; fall back to indic_transliteration for words where
+    # the API returns empty (known to happen for complex Telugu/Assamese consonant clusters).
     romanized = ""
     try:
         roman_resp = client.romanize_text(
@@ -85,6 +111,11 @@ def _translate_and_romanize_sync(english_word: str, language: str, project_id: s
         romanized = roman_resp.romanizations[0].romanized_text or ""
     except Exception as exc:
         logger.warning(f"romanize_text failed for '{translation}' ({lang_code}): {exc}")
+
+    if not romanized:
+        romanized = _romanize_indic_fallback(translation, lang_code)
+        if romanized:
+            logger.info(f"[translate] indic fallback romanization: '{translation}' → '{romanized}'")
 
     return {
         "english":    english_word,

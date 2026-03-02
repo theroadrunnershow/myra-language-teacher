@@ -327,9 +327,11 @@ async def recognize_speech(
                 f"Romanized: expected='{romanized}' heard='{transcribed_roman}' → {roman_similarity:.1f}%"
             )
 
-        # Use pass-2 output as the displayed transcription when it produces a better score
-        # (more useful to show "padava" than a hallucinated Telugu glyph sequence)
-        transcribed = transcribed_roman if roman_similarity > similarity else transcribed_native
+        # Use pass-2 output as the displayed transcription when it scores at least as well.
+        # The >= (vs. the old >) ensures that when both scores are 0.0 (romanized was empty,
+        # so roman_similarity was never computed) we still show what Whisper actually heard
+        # ("Tandry") rather than an empty native-script result.
+        transcribed = transcribed_roman if (transcribed_roman and roman_similarity >= similarity) else transcribed_native
 
         best_similarity = max(similarity, roman_similarity)
         is_correct = best_similarity >= similarity_threshold

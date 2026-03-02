@@ -469,3 +469,100 @@ class TestTranslateEndpoint:
     def test_default_language_is_telugu(self, client):
         data = client.get("/api/translate?word=cat").json()
         assert data["language"] == "telugu"
+
+
+# ---------------------------------------------------------------------------
+# TestPostConfigThemeMascot
+# ---------------------------------------------------------------------------
+
+class TestPostConfigThemeMascot:
+    # ── Theme validation ───────────────────────────────────────────────────
+    def test_valid_theme_pink_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "pink"})
+        assert resp.status_code == 200
+
+    def test_valid_theme_blue_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "blue"})
+        assert resp.status_code == 200
+
+    def test_valid_theme_green_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "green"})
+        assert resp.status_code == 200
+
+    def test_valid_theme_purple_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "purple"})
+        assert resp.status_code == 200
+
+    def test_valid_theme_orange_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "orange"})
+        assert resp.status_code == 200
+
+    def test_valid_theme_yellow_returns_200(self, client):
+        resp = client.post("/api/config", json={"theme": "yellow"})
+        assert resp.status_code == 200
+
+    def test_invalid_theme_returns_400(self, client):
+        resp = client.post("/api/config", json={"theme": "rainbow"})
+        assert resp.status_code == 400
+
+    def test_invalid_theme_error_mentions_theme(self, client):
+        resp = client.post("/api/config", json={"theme": "neon"})
+        assert "theme" in resp.json()["detail"].lower()
+
+    def test_theme_reflected_in_config_response(self, client):
+        resp = client.post("/api/config", json={"theme": "blue"})
+        assert resp.json()["config"]["theme"] == "blue"
+
+    # ── Mascot validation ──────────────────────────────────────────────────
+    def test_valid_mascot_dino_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "dino"})
+        assert resp.status_code == 200
+
+    def test_valid_mascot_cat_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "cat"})
+        assert resp.status_code == 200
+
+    def test_valid_mascot_dog_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "dog"})
+        assert resp.status_code == 200
+
+    def test_valid_mascot_panda_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "panda"})
+        assert resp.status_code == 200
+
+    def test_valid_mascot_fox_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "fox"})
+        assert resp.status_code == 200
+
+    def test_valid_mascot_rabbit_returns_200(self, client):
+        resp = client.post("/api/config", json={"mascot": "rabbit"})
+        assert resp.status_code == 200
+
+    def test_invalid_mascot_returns_400(self, client):
+        resp = client.post("/api/config", json={"mascot": "elephant"})
+        assert resp.status_code == 400
+
+    def test_invalid_mascot_error_mentions_mascot(self, client):
+        resp = client.post("/api/config", json={"mascot": "unicorn"})
+        assert "mascot" in resp.json()["detail"].lower()
+
+    def test_mascot_reflected_in_config_response(self, client):
+        resp = client.post("/api/config", json={"mascot": "cat"})
+        assert resp.json()["config"]["mascot"] == "cat"
+
+    # ── Defaults ───────────────────────────────────────────────────────────
+    def test_default_config_includes_theme(self, client):
+        resp = client.get("/api/config")
+        assert "theme" in resp.json()
+
+    def test_default_theme_is_pink(self, client):
+        resp = client.get("/api/config")
+        assert resp.json()["theme"] == "pink"
+
+    def test_default_config_includes_mascot(self, client):
+        resp = client.get("/api/config")
+        assert "mascot" in resp.json()
+
+    def test_default_mascot_is_dino(self, client):
+        resp = client.get("/api/config")
+        assert resp.json()["mascot"] == "dino"

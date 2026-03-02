@@ -27,6 +27,7 @@
 
   <!-- ── DINO COLUMN ── -->
   <section class="dino-col">
+    <div class="lang-badge" id="lang-badge">Telugu 🌟</div>
     <div class="dino-wrapper" id="dino-wrapper">
 
       <!-- Speech bubble -->
@@ -146,8 +147,16 @@
   <!-- ── LESSON COLUMN ── -->
   <section class="lesson-col">
 
-    <!-- Language badge -->
-    <div class="lang-badge" id="lang-badge">Telugu 🌟</div>
+    <!-- Teach Me: custom word lookup (top of lesson) -->
+    <div class="teach-row">
+      <input type="text" id="teach-input" class="teach-input"
+             placeholder="Type any English word…" maxlength="50"
+             onkeydown="if(event.key==='Enter') teachCustomWord()" />
+      <button class="btn btn-teach" id="btn-teach" onclick="teachCustomWord()">
+        ✏️ Teach Me!
+      </button>
+    </div>
+    <p class="teach-hint">Type a word above, then click <strong>Say It!</strong> to practice.</p>
 
     <!-- Word card -->
     <div class="word-card" id="word-card">
@@ -219,16 +228,6 @@
     <!-- Streak display (hidden until 3+ in a row) -->
     <div id="streak-display" class="streak-display" hidden aria-live="polite">
       <span id="streak-count">0</span> in a row! 🔥
-    </div>
-
-    <!-- Teach Me: custom word lookup -->
-    <div class="teach-row">
-      <input type="text" id="teach-input" class="teach-input"
-             placeholder="Type any English word…" maxlength="50"
-             onkeydown="if(event.key==='Enter') teachCustomWord()" />
-      <button class="btn btn-teach" id="btn-teach" onclick="teachCustomWord()">
-        ✏️ Teach Me!
-      </button>
     </div>
 
   </section><!-- end lesson-col -->

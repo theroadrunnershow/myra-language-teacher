@@ -39,7 +39,7 @@ body {
 
 /* ── Header ────────────────────────────────────────── */
 header {
-  background: linear-gradient(90deg, #FF69B4, #9B59B6);
+  background: linear-gradient(90deg, var(--pink), var(--purple));
   padding: 0.6rem 1.5rem;
   box-shadow: 0 4px 16px rgba(0,0,0,0.15);
 }
@@ -111,6 +111,7 @@ main {
   display: flex;
   flex-direction: column;
   align-items: center;
+  gap: 2.5rem;
 }
 
 .dino-wrapper {
@@ -204,7 +205,7 @@ main {
 
 /* ── NEW: Streak display badge ── */
 .streak-display {
-  background: linear-gradient(135deg, #FF69B4, #FF1493);
+  background: linear-gradient(135deg, var(--pink), var(--pink-dark));
   color: white;
   font-family: var(--font-title);
   font-size: 1.1rem;
@@ -433,7 +434,7 @@ main {
 .btn:active { transform: scale(0.96); }
 
 .btn-play {
-  background: linear-gradient(135deg, #9B59B6, #6C3483);
+  background: linear-gradient(135deg, var(--purple), var(--purple-dark));
   color: var(--white);
 }
 .btn-play:hover { filter: brightness(1.1); transform: translateY(-2px); box-shadow: 0 8px 20px rgba(108,52,131,0.4); }
@@ -505,12 +506,20 @@ main {
   font-weight: 700;
 }
 
-/* ── Teach Me row ─────────────────────────────────── */
+/* ── Teach Me row (top of lesson) ──────────────────── */
 .teach-row {
   display: flex;
   gap: 0.5rem;
   margin-top: 1rem;
+  margin-bottom: 0.5rem;
   width: 100%;
+}
+
+.teach-hint {
+  font-size: 0.9rem;
+  color: var(--purple-dark);
+  opacity: 0.85;
+  margin: 0 0 1rem 0;
 }
 
 .teach-input {
@@ -752,4 +761,120 @@ hr { border: none; border-top: 2px dashed var(--pink-light); margin: 1.4rem 0; }
   .btn { font-size: 1rem; padding: 0.65rem 1.2rem; }
 
   .settings-card { padding: 1.2rem 1rem; }
+}
+
+/* ── Color Themes ───────────────────────────────────── */
+/* Pink is the default (:root) — no override block needed */
+
+[data-theme="blue"] {
+  --pink:       #4FA3E0;
+  --pink-light: #A8D4F5;
+  --pink-dark:  #1A6EBD;
+  --purple:     #2C7BB6;
+  --purple-dark:#1A4F82;
+  --bg:         linear-gradient(135deg, #D5EAF8 0%, #B3D3F2 50%, #D5EEFF 100%);
+  --shadow:     0 8px 32px rgba(26,110,189,0.18);
+}
+
+[data-theme="green"] {
+  --pink:       #3CB371;
+  --pink-light: #A8DFBA;
+  --pink-dark:  #1E8449;
+  --purple:     #27AE60;
+  --purple-dark:#145A32;
+  --bg:         linear-gradient(135deg, #D5F5E3 0%, #A9DFBF 50%, #D5F5E3 100%);
+  --shadow:     0 8px 32px rgba(30,132,73,0.18);
+}
+
+[data-theme="purple"] {
+  --pink:       #9B59B6;
+  --pink-light: #D2A3FF;
+  --pink-dark:  #7D3C98;
+  --purple:     #8E44AD;
+  --purple-dark:#6C3483;
+  --bg:         linear-gradient(135deg, #EAD5FF 0%, #D2A3FF 50%, #F5E6FF 100%);
+  --shadow:     0 8px 32px rgba(142,68,173,0.18);
+}
+
+[data-theme="orange"] {
+  --pink:       #E67E22;
+  --pink-light: #FAD7A0;
+  --pink-dark:  #CA6F1E;
+  --purple:     #D35400;
+  --purple-dark:#784212;
+  --bg:         linear-gradient(135deg, #FDEBD0 0%, #FAD7A0 50%, #FDEBD0 100%);
+  --shadow:     0 8px 32px rgba(211,84,0,0.18);
+}
+
+[data-theme="yellow"] {
+  --pink:       #F4C430;
+  --pink-light: #FDEEA5;
+  --pink-dark:  #D4AC0D;
+  --purple:     #E6B800;
+  --purple-dark:#7D6608;
+  --bg:         linear-gradient(135deg, #FEFDE7 0%, #FDF5B8 50%, #FEFDE7 100%);
+  --shadow:     0 8px 32px rgba(212,172,13,0.18);
+}
+
+/* ── Theme Picker (settings page) ──────────────────── */
+.theme-picker {
+  display: flex;
+  gap: 0.8rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.theme-swatch {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.18);
+}
+
+.theme-swatch:hover {
+  transform: scale(1.15);
+}
+
+.theme-swatch.selected {
+  border-color: #333;
+  box-shadow: 0 0 0 3px rgba(0,0,0,0.25);
+  transform: scale(1.12);
+}
+
+/* ── Mascot Picker (settings page) ─────────────────── */
+.mascot-picker {
+  display: flex;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.mascot-btn {
+  font-size: 2rem;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  border: 3px solid transparent;
+  background: rgba(255,255,255,0.6);
+  cursor: pointer;
+  transition: transform 0.15s, border-color 0.15s, box-shadow 0.15s;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.mascot-btn:hover {
+  transform: scale(1.12);
+  background: rgba(255,255,255,0.85);
+}
+
+.mascot-btn.selected {
+  border-color: var(--pink-dark);
+  box-shadow: 0 0 0 3px rgba(255,20,147,0.25);
+  transform: scale(1.1);
+  background: rgba(255,255,255,0.9);
 }

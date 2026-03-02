@@ -99,6 +99,32 @@
 
     <hr />
 
+    <h2>🎨 Color Theme</h2>
+    <p class="hint">Pick a color scheme for the whole app.</p>
+    <div class="theme-picker" id="theme-picker">
+      <button type="button" class="theme-swatch" data-theme="pink"   style="background:#FF69B4" title="Pink"></button>
+      <button type="button" class="theme-swatch" data-theme="blue"   style="background:#4FA3E0" title="Blue"></button>
+      <button type="button" class="theme-swatch" data-theme="green"  style="background:#3CB371" title="Green"></button>
+      <button type="button" class="theme-swatch" data-theme="purple" style="background:#9B59B6" title="Purple"></button>
+      <button type="button" class="theme-swatch" data-theme="orange" style="background:#E67E22" title="Orange"></button>
+      <button type="button" class="theme-swatch" data-theme="yellow" style="background:#F4C430" title="Yellow"></button>
+    </div>
+
+    <hr />
+
+    <h2>🐾 Favorite Animal</h2>
+    <p class="hint">Choose who teaches the words!</p>
+    <div class="mascot-picker" id="mascot-picker">
+      <button type="button" class="mascot-btn" data-mascot="dino"   title="Dino">🦕</button>
+      <button type="button" class="mascot-btn" data-mascot="cat"    title="Cat">🐱</button>
+      <button type="button" class="mascot-btn" data-mascot="dog"    title="Dog">🐶</button>
+      <button type="button" class="mascot-btn" data-mascot="panda"  title="Panda">🐼</button>
+      <button type="button" class="mascot-btn" data-mascot="fox"    title="Fox">🦊</button>
+      <button type="button" class="mascot-btn" data-mascot="rabbit" title="Rabbit">🐰</button>
+    </div>
+
+    <hr />
+
     <div class="btn-row centered">
       <button class="btn btn-play" onclick="saveSettings()">💾 Save Settings</button>
       <a href="/" class="btn btn-skip">🏠 Go Home</a>
@@ -113,7 +139,36 @@
 <script>
 const CONFIG_KEY = 'myra_config';
 
+// Track selected theme/mascot in JS state (not DOM inputs)
+let _selectedTheme = 'pink';
+let _selectedMascot = 'dino';
+
+function _selectTheme(theme) {
+  _selectedTheme = theme;
+  document.querySelectorAll('.theme-swatch').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.theme === theme);
+  });
+  // Live preview
+  document.documentElement.setAttribute('data-theme', theme);
+}
+
+function _selectMascot(mascot) {
+  _selectedMascot = mascot;
+  document.querySelectorAll('.mascot-btn').forEach(btn => {
+    btn.classList.toggle('selected', btn.dataset.mascot === mascot);
+  });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+  // Wire theme swatches
+  document.querySelectorAll('.theme-swatch').forEach(btn => {
+    btn.addEventListener('click', () => _selectTheme(btn.dataset.theme));
+  });
+  // Wire mascot buttons
+  document.querySelectorAll('.mascot-btn').forEach(btn => {
+    btn.addEventListener('click', () => _selectMascot(btn.dataset.mascot));
+  });
+
   const stored = localStorage.getItem(CONFIG_KEY);
 
   if (stored) {
@@ -151,6 +206,9 @@ document.addEventListener('DOMContentLoaded', () => {
       const ma = document.getElementById('max-attempts');
       if (ma) ma.value = String(cfg.max_attempts);
     }
+    // Restore theme + mascot
+    _selectTheme(cfg.theme ?? 'pink');
+    _selectMascot(cfg.mascot ?? 'dino');
   } else {
     // New user: clear all server-rendered defaults so they must choose their own settings
     document.getElementById('child-name').value = '';
@@ -162,6 +220,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (h1) h1.textContent = '👋 Welcome! Set Up Your App';
     document.querySelector('.back-btn').style.display = 'none';
     document.querySelector('a.btn-skip').style.display = 'none';
+
+    // Default selections
+    _selectTheme('pink');
+    _selectMascot('dino');
   }
 });
 
@@ -194,6 +256,8 @@ async function saveSettings() {
     show_romanized: document.getElementById('show-romanized').checked,
     similarity_threshold: parseInt(document.getElementById('similarity-threshold').value),
     max_attempts: parseInt(document.getElementById('max-attempts').value),
+    theme: _selectedTheme,
+    mascot: _selectedMascot,
     setup_complete: true,
   };
 

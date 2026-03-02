@@ -72,7 +72,12 @@ DEFAULT_CONFIG = {
     "show_romanized": True,
     "similarity_threshold": 50,  # % match required
     "max_attempts": 3,
+    "theme": "pink",
+    "mascot": "dino",
 }
+
+VALID_THEMES = {"pink", "blue", "green", "purple", "orange", "yellow"}
+VALID_MASCOTS = {"dino", "cat", "dog", "panda", "fox", "rabbit"}
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -127,6 +132,10 @@ async def api_save_config(request: Request):
         raise HTTPException(status_code=400, detail="'languages' must be a list")
     if "categories" in body and not isinstance(body["categories"], list):
         raise HTTPException(status_code=400, detail="'categories' must be a list")
+    if "theme" in body and body["theme"] not in VALID_THEMES:
+        raise HTTPException(status_code=400, detail=f"'theme' must be one of {sorted(VALID_THEMES)}")
+    if "mascot" in body and body["mascot"] not in VALID_MASCOTS:
+        raise HTTPException(status_code=400, detail=f"'mascot' must be one of {sorted(VALID_MASCOTS)}")
     merged = {**DEFAULT_CONFIG, **body}
     return {"status": "ok", "config": merged}
 
