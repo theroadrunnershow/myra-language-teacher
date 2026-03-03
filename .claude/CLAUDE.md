@@ -23,15 +23,19 @@ A toddler-friendly web app that teaches Telugu and Assamese to Myra (age 4) thro
 ## Codebase Structure
 ```
 myra-language-teacher/
-├── main.py               # FastAPI app — all routes, request handling
-├── speech_service.py     # Whisper STT + audio conversion pipeline
-├── tts_service.py        # gTTS wrapper (async)
-├── words_db.py           # In-memory word database (60+ words, 6 categories)
+├── src/                  # All Python application source files
+│   ├── main.py               # FastAPI app — all routes, request handling
+│   ├── speech_service.py     # Whisper STT + audio conversion pipeline
+│   ├── tts_service.py        # gTTS wrapper (async)
+│   ├── words_db.py           # In-memory word database (60+ words, 6 categories)
+│   ├── translate_service.py  # Google Cloud Translate wrapper
+│   ├── dynamic_words_store.py # GCS-backed dynamic word cache
+│   └── robot_teacher.py      # Raspberry Pi / Reachy Mini robot controller
 ├── config.json           # Default server config (Assamese-focused)
 ├── requirements.txt      # Runtime dependencies
 ├── requirements-dev.txt  # Test dependencies (pytest, httpx, anyio)
 ├── Dockerfile            # GCP Cloud Run image (Python 3.11-slim + ffmpeg)
-├── pytest.ini            # Pytest config (asyncio_mode=auto)
+├── pytest.ini            # Pytest config (asyncio_mode=auto, pythonpath=src)
 │
 ├── templates/
 │   ├── index.html        # Main learning page (Jinja2)
@@ -46,7 +50,8 @@ myra-language-teacher/
 │   ├── test_api.py       # FastAPI route tests (40+ tests)
 │   ├── test_words_db.py  # Database integrity tests (25+ tests)
 │   ├── test_speech_service.py  # STT pipeline tests (60+ tests)
-│   └── test_tts_service.py    # TTS service tests
+│   ├── test_tts_service.py    # TTS service tests
+│   └── test_bridge.py         # Audio bridge integration tests (requires live server)
 │
 ├── infra/
 │   ├── providers.tf      # GCS backend, Google provider ~5.0
@@ -81,7 +86,7 @@ myra-language-teacher/
 source venv/bin/activate
 pip install -r requirements.txt       # first time only
 pip install -r requirements-dev.txt   # for tests
-python main.py                        # http://localhost:8000
+PYTHONPATH=src python src/main.py     # http://localhost:8000
 ```
 
 ## Running Tests

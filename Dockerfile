@@ -8,12 +8,14 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+ENV PYTHONPATH=/app/src
+
 # Install Python dependencies first (separate layer for caching)
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
-COPY main.py words_db.py speech_service.py tts_service.py translate_service.py dynamic_words_store.py ./
+COPY src/ src/
 COPY templates/ templates/
 COPY static/ static/
 
