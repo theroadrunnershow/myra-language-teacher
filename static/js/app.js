@@ -425,7 +425,9 @@ const CONFIG_KEY = 'myra_config';
 
 async function init() {
   const stored = localStorage.getItem(CONFIG_KEY);
-  if (!stored || !JSON.parse(stored).setup_complete) {
+  let parsedStored = null;
+  try { parsedStored = stored ? JSON.parse(stored) : null; } catch { parsedStored = null; }
+  if (!parsedStored || !parsedStored.setup_complete) {
     window.location.href = '/settings';
     return;
   }
@@ -453,12 +455,14 @@ async function fetchConfig() {
     const serverDefaults = await resp.json();
     const stored = localStorage.getItem(CONFIG_KEY);
     if (stored) {
-      return { ...serverDefaults, ...JSON.parse(stored) };
+      try { return { ...serverDefaults, ...JSON.parse(stored) }; } catch { /* ignore corrupt storage */ }
     }
     return serverDefaults;
   } catch {
     const stored = localStorage.getItem(CONFIG_KEY);
-    if (stored) return { ...defaults, ...JSON.parse(stored) };
+    if (stored) {
+      try { return { ...defaults, ...JSON.parse(stored) }; } catch { /* ignore corrupt storage */ }
+    }
     return defaults;
   }
 }

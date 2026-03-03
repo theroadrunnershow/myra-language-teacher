@@ -54,11 +54,14 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(SecurityHeadersMiddleware)
 
+# CORS: restrict to same-origin. Expand allow_origins if a separate frontend
+# domain is ever deployed (e.g. ["https://myra.example.com"]).
+_CORS_ORIGINS = [o.strip() for o in os.environ.get("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_CORS_ORIGINS,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 # ── Static files & templates ──────────────────────────────────────────────────
@@ -224,13 +227,31 @@ async def api_save_config(request: Request):
 
 
 # ── API: words ────────────────────────────────────────────────────────────────
+def _parse_languages(param: str) -> list[str]:
+    """Parse and whitelist-validate a comma-separated languages query param.
+    Returns defaults when param is absent; returns [] when param is present but
+    resolves to nothing (caller raises 400)."""
+    if not param:
+        return list(DEFAULT_CONFIG["languages"])
+    return [s.strip() for s in param.split(",") if s.strip() in VALID_LANGUAGES]
+
+
+def _parse_categories(param: str) -> list[str]:
+    """Parse and whitelist-validate a comma-separated categories query param.
+    Returns defaults when param is absent; returns [] when param is present but
+    resolves to nothing (caller raises 400)."""
+    if not param:
+        return list(DEFAULT_CONFIG["categories"])
+    return [s.strip() for s in param.split(",") if s.strip() in ALL_CATEGORIES]
+
+
 @app.get("/api/word")
 async def api_get_word(
     languages: str = "",  # comma-separated, e.g. "telugu,assamese"
     categories: str = "",  # comma-separated, e.g. "animals,colors"
 ):
-    langs = [s.strip() for s in languages.split(",") if s.strip()] if languages else DEFAULT_CONFIG["languages"]
-    cats = [s.strip() for s in categories.split(",") if s.strip()] if categories else DEFAULT_CONFIG["categories"]
+    langs = _parse_languages(languages)
+    cats = _parse_categories(categories)
 
     if not langs:
         raise HTTPException(status_code=400, detail="No languages configured. Go to Settings.")
@@ -268,7 +289,7 @@ async def api_translate(word: str = "", language: str = "telugu"):
         raise HTTPException(status_code=503, detail="Translation service not configured.")
     except Exception as exc:
         logger.error(f"Translate error for '{word}': {exc}")
-        raise HTTPException(status_code=503, detail=f"Translation failed: {exc}")
+        raise HTTPException(status_code=503, detail="Translation service unavailable.")
 
 
 # ── API: TTS ──────────────────────────────────────────────────────────────────
@@ -292,7 +313,7 @@ async def api_tts(text: str, language: str = "telugu", slow: bool = False):
         )
     except Exception as e:
         logger.error(f"TTS error: {e}")
-        raise HTTPException(status_code=500, detail=f"TTS failed: {e}")
+        raise HTTPException(status_code=500, detail="TTS service unavailable.")
 
 
 # ── API: Roo dino voice lines (English TTS for character voice) ────────────────
@@ -312,7 +333,7 @@ async def api_dino_voice(text: str, slow: bool = False):
         )
     except Exception as e:
         logger.error(f"Dino voice TTS error: {e}")
-        raise HTTPException(status_code=500, detail=f"Dino voice failed: {e}")
+        raise HTTPException(status_code=500, detail="TTS service unavailable.")
 
 
 # ── API: speech recognition ───────────────────────────────────────────────────
@@ -376,8 +397,8 @@ async def api_all_words(
     languages: str = "",
     categories: str = "",
 ):
-    langs = [s.strip() for s in languages.split(",") if s.strip()] if languages else DEFAULT_CONFIG["languages"]
-    cats = [s.strip() for s in categories.split(",") if s.strip()] if categories else DEFAULT_CONFIG["categories"]
+    langs = _parse_languages(languages)
+    cats = _parse_categories(categories)
     result = {}
     for lang in langs:
         result[lang] = []

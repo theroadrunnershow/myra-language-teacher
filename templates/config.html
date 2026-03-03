@@ -173,7 +173,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
   if (stored) {
     // Returning user: populate form from localStorage (overrides server-rendered defaults)
-    const cfg = JSON.parse(stored);
+    let cfg;
+    try { cfg = JSON.parse(stored); } catch { cfg = {}; }
 
     const childName = document.getElementById('child-name');
     if (childName && cfg.child_name) childName.value = cfg.child_name;

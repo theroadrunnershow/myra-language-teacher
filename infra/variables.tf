@@ -9,12 +9,6 @@ variable "region" {
   default     = "us-west1"
 }
 
-variable "alert_email" {
-  description = "Email for budget warning and kill-switch notification"
-  type        = string
-  default     = "theroadrunnershow@gmail.com"
-}
-
 variable "container_cpu" {
   description = "Cloud Run CPU allocation (2 = 2 vCPU)"
   type        = string
