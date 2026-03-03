@@ -11,7 +11,7 @@ resource "google_cloud_run_v2_service" "app" {
 
   template {
     scaling {
-      min_instance_count = 0   # scale to zero when idle
+      min_instance_count = 0 # scale to zero when idle
       max_instance_count = var.max_instances
     }
 
@@ -27,7 +27,7 @@ resource "google_cloud_run_v2_service" "app" {
           cpu    = var.container_cpu
           memory = var.container_memory
         }
-        cpu_idle = true   # only allocate CPU during request processing
+        cpu_idle = true # only allocate CPU during request processing
       }
 
       # App config — equivalent to SSM Parameter Store values at runtime
@@ -43,6 +43,30 @@ resource "google_cloud_run_v2_service" "app" {
         name  = "DISABLE_PASS1"
         value = "true"
       }
+      env {
+        name  = "WORDS_STORE_ENABLED"
+        value = "true"
+      }
+      env {
+        name  = "WORDS_OBJECT_BUCKET"
+        value = google_storage_bucket.words.name
+      }
+      env {
+        name  = "WORDS_OBJECT_KEY"
+        value = var.words_object_key
+      }
+      env {
+        name  = "WORDS_FLUSH_INTERVAL_SEC"
+        value = tostring(var.words_flush_interval_sec)
+      }
+      env {
+        name  = "WORDS_FLUSH_MAX_NEW_WORDS"
+        value = tostring(var.words_flush_max_new_words)
+      }
+      env {
+        name  = "WORDS_REFRESH_INTERVAL_SEC"
+        value = tostring(var.words_refresh_interval_sec)
+      }
 
       # Startup probe — Whisper model load takes ~30s
       startup_probe {
@@ -52,7 +76,7 @@ resource "google_cloud_run_v2_service" "app" {
         }
         initial_delay_seconds = 10
         period_seconds        = 10
-        failure_threshold     = 12   # 120s total startup window
+        failure_threshold     = 12 # 120s total startup window
       }
 
       liveness_probe {

@@ -139,7 +139,7 @@ resource "google_monitoring_notification_channel" "daily_pubsub" {
 
 # Alert fires when 24-hour billing cost delta > daily_budget_limit ($20 default)
 resource "google_monitoring_alert_policy" "daily_cost" {
-  count = 0  # billing metric not available until project has spend data
+  count        = 0 # billing metric not available until project has spend data
   display_name = "dino-app-daily-cost-guardrail"
   combiner     = "OR"
 
@@ -150,8 +150,8 @@ resource "google_monitoring_alert_policy" "daily_cost" {
       filter = "metric.type=\"billing.googleapis.com/billing/monthly_cost\" resource.type=\"global\""
 
       aggregations {
-        alignment_period     = "86400s"        # 24-hour window
-        per_series_aligner   = "ALIGN_DELTA"   # cost increase over the window = daily spend
+        alignment_period     = "86400s"      # 24-hour window
+        per_series_aligner   = "ALIGN_DELTA" # cost increase over the window = daily spend
         cross_series_reducer = "REDUCE_SUM"
         group_by_fields      = []
       }
@@ -212,7 +212,7 @@ resource "google_cloudfunctions2_function" "daily_guardrail" {
     max_instance_count    = 1
     available_memory      = "256M"
     timeout_seconds       = 30
-    service_account_email = google_service_account.kill_run.email   # reuse existing SA
+    service_account_email = google_service_account.kill_run.email # reuse existing SA
 
     environment_variables = {
       CLOUD_RUN_SERVICE = google_cloud_run_v2_service.app.name

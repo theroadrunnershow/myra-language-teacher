@@ -26,6 +26,13 @@ _TRANSLATE_LANG_CODES = {
 
 # Lazy-initialized client (mirrors Whisper pattern in speech_service.py)
 _translate_client = None
+_dynamic_words_store = None
+
+
+def set_dynamic_words_store(store) -> None:
+    """Inject a shared dynamic words store from app startup."""
+    global _dynamic_words_store
+    _dynamic_words_store = store
 
 
 def _get_translate_client():
@@ -139,6 +146,13 @@ async def translate_word(english_word: str, language: str) -> dict:
         logger.info(f"[translate] cache hit: {cache_key}")
         return _translation_cache[cache_key]
 
+    if _dynamic_words_store is not None:
+        dynamic_hit = _dynamic_words_store.lookup(english_word, language)
+        if dynamic_hit:
+            logger.info(f"[translate] dynamic store hit: {cache_key}")
+            _translation_cache[cache_key] = dynamic_hit
+            return dynamic_hit
+
     db_result = _lookup_in_db(english_word, language)
     if db_result:
         logger.info(f"[translate] db hit: '{english_word}' → '{db_result['translation']}'")
@@ -155,5 +169,7 @@ async def translate_word(english_word: str, language: str) -> dict:
         None, _translate_and_romanize_sync, english_word, language, project_id
     )
     _translation_cache[cache_key] = result
+    if _dynamic_words_store is not None:
+        _dynamic_words_store.upsert(result)
     logger.info(f"[translate] result: '{english_word}' → '{result['translation']}' (roman='{result['romanized']}')")
     return result

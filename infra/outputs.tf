@@ -41,3 +41,8 @@ output "docker_push_command" {
     docker push ${var.region}-docker.pkg.dev/${var.project_id}/myra-language-teacher/dino-app:latest
   EOT
 }
+
+output "dynamic_words_bucket" {
+  description = "GCS bucket storing dynamic translated words with object versioning"
+  value       = google_storage_bucket.words.name
+}

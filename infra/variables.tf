@@ -55,3 +55,33 @@ variable "domain" {
   type        = string
   default     = ""
 }
+
+variable "words_object_key" {
+  description = "GCS object key used for dynamic translated words snapshot"
+  type        = string
+  default     = "words/custom_words.v1.json"
+}
+
+variable "words_noncurrent_age_days" {
+  description = "Delete noncurrent object versions older than this many days"
+  type        = number
+  default     = 30
+}
+
+variable "words_flush_interval_sec" {
+  description = "Flush dirty dynamic words to object storage every N seconds (age threshold)"
+  type        = number
+  default     = 21600
+}
+
+variable "words_flush_max_new_words" {
+  description = "Flush dirty dynamic words when pending entries reach this count"
+  type        = number
+  default     = 50
+}
+
+variable "words_refresh_interval_sec" {
+  description = "Refresh in-memory dynamic words from object storage every N seconds"
+  type        = number
+  default     = 3600
+}

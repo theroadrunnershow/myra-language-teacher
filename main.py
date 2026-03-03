@@ -1,3 +1,4 @@
+import asyncio
 import io
 import logging
 import os
@@ -13,7 +14,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
 from speech_service import recognize_speech
-from translate_service import translate_word
+from dynamic_words_store import DynamicWordsStore
+from translate_service import set_dynamic_words_store, translate_word
 from tts_service import generate_tts
 from words_db import ALL_CATEGORIES, WORD_DATABASE, get_random_word
 
@@ -78,6 +80,87 @@ DEFAULT_CONFIG = {
 
 VALID_THEMES = {"pink", "blue", "green", "purple", "orange", "yellow"}
 VALID_MASCOTS = {"dino", "cat", "dog", "panda", "fox", "rabbit"}
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid integer for %s=%r. Using default=%s", name, raw, default)
+        return default
+
+
+async def _flush_words_loop() -> None:
+    try:
+        while True:
+            await asyncio.sleep(30)
+            store = getattr(app.state, "dynamic_words_store", None)
+            if store is not None:
+                store.flush_if_needed(force=False)
+    except asyncio.CancelledError:
+        return
+
+
+async def _refresh_words_loop() -> None:
+    try:
+        while True:
+            await asyncio.sleep(60)
+            store = getattr(app.state, "dynamic_words_store", None)
+            if store is not None:
+                store.refresh_from_object_store()
+    except asyncio.CancelledError:
+        return
+
+
+@app.on_event("startup")
+async def startup_words_store() -> None:
+    enabled = _env_bool("WORDS_STORE_ENABLED", True)
+    store = DynamicWordsStore(
+        enabled=enabled,
+        bucket_name=os.environ.get("WORDS_OBJECT_BUCKET", "").strip(),
+        object_key=os.environ.get("WORDS_OBJECT_KEY", "words/custom_words.v1.json").strip(),
+        flush_interval_sec=_env_int("WORDS_FLUSH_INTERVAL_SEC", 21600),
+        flush_max_new_words=_env_int("WORDS_FLUSH_MAX_NEW_WORDS", 50),
+        refresh_interval_sec=_env_int("WORDS_REFRESH_INTERVAL_SEC", 3600),
+    )
+    store.load_snapshot()
+    app.state.dynamic_words_store = store
+    set_dynamic_words_store(store)
+    app.state.words_flush_task = asyncio.create_task(_flush_words_loop())
+    app.state.words_refresh_task = asyncio.create_task(_refresh_words_loop())
+
+
+@app.on_event("shutdown")
+async def shutdown_words_store() -> None:
+    flush_task = getattr(app.state, "words_flush_task", None)
+    if flush_task is not None:
+        flush_task.cancel()
+        try:
+            await flush_task
+        except asyncio.CancelledError:
+            pass
+
+    refresh_task = getattr(app.state, "words_refresh_task", None)
+    if refresh_task is not None:
+        refresh_task.cancel()
+        try:
+            await refresh_task
+        except asyncio.CancelledError:
+            pass
+
+    store = getattr(app.state, "dynamic_words_store", None)
+    if store is not None:
+        store.flush_if_needed(force=True)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────

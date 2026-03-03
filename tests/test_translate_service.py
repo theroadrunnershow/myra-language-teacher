@@ -32,9 +32,11 @@ def reset_cache_and_client():
     """Isolate each test from cache and client state."""
     translate_service._translation_cache.clear()
     translate_service._translate_client = None
+    translate_service._dynamic_words_store = None
     yield
     translate_service._translation_cache.clear()
     translate_service._translate_client = None
+    translate_service._dynamic_words_store = None
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +106,33 @@ class TestTranslateWord:
         assert result["translation"] == "పిల్లి"
 
     @pytest.mark.anyio
+    async def test_dynamic_store_hit_no_api_call(self):
+        dynamic_result = {
+            "english": "umbrella",
+            "translation": "గొడుగు",
+            "romanized": "godugu",
+            "emoji": "✏️",
+            "language": "telugu",
+            "category": "custom",
+        }
+
+        class StoreStub:
+            def lookup(self, english_word, language):
+                if english_word.lower() == "umbrella" and language == "telugu":
+                    return dynamic_result
+                return None
+
+            def upsert(self, word):
+                return None
+
+        translate_service.set_dynamic_words_store(StoreStub())
+        with patch.object(translate_service, "_translate_and_romanize_sync") as mock_api:
+            result = await translate_service.translate_word("umbrella", "telugu")
+
+        mock_api.assert_not_called()
+        assert result["translation"] == "గొడుగు"
+
+    @pytest.mark.anyio
     async def test_unknown_word_calls_api(self):
         with patch.dict("os.environ", {"GCP_PROJECT": "test-project"}):
             with patch.object(
@@ -111,6 +140,30 @@ class TestTranslateWord:
             ) as mock_api:
                 await translate_service.translate_word("zymurgy", "telugu")
         mock_api.assert_called_once()
+
+    @pytest.mark.anyio
+    async def test_unknown_word_upserts_dynamic_store(self):
+        class StoreStub:
+            def __init__(self):
+                self.upserts = []
+
+            def lookup(self, english_word, language):
+                return None
+
+            def upsert(self, word):
+                self.upserts.append(word)
+
+        store = StoreStub()
+        translate_service.set_dynamic_words_store(store)
+
+        with patch.dict("os.environ", {"GCP_PROJECT": "test-project"}):
+            with patch.object(
+                translate_service, "_translate_and_romanize_sync", return_value=_FAKE_API_RESULT
+            ):
+                await translate_service.translate_word("zymurgy", "telugu")
+
+        assert len(store.upserts) == 1
+        assert store.upserts[0]["english"] == "zymurgy"
 
     @pytest.mark.anyio
     async def test_cache_prevents_second_api_call(self):
