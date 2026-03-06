@@ -222,7 +222,8 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
 
         logger.info(f"Audio temp file: {tmp_in_path}  size={len(audio_data)} bytes  ext=.{ext}")
 
-        tmp_wav_path = tmp_in_path.rsplit(".", 1)[0] + ".wav"
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_wav:
+            tmp_wav_path = tmp_wav.name
         try:
             # Let ffmpeg auto-detect the actual format from file contents
             t0 = time.perf_counter()
@@ -267,7 +268,8 @@ async def _convert_to_wav(audio_data: bytes, ext: str = "webm") -> str:
                 f"duration_ms={1000*(time.perf_counter()-t_convert_start):.1f}"
             )
         finally:
-            os.unlink(tmp_in_path)
+            if os.path.exists(tmp_in_path):
+                os.unlink(tmp_in_path)
 
         return tmp_wav_path
 
