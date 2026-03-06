@@ -81,6 +81,57 @@ def get_whisper_model():
     return _whisper_model
 
 
+def _join_segments(segments) -> str:
+    return " ".join(seg.text for seg in segments).strip()
+
+
+def _transcribe_with_empty_retry(
+    model,
+    wav_path: str,
+    *,
+    language: str,
+    initial_prompt: str = "",
+    pass_name: str,
+) -> str:
+    """Run Whisper once with VAD, then retry without VAD if the result is empty."""
+    opts = dict(_WHISPER_OPTS)
+    if initial_prompt:
+        opts["initial_prompt"] = initial_prompt
+
+    started = time.perf_counter()
+    segments, _ = model.transcribe(
+        wav_path,
+        language=language,
+        task="transcribe",
+        **opts,
+    )
+    text = _join_segments(segments)
+    duration_ms = 1000 * (time.perf_counter() - started)
+    logger.info(
+        f"[TIMING] step={pass_name} lang={language} vad=true "
+        f"result='{text}' duration_ms={duration_ms:.1f}"
+    )
+    if text:
+        return text
+
+    retry_opts = dict(opts)
+    retry_opts["vad_filter"] = False
+    retry_started = time.perf_counter()
+    retry_segments, _ = model.transcribe(
+        wav_path,
+        language=language,
+        task="transcribe",
+        **retry_opts,
+    )
+    retry_text = _join_segments(retry_segments)
+    retry_duration_ms = 1000 * (time.perf_counter() - retry_started)
+    logger.warning(
+        f"[TIMING] step={pass_name} lang={language} vad=false retry_on_empty=true "
+        f"result='{retry_text}' duration_ms={retry_duration_ms:.1f}"
+    )
+    return retry_text
+
+
 def normalize_text(text: str) -> str:
     """Normalize unicode text for fuzzy comparison."""
     text = unicodedata.normalize("NFC", text)
@@ -261,25 +312,17 @@ async def recognize_speech(
                 f"duration_ms={1000*(time.perf_counter()-t_model):.1f}"
             )
 
-            # Optional prompt to bias Whisper toward expected word (when flag on)
-            kw_native = {"initial_prompt": expected_word} if INITIAL_PROMPT_ENABLED else {}
-            kw_roman = {"initial_prompt": (romanized or expected_word).strip()} if INITIAL_PROMPT_ENABLED else {}
-
             # Pass 2 first: force English → fast, reliable phonetic/romanized output.
             # This is the primary success path (~200ms on CPU).
-            t0_p2 = time.perf_counter()
-            segments_roman, _ = model.transcribe(
+            transcribed_roman = _transcribe_with_empty_retry(
+                model,
                 wav_path,
                 language="en",
-                task="transcribe",
-                **{**_WHISPER_OPTS, **kw_roman},
+                initial_prompt=(romanized or expected_word).strip() if INITIAL_PROMPT_ENABLED else "",
+                pass_name="whisper_pass2",
             )
-            transcribed_roman = " ".join(seg.text for seg in segments_roman).strip()
-            logger.info(
-                f"[TIMING] step=whisper_pass2 lang=en "
-                f"result='{transcribed_roman}' "
-                f"duration_ms={1000*(time.perf_counter()-t0_p2):.1f}"
-            )
+            if transcribed_roman:
+                logger.info(f"[TIMING] step=whisper_pass2_effective lang=en result='{transcribed_roman}'")
 
             # Short-circuit: if romanized match already meets threshold, skip native pass.
             # Saves ~6s on the happy path (pass1 was ~6262ms, pass2 is ~198ms).
@@ -293,19 +336,17 @@ async def recognize_speech(
 
             # Pass 1 fallback: force target language (native-script output).
             # Only runs when pass-2 romanized score is below threshold (~5% of requests).
-            t0_p1 = time.perf_counter()
-            segments_native, _ = model.transcribe(
+            transcribed_native = _transcribe_with_empty_retry(
+                model,
                 wav_path,
                 language=lang_code,
-                task="transcribe",
-                **{**_WHISPER_OPTS, **kw_native},
+                initial_prompt=expected_word if INITIAL_PROMPT_ENABLED else "",
+                pass_name="whisper_pass1",
             )
-            transcribed_native = " ".join(seg.text for seg in segments_native).strip()
-            logger.info(
-                f"[TIMING] step=whisper_pass1 lang={lang_code} "
-                f"result='{transcribed_native}' "
-                f"duration_ms={1000*(time.perf_counter()-t0_p1):.1f}"
-            )
+            if transcribed_native:
+                logger.info(
+                    f"[TIMING] step=whisper_pass1_effective lang={lang_code} result='{transcribed_native}'"
+                )
 
             return transcribed_native, transcribed_roman
 

@@ -46,15 +46,41 @@ The Pi only runs `robot_teacher.py` and the Reachy Mini SDK. All speech recognit
 
 ### Pi setup
 
+#### Step 0 — First boot & WiFi configuration (do this once)
+
+1. **Power on** the robot and wait ~30 seconds
+2. **Connect your laptop** to the robot's hotspot:
+   - Network: `reachy-mini-ap`
+   - Password: `reachy-mini`
+3. **Configure home WiFi** — open [http://reachy-mini.local:8000/settings](http://reachy-mini.local:8000/settings) in your browser, enter your home WiFi SSID and password, click **Connect**. The hotspot disappears when it joins your network.
+4. **Reconnect your laptop** to your home WiFi
+5. **Update firmware** — go to [http://reachy-mini.local:8000/settings](http://reachy-mini.local:8000/settings) → Check for updates → install if available
+
+#### Step 1 — SSH into the Pi
+
 ```bash
-# SSH into the robot
-ssh pollen@reachy-mini.local   # default password: root
+ssh pollen@reachy-mini.local
+# password: root
+# (Change this password after first login: passwd)
+```
 
-# Install the robot SDK (Python 3.10+ required — Pi OS ships with it)
-pip install reachy-mini requests numpy pydub scipy soundfile
+Verify the robot setup is healthy:
+```bash
+reachyminios_check
+```
 
-# Copy only robot_teacher.py to the Pi (not the full app)
-scp robot_teacher.py pollen@reachy-mini.local:/home/pollen/
+#### Step 2 — Install Myra dependencies
+
+```bash
+# Copy script + requirements to the Pi (run on your Mac)
+scp /Users/abhisheksunku/Downloads/claude_projects/myra-language-teacher/src/robot_teacher.py \
+    /Users/abhisheksunku/Downloads/claude_projects/myra-language-teacher/requirements-robot.txt \
+    pollen@reachy-mini.local:/home/pollen/
+
+# On the Pi — create venv and install from requirements file
+python3 -m venv /home/pollen/myra-venv
+source /home/pollen/myra-venv/bin/activate
+pip install -r /home/pollen/requirements-robot.txt
 ```
 
 ### robot_teacher.py config for Option A
@@ -67,8 +93,18 @@ SERVER_URL = "https://kiddos-telugu-teacher.com"   # existing production server
 ### Running
 
 ```bash
-# On the Pi
-python robot_teacher.py --language telugu --categories animals,colors --words 10
+# On the Pi — activate venv if starting a new terminal session
+source /home/pollen/myra-venv/bin/activate
+
+# Telugu only, all categories
+python robot_teacher.py --no-server --language telugu \
+  --categories animals,colors,body_parts,numbers,food,common_objects \
+  --words 10
+
+# Both languages, all categories
+python robot_teacher.py --no-server --language both \
+  --categories animals,colors,body_parts,numbers,food,common_objects \
+  --words 10
 ```
 
 ### Pros
@@ -110,10 +146,25 @@ python robot_teacher.py --language telugu --categories animals,colors --words 10
 
 ### Pi setup
 
-```bash
-# SSH into the robot
-ssh pollen@reachy-mini.local
+#### Step 0 — First boot & WiFi configuration (do this once, skip if already done)
 
+Same as Option A Step 0 above — power on, join `reachy-mini-ap`, configure home WiFi, update firmware.
+
+#### Step 1 — SSH into the Pi
+
+```bash
+ssh pollen@reachy-mini.local
+# password: root
+```
+
+Verify health:
+```bash
+reachyminios_check
+```
+
+#### Step 2 — Install system deps and copy the full app
+
+```bash
 # Install system deps
 sudo apt-get update && sudo apt-get install -y ffmpeg
 

@@ -5,27 +5,22 @@ resource "google_compute_security_policy" "app" {
   name        = "dino-app-armor"
   description = "Rate limiting and OWASP protection for Myra language teacher app"
 
-  # ── Exempt specific API endpoints from OWASP xss-stable false-positives ───────
+  # ── Exempt specific API endpoints from OWASP false-positives ─────────────────
   # /api/tts, /api/dino-voice: Telugu/Assamese text in URL query string triggers xss-stable.
   # /api/recognize: Telugu expected_word in multipart POST body triggers xss-stable.
   # /api/config: JSON settings body triggers xss-stable.
-  # /api/translate: precautionary — query param is ASCII English but Indic in response.
-  # All other routes (/, /settings, /api/word, /api/words/all) remain OWASP-protected.
+  # /api/translate: query param is ASCII English but Indic in response.
+  # /api/word, /api/words/all: category param "body_parts" triggers lfi-stable false-positive.
+  # Page routes (/, /settings, /health) remain OWASP-protected.
   rule {
     action   = "allow"
     priority = 100
     match {
       expr {
-        expression = join(" || ", [
-          "request.path == '/api/tts'",
-          "request.path == '/api/dino-voice'",
-          "request.path == '/api/recognize'",
-          "request.path == '/api/config'",
-          "request.path == '/api/translate'",
-        ])
+        expression = "request.path.matches('/api/(?:config|word|words/all|translate|tts|dino-voice|recognize)')"
       }
     }
-    description = "Exempt TTS, dino-voice, recognize, config, translate from OWASP scan (Indic script false-positives)"
+    description = "Exempt known API endpoints from OWASP scan (Indic script false-positives)"
   }
 
   # ── OWASP preconfigured rule set (priority 900, before rate limits) ───────────

@@ -1,12 +1,18 @@
 # Reachy Mini robot controller dependencies
-# Install alongside the main app: pip install -r requirements.txt -r requirements-robot.txt
+# Option A (Pi + GCP): pip install -r requirements-robot.txt
+# Option B (fully on Pi): pip install -r requirements.txt -r requirements-robot.txt
 
 # Robot SDK (Wireless version — Raspberry Pi 5)
 reachy-mini>=1.2.0
 
-# Lightweight WAV I/O from numpy arrays (supplements pydub for write path)
+# Audio conversion (MP3 → numpy for speaker, numpy → WAV for STT)
+pydub>=0.25.1
+audioop-lts>=0.2.1  # backport of audioop removed in Python 3.13
+numpy>=1.24.0
+scipy>=1.11.0
+
+# Lightweight WAV I/O from numpy arrays
 soundfile>=0.12.1
 
-# Synchronous HTTP client for robot script (no FastAPI/async needed on the client side)
-# Note: requests is NOT in requirements.txt (which uses httpx for tests only)
+# Synchronous HTTP client for robot script
 requests>=2.31.0

@@ -36,6 +36,7 @@ import time
 
 import numpy as np
 import requests
+import scipy.signal
 import scipy.io.wavfile as wavfile
 from pydub import AudioSegment
 
@@ -57,9 +58,10 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-# Option B: server runs on Pi — port 8765 avoids conflict with Reachy daemon
-SERVER_URL = "http://localhost:8765"
-SERVER_PORT = 8765
+# Option A: use existing GCP Cloud Run server
+# Option B: SERVER_URL = "http://localhost:8765" (server runs on Pi)
+SERVER_URL = "https://kiddos-telugu-teacher.com"
+SERVER_PORT = 8765  # only used if starting a local server subprocess (Option B)
 
 RECORD_DURATION = 5.0   # seconds to record per attempt
 SAMPLE_RATE = 16000      # robot mic/speaker rate (fixed by SDK hardware)
@@ -95,48 +97,174 @@ def _strip_emoji(text: str) -> str:
 
 # ── Audio bridge ───────────────────────────────────────────────────────────────
 
-def mic_samples_to_wav_bytes(samples: np.ndarray) -> bytes:
+def _extract_first_channel(samples: np.ndarray) -> np.ndarray:
+    """Return a mono time-series from SDK audio frames with variable layout."""
+    frame = np.asarray(samples)
+    if frame.ndim == 0:
+        return frame.reshape(1)
+    if frame.ndim == 1:
+        return frame
+    if frame.ndim != 2:
+        frame = np.squeeze(frame)
+        if frame.ndim != 2:
+            raise ValueError(f"Unsupported audio frame shape: {samples.shape}")
+
+    # Match the official app's layout handling: time axis first, then channels.
+    if frame.shape[1] > frame.shape[0]:
+        frame = frame.T
+
+    if frame.shape[1] > 1:
+        frame = frame[:, 0]
+    else:
+        frame = frame[:, 0]
+    return np.asarray(frame).reshape(-1)
+
+
+def _to_float32_audio(samples: np.ndarray) -> np.ndarray:
+    """Normalize audio to float32 in [-1, 1] without destroying PCM-like input."""
+    audio = np.asarray(samples)
+    if np.issubdtype(audio.dtype, np.integer):
+        info = np.iinfo(audio.dtype)
+        scale = float(max(abs(info.min), info.max)) or 1.0
+        return audio.astype(np.float32) / scale
+
+    audio = audio.astype(np.float32, copy=False)
+    if audio.size == 0:
+        return audio
+
+    peak = float(np.max(np.abs(audio)))
+    if peak > 1.5:
+        if peak <= 32768.0 * 1.1:
+            logger.warning(
+                f"Mic samples exceed [-1, 1] (peak={peak:.1f}); treating them as PCM-like float data"
+            )
+            audio = audio / 32768.0
+        else:
+            logger.warning(
+                f"Mic samples exceed the expected range (peak={peak:.1f}); normalizing by peak"
+            )
+            audio = audio / peak
+    return audio
+
+
+def _resample_audio(samples: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample mono float32 audio to the target sample rate."""
+    audio = np.asarray(samples, dtype=np.float32)
+    if not len(audio) or src_rate <= 0 or dst_rate <= 0 or src_rate == dst_rate:
+        return audio
+
+    target_len = max(1, int(round(len(audio) * dst_rate / src_rate)))
+    if target_len == len(audio):
+        return audio
+    return scipy.signal.resample(audio, target_len).astype(np.float32)
+
+
+def mic_samples_to_wav_bytes(samples: np.ndarray, actual_rate: int = SAMPLE_RATE) -> bytes:
     """Convert robot mic numpy array → WAV bytes for POST /api/recognize.
 
-    The SDK returns shape (N,) mono or (N, channels) multi-channel float32
-    at 16 kHz. We mix to mono, clip, convert to int16, and write a standard
-    WAV blob that speech_service.py already knows how to handle
-    (audio_format="audio/wav" maps to MIME_TO_EXT["audio/wav"] = "wav").
+    Mirrors the approach used by the official Pollen Robotics conversation app:
+    - Extract first channel only (channel 0) — avoids phase cancellation from
+      mixing spatially-separated mic array elements
+    - Resample with scipy.signal.resample (FFT-based) to reach 16 kHz
     """
-    if samples.ndim > 1:
-        mono = samples.mean(axis=1)
-    else:
-        mono = samples.copy()
+    mono = _to_float32_audio(_extract_first_channel(samples))
+
+    logger.info(
+        f"mic raw: shape={samples.shape} dtype={samples.dtype} "
+        f"min={mono.min():.4f} max={mono.max():.4f} rms={float(np.sqrt(np.mean(mono**2))):.4f}"
+    )
+
+    # FFT-based resampling — same approach as official Pollen Robotics app
+    mono = _resample_audio(mono, actual_rate, SAMPLE_RATE)
+
     mono = np.clip(mono, -1.0, 1.0)
-    pcm16 = (mono * 32767).astype(np.int16)
+    pcm16 = np.round(mono * 32767).astype(np.int16)
     buf = io.BytesIO()
     wavfile.write(buf, SAMPLE_RATE, pcm16)
     return buf.getvalue()
 
 
-def mp3_bytes_to_robot_samples(mp3_bytes: bytes) -> np.ndarray:
-    """Convert MP3 bytes from GET /api/tts → numpy array for push_audio_sample().
-
-    pydub is already in requirements.txt so no new dependency is needed.
-    Returns shape (N, 1) float32 at SAMPLE_RATE Hz — the format the SDK expects.
-    """
-    seg = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
-    seg = seg.set_frame_rate(SAMPLE_RATE).set_channels(1)
-    raw = np.array(seg.get_array_of_samples(), dtype=np.int16)
-    samples = raw.astype(np.float32) / 32767.0
+def wav_bytes_to_robot_samples(wav_bytes: bytes, output_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Convert WAV bytes → float32 (N, 1) at the robot's speaker sample rate."""
+    input_rate, pcm = wavfile.read(io.BytesIO(wav_bytes))
+    samples = _to_float32_audio(_extract_first_channel(pcm))
+    samples = _resample_audio(samples, input_rate, output_rate)
     return samples.reshape(-1, 1)
 
 
-def _audio_duration(samples: np.ndarray) -> float:
+def mp3_bytes_to_robot_samples(mp3_bytes: bytes, output_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Convert MP3 bytes from GET /api/tts → numpy array for push_audio_sample().
+
+    pydub is already in requirements.txt so no new dependency is needed.
+    Returns shape (N, 1) float32 at the robot's output sample rate.
+    """
+    seg = AudioSegment.from_file(io.BytesIO(mp3_bytes), format="mp3")
+    seg = seg.set_channels(1).set_frame_rate(output_rate)
+    raw = np.array(seg.get_array_of_samples())
+    samples = _to_float32_audio(raw)
+    return samples.reshape(-1, 1)
+
+
+def _audio_duration(samples: np.ndarray, sample_rate: int) -> float:
     """Return duration in seconds for a (N, 1) float32 sample array."""
-    return len(samples) / SAMPLE_RATE
+    return len(samples) / max(sample_rate, 1)
+
+
+def _drain_input_audio_queue(
+    mini,
+    sample_rate: int,
+    poll_interval: float = 0.01,
+    max_duration: float = 0.75,
+) -> None:
+    """Drop buffered mic frames so the next capture window starts fresh."""
+    drained_chunks = 0
+    drained_samples = 0
+    empty_reads = 0
+    deadline = time.time() + max_duration
+
+    while empty_reads < 3 and time.time() < deadline:
+        sample = mini.media.get_audio_sample()
+        if sample is None:
+            empty_reads += 1
+            time.sleep(poll_interval)
+            continue
+
+        empty_reads = 0
+        drained_chunks += 1
+        drained_samples += len(_extract_first_channel(sample))
+
+    if drained_chunks:
+        suffix = "" if empty_reads >= 3 else " (flush timed out before queue went idle)"
+        logger.info(
+            f"Flushed mic backlog: chunks={drained_chunks} "
+            f"duration={drained_samples / max(sample_rate, 1):.2f}s{suffix}"
+        )
+
+
+# ── HTTP session with retry (handles Cloud Run cold-start SSL drops) ───────────
+
+def _make_session() -> requests.Session:
+    """Session with retry (handles Cloud Run cold-start connection drops)."""
+    from urllib3.util.retry import Retry
+    from requests.adapters import HTTPAdapter
+
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=2,
+                  status_forcelist=[502, 503, 504],
+                  allowed_methods=["GET", "POST"])
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+_session = _make_session()
 
 
 # ── HTTP client wrappers ───────────────────────────────────────────────────────
 
 def api_get_word(languages: list, categories: list) -> dict:
     """GET /api/word → {english, translation, romanized, emoji, language, category}"""
-    r = requests.get(
+    r = _session.get(
         f"{SERVER_URL}/api/word",
         params={
             "languages": ",".join(languages),
@@ -153,7 +281,7 @@ def api_get_tts(text: str, language: str, slow: bool = True) -> bytes:
     clean = _strip_emoji(text)
     if not clean:
         return b""
-    r = requests.get(
+    r = _session.get(
         f"{SERVER_URL}/api/tts",
         params={"text": clean, "language": language, "slow": str(slow).lower()},
         timeout=20,
@@ -164,7 +292,7 @@ def api_get_tts(text: str, language: str, slow: bool = True) -> bytes:
 
 def api_get_dino_voice(text: str) -> bytes:
     """GET /api/dino-voice → English TTS MP3 bytes for robot prompts."""
-    r = requests.get(
+    r = _session.get(
         f"{SERVER_URL}/api/dino-voice",
         params={"text": text},
         timeout=20,
@@ -185,7 +313,7 @@ def api_recognize(
     audio/wav is already in speech_service.MIME_TO_EXT so no server changes needed.
     Timeout is 30s to cover Whisper cold-start on the first call after boot.
     """
-    r = requests.post(
+    r = _session.post(
         f"{SERVER_URL}/api/recognize",
         data={
             "language": language,
@@ -240,7 +368,7 @@ def wait_for_server(timeout: float = 90.0) -> bool:
     dots = 0
     while time.time() < deadline:
         try:
-            r = requests.get(f"{SERVER_URL}/health", timeout=2)
+            r = _session.get(f"{SERVER_URL}/health", timeout=2)
             if r.status_code == 200:
                 print()  # newline after progress dots
                 logger.info("Myra server is ready.")
@@ -285,6 +413,10 @@ class RobotController:
 
     def __init__(self, mini):
         self._mini = mini
+        get_output_rate = getattr(self._mini.media, "get_output_audio_samplerate", None)
+        self.output_sample_rate = (
+            get_output_rate() if callable(get_output_rate) else SAMPLE_RATE
+        ) or SAMPLE_RATE
         self._stop_event = threading.Event()
         self._bg_thread: threading.Thread | None = None
 
@@ -402,10 +534,17 @@ class RobotController:
 
     def play_audio(self, samples: np.ndarray):
         """Push audio to the speaker, run speak animation, block until done."""
-        duration = _audio_duration(samples)
+        duration = _audio_duration(samples, self.output_sample_rate)
+        rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
+        logger.info(
+            f"Speaker: pushing {duration:.2f}s audio @ {self.output_sample_rate} Hz, "
+            f"shape={samples.shape}, RMS={rms:.4f}"
+        )
         self.speak()
         self._mini.media.push_audio_sample(samples)
+        logger.info(f"Speaker: push_audio_sample() returned, sleeping {duration + 0.15:.2f}s")
         time.sleep(duration + 0.15)  # small buffer for audio tail
+        logger.info("Speaker: done")
         self._stop_background()
 
 
@@ -415,7 +554,7 @@ def _play(robot: RobotController, mp3_bytes: bytes):
     """Decode MP3 bytes and play through the robot speaker with speak animation."""
     if not mp3_bytes:
         return
-    samples = mp3_bytes_to_robot_samples(mp3_bytes)
+    samples = mp3_bytes_to_robot_samples(mp3_bytes, output_rate=robot.output_sample_rate)
     robot.play_audio(samples)
 
 
@@ -437,6 +576,8 @@ def run_lesson_word(
     categories: list,
     threshold: int,
     max_attempts: int,
+    mic_rate: int = SAMPLE_RATE,
+    debug_audio: bool = False,
 ) -> str:
     """Run one complete word lesson. Returns 'correct' | 'revealed' | 'error'."""
 
@@ -480,14 +621,71 @@ def run_lesson_word(
 
         # Gap after TTS so the speaker echo doesn't bleed into the recording
         time.sleep(0.5)
+        _drain_input_audio_queue(mini, mic_rate)
 
         try:
-            raw = mini.microphones.record(duration=RECORD_DURATION)
+            chunks = []
+            t_start = time.time()
+            deadline = t_start + RECORD_DURATION
+            while time.time() < deadline:
+                sample = mini.media.get_audio_sample()
+                if sample is not None:
+                    mono = _extract_first_channel(sample)
+                    if mono.size:
+                        chunks.append(mono)
+                time.sleep(0.02)
+            elapsed = time.time() - t_start
+
+            if chunks:
+                raw = np.concatenate(chunks)
+                n_samples = len(raw)
+                actual_rate = mic_rate
+                logger.info(
+                    f"Chunk[0] shape={chunks[0].shape} dtype={chunks[0].dtype}  "
+                    f"total_samples={n_samples}  elapsed={elapsed:.2f}s"
+                )
+
+                # Follow the official app and trust the robot-reported sample rate.
+                detected = n_samples / elapsed if elapsed > 0 else 0.0
+                if detected and abs(detected - mic_rate) / max(mic_rate, 1) > 0.2:
+                    logger.warning(
+                        f"Observed {detected:.0f} samples/s while robot reports {mic_rate} Hz; "
+                        f"keeping the SDK rate to match the official app"
+                    )
+
+                raw_float = _to_float32_audio(raw)
+                rms = float(np.sqrt(np.mean(raw_float ** 2)))
+                logger.info(
+                    f"Recorded {n_samples/actual_rate:.1f}s @ {actual_rate} Hz — "
+                    f"RMS={rms:.4f} "
+                    f"({'silence' if rms < 0.002 else 'has audio'}), "
+                    f"chunks={len(chunks)}"
+                )
+            else:
+                actual_rate = mic_rate
+                logger.warning("No audio chunks received — mic pipeline not live")
+                raw = np.zeros(int(mic_rate * RECORD_DURATION), dtype=np.float32)
         except Exception as e:
             logger.error(f"Recording failed: {e}")
             return "error"
 
-        wav_bytes = mic_samples_to_wav_bytes(raw)
+        wav_bytes = mic_samples_to_wav_bytes(raw, actual_rate=actual_rate)
+
+        if debug_audio:
+            debug_path = "/tmp/myra_debug.wav"
+            with open(debug_path, "wb") as f:
+                f.write(wav_bytes)
+            logger.info(f"Debug WAV saved → {debug_path}")
+            _say(robot, "I heard you say...")
+            try:
+                playback = wav_bytes_to_robot_samples(
+                    wav_bytes,
+                    output_rate=robot.output_sample_rate,
+                )
+                robot.play_audio(playback)
+            except Exception as e:
+                logger.warning(f"Debug playback failed: {e}")
+            _say(robot, "Let me check if that is correct!")
 
         print("  🧠  Recognizing…")
         try:
@@ -553,6 +751,7 @@ def run_lesson_session(
     num_words: int,
     threshold: int,
     max_attempts: int,
+    debug_audio: bool = False,
 ):
     """Manage the ReachyMini context and run a full lesson session."""
     if not _ROBOT_SDK_AVAILABLE:
@@ -564,8 +763,18 @@ def run_lesson_session(
 
     score = 0
 
-    with ReachyMini() as mini:
+    with ReachyMini(media_backend="default") as mini:
         robot = RobotController(mini)
+
+        # Open audio pipelines once for the whole session.
+        # default backend (Sounddevice) needs both active simultaneously:
+        # start_playing keeps the output pipeline open for push_audio_sample,
+        # start_recording keeps the input pipeline open for get_audio_sample.
+        mic_rate = mini.media.get_input_audio_samplerate() or SAMPLE_RATE
+        logger.info(f"Mic sample rate: {mic_rate} Hz")
+        logger.info(f"Speaker sample rate: {robot.output_sample_rate} Hz")
+        mini.media.start_playing()
+        mini.media.start_recording()
 
         print("\n" + "=" * 44)
         print("   🦕  Myra's Language Lesson  🦕")
@@ -577,7 +786,8 @@ def run_lesson_session(
         for i in range(num_words):
             print(f"\n=== Word {i + 1} of {num_words} ===")
             outcome = run_lesson_word(
-                mini, robot, languages, categories, threshold, max_attempts
+                mini, robot, languages, categories, threshold, max_attempts,
+                mic_rate=mic_rate, debug_audio=debug_audio,
             )
             if outcome == "correct":
                 score += 1
@@ -598,6 +808,9 @@ def run_lesson_session(
 
         robot.idle()
         time.sleep(1.0)
+
+        mini.media.stop_recording()
+        mini.media.stop_playing()
 
 
 # ── Entry point ────────────────────────────────────────────────────────────────
@@ -650,6 +863,11 @@ def main():
         metavar="PATH",
         help="Path to the myra-language-teacher directory on the Pi",
     )
+    parser.add_argument(
+        "--debug-audio",
+        action="store_true",
+        help="Play back each recording through the speaker before recognizing; save to /tmp/myra_debug.wav",
+    )
     args = parser.parse_args()
 
     # Resolve languages
@@ -697,6 +915,7 @@ def main():
             num_words=args.words,
             threshold=args.threshold,
             max_attempts=args.max_attempts,
+            debug_audio=args.debug_audio,
         )
     except KeyboardInterrupt:
         print("\nLesson stopped.")
