@@ -368,18 +368,22 @@ def start_myra_server(
     app_dir: str = DEFAULT_APP_DIR,
     *,
     words_sync_to_gcs: str = "never",
+    gcs_bucket: str = "",
 ) -> subprocess.Popen:
     """Launch the Myra FastAPI server as a subprocess on port 8765.
 
     Key environment overrides:
-      DISABLE_PASS1=true  — skips the slow native-language Whisper pass
-                            (~6 s saved per recognition on Pi CPU)
-      PYTHONUNBUFFERED=1  — ensures server logs flush immediately
+      DISABLE_PASS1=true       — skips the slow native-language Whisper pass
+                                 (~6 s saved per recognition on Pi CPU)
+      PYTHONUNBUFFERED=1       — ensures server logs flush immediately
+      WORDS_OBJECT_BUCKET      — GCS bucket for dynamic-words sync/load
     """
     env = os.environ.copy()
     env["DISABLE_PASS1"] = "true"
     env["PYTHONUNBUFFERED"] = "1"
     env["WORDS_SYNC_TO_GCS"] = words_sync_to_gcs
+    if gcs_bucket:
+        env["WORDS_OBJECT_BUCKET"] = gcs_bucket
 
     logger.info(f"Starting Myra server at {app_dir} on port {SERVER_PORT}…")
     proc = subprocess.Popen(
@@ -1109,6 +1113,12 @@ def main():
         help="For reachy_local: never | session_end | shutdown",
     )
     parser.add_argument(
+        "--gcs-bucket",
+        default="myra-language-teacher-dynamic-words",
+        metavar="BUCKET",
+        help="GCS bucket for dynamic-words load and sync (reachy_local only)",
+    )
+    parser.add_argument(
         "--child-name",
         default="",
         metavar="NAME",
@@ -1171,6 +1181,7 @@ def main():
         server_proc = start_myra_server(
             app_dir=args.server_dir,
             words_sync_to_gcs=words_sync_to_gcs,
+            gcs_bucket=args.gcs_bucket.strip(),
         )
 
         def _shutdown():
