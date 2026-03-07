@@ -214,7 +214,7 @@ def _drain_input_audio_queue(
     mini,
     sample_rate: int,
     poll_interval: float = 0.01,
-    max_duration: float = 0.75,
+    max_duration: float = 30.0,
 ) -> None:
     """Drop buffered mic frames so the next capture window starts fresh."""
     drained_chunks = 0
@@ -226,9 +226,10 @@ def _drain_input_audio_queue(
         sample = mini.media.get_audio_sample()
         if sample is None:
             empty_reads += 1
-            time.sleep(poll_interval)
+            time.sleep(poll_interval)  # only sleep when queue is empty
             continue
 
+        # Got a chunk — drain as fast as possible, no sleep
         empty_reads = 0
         drained_chunks += 1
         drained_samples += len(_extract_first_channel(sample))
@@ -495,14 +496,25 @@ class RobotController:
     # ── Celebrate: enthusiastic head bobs + happy antenna wiggle ──────────────
 
     def celebrate(self):
-        """Play 3-cycle celebration sequence, then return to idle."""
+        """Start 3-cycle celebration sequence in background (non-blocking).
+
+        Returns immediately so audio can play in parallel.
+        """
         self._stop_background()
+        self._bg_thread = threading.Thread(target=self._celebrate_loop, daemon=True)
+        self._bg_thread.start()
+
+    def _celebrate_loop(self):
         for _ in range(3):
+            if self._stop_event.is_set():
+                return
             self._mini.goto_target(
                 head=create_head_pose(z=15, mm=True),
                 antennas=[0.8, -0.8],
                 duration=0.3,
             )
+            if self._stop_event.is_set():
+                return
             self._mini.goto_target(
                 head=create_head_pose(z=-5, mm=True),
                 antennas=[-0.8, 0.8],
@@ -513,22 +525,39 @@ class RobotController:
     # ── Wrong: head shake + drooping antennas ─────────────────────────────────
 
     def express_wrong(self):
-        """Play a gentle head-shake sequence, then return to idle."""
+        """Start 3-cycle yaw head-shake ("no") in background (non-blocking).
+
+        Returns immediately so the uh-oh jingle can play in parallel.
+        """
         self._stop_background()
+        self._bg_thread = threading.Thread(target=self._express_wrong_loop, daemon=True)
+        self._bg_thread.start()
+
+    def _express_wrong_loop(self):
+        # Droop antennas first so they're set before the shaking starts
         self._mini.goto_target(
-            head=create_head_pose(roll=12, degrees=True),
-            antennas=np.deg2rad([-20, -20]),
-            duration=0.35,
+            antennas=np.deg2rad([-30, -30]),
+            duration=0.2,
         )
-        self._mini.goto_target(
-            head=create_head_pose(roll=-12, degrees=True),
-            duration=0.35,
-        )
-        self._mini.goto_target(
-            head=create_head_pose(roll=0, degrees=True),
-            antennas=np.deg2rad([0, 0]),
-            duration=0.4,
-        )
+        for _ in range(3):
+            if self._stop_event.is_set():
+                return
+            self._mini.goto_target(
+                head=create_head_pose(yaw=18, degrees=True),
+                duration=0.22,
+            )
+            if self._stop_event.is_set():
+                return
+            self._mini.goto_target(
+                head=create_head_pose(yaw=-18, degrees=True),
+                duration=0.22,
+            )
+        if not self._stop_event.is_set():
+            self._mini.goto_target(
+                head=create_head_pose(yaw=0, degrees=True),
+                antennas=np.deg2rad([0, 0]),
+                duration=0.35,
+            )
         self.idle()
 
     # ── Synchronized audio playback ───────────────────────────────────────────
@@ -548,8 +577,13 @@ class RobotController:
         time.sleep(warmup_duration + 0.05)
         self._speaker_primed = True
 
-    def play_audio(self, samples: np.ndarray):
-        """Push audio to the speaker, run speak animation, block until done."""
+    def play_audio(self, samples: np.ndarray, suppress_speak_anim: bool = False):
+        """Push audio to the speaker and block until done.
+
+        Pass suppress_speak_anim=True when celebrate() or express_wrong() is
+        already running in the background and should not be replaced by the
+        speak loop — this lets animation and audio play simultaneously.
+        """
         self.prime_speaker()
         duration = _audio_duration(samples, self.output_sample_rate)
         rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
@@ -557,12 +591,14 @@ class RobotController:
             f"Speaker: pushing {duration:.2f}s audio @ {self.output_sample_rate} Hz, "
             f"shape={samples.shape}, RMS={rms:.4f}"
         )
-        self.speak()
+        if not suppress_speak_anim:
+            self.speak()
         self._mini.media.push_audio_sample(samples)
         logger.info(f"Speaker: push_audio_sample() returned, sleeping {duration + 0.15:.2f}s")
         time.sleep(duration + 0.15)  # small buffer for audio tail
         logger.info("Speaker: done")
-        self._stop_background()
+        if not suppress_speak_anim:
+            self._stop_background()
 
 
 # ── Celebration jingle ─────────────────────────────────────────────────────────
@@ -601,6 +637,37 @@ def _generate_celebration_jingle(sample_rate: int = SAMPLE_RATE) -> np.ndarray:
     return jingle.reshape(-1, 1)
 
 
+def _generate_uhoh_jingle(sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Synthesize a descending two-note 'uh oh' stinger (G4 → Eb4).
+
+    No external audio files required — pure numpy synthesis.
+    Returns shape (N, 1) float32 at the given sample rate.
+    """
+    notes = [
+        (392.00, 0.20),   # G4
+        (311.13, 0.35),   # Eb4 (minor third down — classic wrong-answer interval)
+    ]
+    segments = []
+    for freq, dur in notes:
+        n = int(sample_rate * dur)
+        t = np.linspace(0, dur, n, endpoint=False)
+        wave = 0.6 * np.sin(2 * np.pi * freq * t) + 0.25 * np.sin(2 * np.pi * freq * 2 * t)
+        env = np.ones(n, dtype=np.float32)
+        attack = min(int(0.008 * sample_rate), n)
+        release = min(int(0.06 * sample_rate), n)
+        env[:attack] = np.linspace(0.0, 1.0, attack)
+        env[n - release:] = np.linspace(1.0, 0.0, release)
+        segments.append((wave * env).astype(np.float32))
+        # Short gap between notes
+        segments.append(np.zeros(int(sample_rate * 0.04), dtype=np.float32))
+
+    jingle = np.concatenate(segments)
+    peak = float(np.max(np.abs(jingle)))
+    if peak > 0:
+        jingle *= 0.65 / peak
+    return jingle.reshape(-1, 1)
+
+
 # ── Lesson helpers ─────────────────────────────────────────────────────────────
 
 def _play(robot: RobotController, mp3_bytes: bytes):
@@ -611,10 +678,11 @@ def _play(robot: RobotController, mp3_bytes: bytes):
     robot.play_audio(samples)
 
 
-def _say(robot: RobotController, text: str):
-    """Speak an English voice line via /api/dino-voice, silently fail if TTS errors."""
+def _say(robot: RobotController, text: str, language: str = "english"):
+    """Speak a voice line via /api/tts. Defaults to English; pass lesson language
+    to keep a single consistent voice throughout a word lesson."""
     try:
-        _play(robot, api_get_dino_voice(text))
+        _play(robot, api_get_tts(text, language, slow=False))
     except Exception as e:
         logger.warning(f"Voice line failed '{text[:40]}': {e}")
         time.sleep(1.5)  # pause so the lesson flow still feels natural
@@ -653,29 +721,58 @@ def run_lesson_word(
     print(f"  Language: {language}   Category: {word['category']}")
     print(f"{'─' * 44}")
 
-    # ── Pronounce the word twice so Myra hears it clearly ─────────────────────
+    # ── Teach the word with meaning ────────────────────────────────────────────
+    # Stop recording during teaching so the mic buffer doesn't fill with TTS audio.
+    # Recording is restarted fresh right before each recognition attempt.
+    mini.media.stop_recording()
     robot.idle()
     tts_mp3 = b""
     try:
         tts_mp3 = api_get_tts(translation, language, slow=True)
-        _play(robot, tts_mp3)
-        time.sleep(0.4)
-        _play(robot, tts_mp3)
-        time.sleep(0.3)
     except Exception as e:
         logger.warning(f"Word TTS failed: {e}")
 
-    # ── Prompt child to repeat ─────────────────────────────────────────────────
-    _say(robot, f"Now you say it, {child_name}! Go ahead!")
+    roman = romanized.lower()
+    eng = word["english"].lower()
+    lang_display = language.capitalize()
+
+    # 1. Curiosity hook — one voice throughout (lesson language for all speech)
+    _say(robot, f"{child_name}, do you know what this word means?", language)
+    if tts_mp3:
+        try:
+            _play(robot, tts_mp3)
+            time.sleep(0.4)
+        except Exception:
+            pass
+
+    # 2. Reveal the meaning, then play the native word again
+    _say(robot, f"{eng.capitalize()}! It means {eng} in {lang_display}.", language)
+    if tts_mp3:
+        try:
+            _play(robot, tts_mp3)
+            time.sleep(0.3)
+        except Exception:
+            pass
+
+    # 3. Prompt the child to repeat
+    _say(robot, f"Now say it with me, {child_name}!", language)
+    if tts_mp3:
+        try:
+            _play(robot, tts_mp3)
+            time.sleep(0.3)
+        except Exception:
+            pass
 
     # ── Attempt loop ──────────────────────────────────────────────────────────
     for attempt in range(1, max_attempts + 1):
         print(f"\n  🎤  Listening… (attempt {attempt}/{max_attempts})")
         robot.listen()
 
-        # Gap after TTS so the speaker echo doesn't bleed into the recording
-        time.sleep(0.5)
-        _drain_input_audio_queue(mini, mic_rate)
+        # Restart recording with an empty buffer — avoids the long drain that
+        # occurred when the mic accumulated TTS audio during teaching.
+        mini.media.start_recording()
+        time.sleep(0.3)  # let hardware initialize
+        _drain_input_audio_queue(mini, mic_rate, max_duration=1.5)
 
         try:
             chunks = []
@@ -721,7 +818,11 @@ def run_lesson_word(
                 raw = np.zeros(int(mic_rate * RECORD_DURATION), dtype=np.float32)
         except Exception as e:
             logger.error(f"Recording failed: {e}")
+            mini.media.stop_recording()
             return "error"
+
+        # Stop recording immediately so subsequent TTS doesn't refill the buffer.
+        mini.media.stop_recording()
 
         wav_bytes = mic_samples_to_wav_bytes(raw, actual_rate=actual_rate)
 
@@ -730,7 +831,7 @@ def run_lesson_word(
             with open(debug_path, "wb") as f:
                 f.write(wav_bytes)
             logger.info(f"Debug WAV saved → {debug_path}")
-            _say(robot, "I heard you say...")
+            _say(robot, f"{child_name}, I heard you say...", language)
             try:
                 playback = wav_bytes_to_robot_samples(
                     wav_bytes,
@@ -739,7 +840,7 @@ def run_lesson_word(
                 robot.play_audio(playback)
             except Exception as e:
                 logger.warning(f"Debug playback failed: {e}")
-            _say(robot, "Let me check if that is correct!")
+            _say(robot, f"Let me check if that is correct, {child_name}!", language)
 
         print("  🧠  Recognizing…")
         try:
@@ -757,32 +858,45 @@ def run_lesson_word(
 
         if is_correct:
             print("  ✓ Correct!\n")
-            robot.celebrate()
-            # Play a short celebration jingle, then the praise voice line
+            praise_text = random.choice([
+                f"Amazing, {child_name}! You got it!",
+                f"Wonderful, {child_name}! You said it perfectly!",
+                f"Great job {child_name}! You are amazing!",
+                f"Yes, {child_name}! That is exactly right!",
+            ])
+            robot.celebrate()  # non-blocking — animation runs while audio plays
+            # Mix jingle + praise voice into one buffer so they play simultaneously.
             try:
                 jingle = _generate_celebration_jingle(robot.output_sample_rate)
-                robot.play_audio(jingle)
+                praise_mp3 = api_get_tts(praise_text, language, slow=False)
+                praise_samples = mp3_bytes_to_robot_samples(
+                    praise_mp3, output_rate=robot.output_sample_rate
+                )
+                j_len, p_len = len(jingle), len(praise_samples)
+                mixed = np.zeros((max(j_len, p_len), 1), dtype=np.float32)
+                mixed[:j_len] += jingle * 0.55       # jingle slightly ducked
+                mixed[:p_len] += praise_samples       # voice at full level
+                np.clip(mixed, -1.0, 1.0, out=mixed)
+                robot.play_audio(mixed, suppress_speak_anim=True)
             except Exception as e:
-                logger.warning(f"Jingle playback failed (non-fatal): {e}")
-            praise = random.choice([
-                "Amazing! You got it!",
-                "Wonderful! You said it perfectly!",
-                f"Great job {child_name}! You are so smart!",
-                "Yes! That is exactly right!",
-            ])
-            _say(robot, praise)
+                logger.warning(f"Celebration audio failed: {e}")
+                _say(robot, praise_text, language)   # fallback: voice only
             return "correct"
 
-        # Wrong answer
-        robot.express_wrong()
+        # Wrong answer — shake head + play "uh oh" jingle simultaneously
+        robot.express_wrong()  # non-blocking — animation runs while jingle plays
+        try:
+            uhoh = _generate_uhoh_jingle(robot.output_sample_rate)
+            robot.play_audio(uhoh, suppress_speak_anim=True)
+        except Exception as e:
+            logger.warning(f"Uh-oh jingle playback failed (non-fatal): {e}")
         if attempt < max_attempts:
             retry = random.choice([
-                "Try again! You can do it!",
-                "Almost! One more time!",
-                f"Keep trying {child_name}! You've got this!",
+                f"Try again, {child_name}! Remember, it means {eng}. Say it!",
+                f"Almost! It means {eng}. One more time, {child_name}!",
+                f"You've got this, {child_name}! Say it!",
             ])
-            _say(robot, retry)
-            # Replay the word so Myra can hear it again before retrying
+            _say(robot, retry, language)
             if tts_mp3:
                 try:
                     _play(robot, tts_mp3)
@@ -793,13 +907,14 @@ def run_lesson_word(
     # ── Out of attempts — reveal the word ─────────────────────────────────────
     print(f"\n  ℹ️  The word was: {translation} ({romanized})\n")
     robot.idle()
-    _say(robot, "The word is…")
+    _say(robot, f"The word was…", language)
     if tts_mp3:
         try:
             _play(robot, tts_mp3)
         except Exception:
             pass
-    _say(robot, "Let's try the next one!")
+    _say(robot, f"That's okay, {child_name}! Let's try the next one!", language)
+    mini.media.start_recording()  # restore recording for the next word
     return "revealed"
 
 
@@ -836,14 +951,33 @@ def run_lesson_session(
         logger.info(f"Speaker sample rate: {robot.output_sample_rate} Hz")
         mini.media.start_playing()
         mini.media.start_recording()
-        robot.prime_speaker()
+
+        # Pre-fetch greeting TTS before priming so audio plays immediately after
+        # the warmup silence with no gap (prevents start-of-line clipping).
+        greeting_text = f"Hi {child_name}! Let's learn some words today! Are you ready?"
+        try:
+            greeting_audio = api_get_dino_voice(greeting_text)
+        except Exception as e:
+            logger.warning(f"Greeting prefetch failed: {e}")
+            greeting_audio = None
 
         print("\n" + "=" * 44)
         print(f"   🦕  {child_name}'s Language Lesson  🦕")
         print("=" * 44 + "\n")
 
         robot.idle()
-        _say(robot, f"Hi {child_name}! Let's learn some words today! Are you ready?")
+        if greeting_audio:
+            # Decode MP3 → samples, then prepend 400 ms of silence so the
+            # hardware wakes up on silence rather than clipping the first word.
+            greeting_samples = mp3_bytes_to_robot_samples(
+                greeting_audio, output_rate=robot.output_sample_rate
+            )
+            n_pad = int(robot.output_sample_rate * 0.4)
+            channels = greeting_samples.shape[1] if greeting_samples.ndim > 1 else 1
+            pad = np.zeros((n_pad, channels), dtype=greeting_samples.dtype)
+            robot.play_audio(np.concatenate([pad, greeting_samples]))
+        else:
+            time.sleep(1.5)
 
         for i in range(num_words):
             print(f"\n=== Word {i + 1} of {num_words} ===")
