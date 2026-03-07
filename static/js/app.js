@@ -3,6 +3,8 @@
    Roo UX v2: voice layer, Web Audio SFX, animations, streaks
 ═══════════════════════════════════════════════════════ */
 
+const toProperCase = s => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
+
 // ── State ─────────────────────────────────────────────
 const state = {
   currentWord: null,       // { english, translation, emoji, romanized, language, category }
@@ -69,21 +71,21 @@ const els = {
 // 8+ lines per state. Emojis stripped before TTS so gTTS doesn't choke.
 const MESSAGES = {
   idle: [
-    "Hi! Let's learn words! 🌟",
+    "Hi {name}! Let's learn words! 🌟",
     "Ready to learn? 🦕",
     "Let's go! 🎉",
     "You can do it! 💪",
     "What an exciting word! 🦕",
-    "I love learning with you! 💕",
+    "I love learning with you, {name}! 💕",
     "Let's find out together! 🎯",
     "Ooooh! Look at this one! 🌟",
   ],
   prompt: [
-    "Can you say this? 🎤",
+    "Can you say this, {name}? 🎤",
     "Now YOU try! 🌟",
-    "Say it with me! 😊",
-    "Your turn! 🎤",
-    "I believe in you! 💪",
+    "Say it with me, {name}! 😊",
+    "Your turn, {name}! 🎤",
+    "I believe in you, {name}! 💪",
     "You've got this! 🌟",
     "Ready? Let's go! 🚀",
     "Give it your best! 🦕",
@@ -100,47 +102,47 @@ const MESSAGES = {
   ],
   // Escalated celebrations based on which attempt succeeded
   correct1: [
-    "ROOOAR-mazing! You did it! First try!",
-    "WHOOOOA! First try! You are incredible!",
+    "ROOOAR-mazing! You did it, {name}! First try!",
+    "WHOOOOA, {name}! First try! You are incredible!",
     "Yes! First try! I knew you could!",
-    "Wow! Perfect! You are a superstar!",
+    "Wow, {name}! Perfect! You are a superstar!",
   ],
   correct2: [
-    "Yes! You kept trying and you got it! That is my Myra!",
-    "You did not give up! Amazing!",
-    "Second try! That is the spirit!",
-    "You persisted and won! Brilliant!",
+    "Yes! You kept trying and you got it! That is my {name}!",
+    "You did not give up, {name}! Amazing!",
+    "Second try, {name}! That is the spirit!",
+    "You persisted and won, {name}! Brilliant!",
   ],
   correct3: [
-    "You did not give up! That is the bravest thing ever!",
-    "Third time is the charm! You are incredible!",
-    "You never quit! That makes me SO happy!",
-    "Persistence wins! You are amazing!",
+    "You did not give up, {name}! That is the bravest thing ever!",
+    "Third time is the charm, {name}! You are incredible!",
+    "You never quit, {name}! That makes me SO happy!",
+    "Persistence wins, {name}! You are amazing!",
   ],
   streak3: [
-    "Three in a ROWWW! You are on fire!",
+    "Three in a ROWWW, {name}! You are on fire!",
     "Three words! Roo is so proud of you!",
-    "Hat trick! Three correct in a row!",
+    "Hat trick, {name}! Three correct in a row!",
   ],
   streak5: [
-    "FIVE WORDS! You are unstoppable!",
-    "Five in a row! Someone get this kid a trophy!",
-    "Five words! Roo might actually explode from happy!",
+    "FIVE WORDS, {name}! You are unstoppable!",
+    "Five in a row, {name}! Someone get this kid a trophy!",
+    "Five words, {name}! Roo might actually explode from happy!",
   ],
   wrong: [
-    "Try again! 💪",
-    "So close! 🤗",
+    "Try again, {name}! 💪",
+    "So close, {name}! 🤗",
     "Almost! Give it another go! 😊",
-    "Keep trying! 🌟",
+    "Keep trying, {name}! 🌟",
     "Oopsie! Close though! Let's try one more time!",
     "Hmmm! I believe in you so much. One more?",
     "You have almost got it! Let's try again!",
-    "So close! You will get it this time!",
+    "So close, {name}! You will get it this time!",
   ],
   outOfAttempts: [
-    "Awww! It's a tricky one! You will get it next time!",
-    "That one is a toughie! But you will remember next time!",
-    "Great effort! You will get it next time, I promise!",
+    "Awww {name}! It's a tricky one! You will get it next time!",
+    "That one is a toughie, {name}! But you will remember next time!",
+    "Great effort, {name}! You will get it next time, I promise!",
   ],
   skip: [
     "Next word! Let's go! 🚀",
@@ -150,12 +152,12 @@ const MESSAGES = {
     "On to the next adventure! 🚀",
   ],
   listen: [
-    "I'm listening! 👂",
-    "Speak up! 🎤",
+    "I'm listening, {name}! 👂",
+    "Speak up, {name}! 🎤",
     "Go ahead! 🌟",
-    "I am all ears! Literally! Big ears!",
+    "I am all ears, {name}! Literally! Big ears!",
     "Ready when you are! 🎤",
-    "Let me hear your voice! 🌟",
+    "Let me hear your voice, {name}! 🌟",
   ],
   stop: [
     "Stopped. Ready when you are! 🌟",
@@ -189,6 +191,14 @@ function stripEmoji(text) {
     .replace(/[⭐✨💫🌟🦕🎉💪😊🎤👂🚀💕🎯🔥🤗]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function childName() {
+  return toProperCase((state.config.child_name || '').trim());
+}
+
+function fillName(text, fallback = 'friend') {
+  return text.replaceAll('{name}', childName() || fallback);
 }
 
 // ── Web Audio API – synthesised SFX ───────────────────
@@ -431,14 +441,19 @@ async function init() {
   }
 
   state.config = await fetchConfig();
+  if (!childName()) {
+    window.location.href = '/settings';
+    return;
+  }
   state.maxAttempts = state.config.max_attempts ?? 3;
 
   applyTheme(state.config.theme ?? 'pink');
   applyMascot(state.config.mascot ?? 'dino');
 
   if (state.config.child_name) {
-    els.childTitle.textContent = `🦕 ${state.config.child_name} Learns!`;
-    document.title = `${state.config.child_name} Learns Languages 🦕`;
+    const name = childName();
+    els.childTitle.textContent = `🦕 ${name} Learns!`;
+    document.title = `${name} Learns Languages 🦕`;
   }
 
   resetDots();
@@ -489,7 +504,7 @@ async function loadNextWord() {
 
   displayWord(state.currentWord);
   playWordReveal();
-  setBubble(randomMsg('idle'));
+  setBubble(fillName(randomMsg('idle')));
   animateDino('idle');
 }
 
@@ -529,7 +544,7 @@ async function playWord() {
 
     audio.addEventListener('ended', () => {
       animateDino('idle');
-      const promptMsg = randomMsg('prompt');
+      const promptMsg = fillName(randomMsg('prompt'));
       setBubble(promptMsg);
       // Roo voices the prompt (stripped of emoji)
       playDinoVoice(promptMsg);
@@ -574,15 +589,15 @@ async function playPromptThenRecord() {
   stopExistingAudio();
 
   const myGen = state.generation;  // snapshot — if Hear It! / Skip / Stop fires, generation changes
-  const childName = state.config.child_name || 'Myra';
+  const name = childName();
   const { translation, language } = state.currentWord;
 
-  setBubble(`${childName}, repeat after me! 🎤`);
+  setBubble(`${name}, repeat after me! 🎤`);
   animateDino('ask');
 
   try {
     // 1. Play "<Name>, repeat after me!" in English
-    const promptText = `${childName}, repeat after me!`;
+    const promptText = `${name}, repeat after me!`;
     await playAudioUrl(`/api/tts?text=${encodeURIComponent(promptText)}&language=english`);
     if (state.generation !== myGen) return;  // preempted by Hear It! / Skip / Stop
 
@@ -596,7 +611,7 @@ async function playPromptThenRecord() {
     await sleep(500);
     if (state.generation !== myGen) return;
     animateDino('idle');
-    setBubble(randomMsg('listen'));
+    setBubble(fillName(randomMsg('listen')));
     startRecording();
   } catch (e) {
     if (state.generation !== myGen) return;  // preempted — don't start recording
@@ -681,7 +696,7 @@ async function startRecording() {
 
   state.mediaRecorder.start();
   setRecordingUI(true);
-  setBubble(randomMsg('listen'));
+  setBubble(fillName(randomMsg('listen')));
 
   // Auto-stop after 5 seconds
   const duration = 5;
@@ -820,7 +835,7 @@ function handleResult(result) {
     const celebKey = state.attempts === 1 ? 'correct1'
                    : state.attempts === 2 ? 'correct2'
                    : 'correct3';
-    const celebMsg = randomMsg(celebKey);
+    const celebMsg = fillName(randomMsg(celebKey));
 
     showFeedback(
       `🎉 ${randomMsg('correct')} You said: "${result.transcribed}"`,
@@ -859,8 +874,8 @@ function handleResult(result) {
     );
     animateDino('shake');
     els.wordCard.classList.add('wrong-flash');
-    const outMsg = randomMsg('outOfAttempts');
-    setBubble("Good try! Let's move on. 🌟");
+    const outMsg = fillName(randomMsg('outOfAttempts'));
+    setBubble(`Good try, ${childName()}! Let's move on. 🌟`);
     playBeepSound();
     const outGen = state.generation;
     scheduleTransition(async () => {
@@ -872,13 +887,13 @@ function handleResult(result) {
     // ❌ Wrong but retries remaining
     const heard = result.transcribed ? `I heard "${result.transcribed}".` : '';
     showFeedback(
-      `${heard} ${randomMsg('wrong')} (${state.maxAttempts - state.attempts} tries left)`,
+      `${heard} ${fillName(randomMsg('wrong'))} (${state.maxAttempts - state.attempts} tries left)`,
       'wrong'
     );
     // 1st wrong → curious head tilt; 2nd+ → shake
     animateDino(state.attempts === 1 ? 'tilt' : 'shake');
     els.wordCard.classList.add('wrong-flash');
-    const wrongMsg = randomMsg('wrong');
+    const wrongMsg = fillName(randomMsg('wrong'));
     setBubble(wrongMsg);
     playBeepSound();
     scheduleTransition(() => playDinoVoice(wrongMsg), 250);
@@ -913,7 +928,7 @@ function updateStreak(correct) {
     if (state.streak === 3 || state.streak === 5 || (state.streak > 5 && state.streak % 5 === 0)) {
       scheduleTransition(() => {
         playStreakSound(state.streak);
-        const streakMsg = randomMsg(state.streak >= 5 ? 'streak5' : 'streak3');
+        const streakMsg = fillName(randomMsg(state.streak >= 5 ? 'streak5' : 'streak3'));
         scheduleTransition(() => playDinoVoice(streakMsg), 500);
       }, 900);
     }
@@ -936,7 +951,7 @@ function stopFlow() {
   els.wordCard.classList.remove('correct-flash', 'wrong-flash');
   hideFeedback();
   animateDino('idle');
-  const breakMsg = "Let's take a break together! 🌟";
+  const breakMsg = `Let's take a break together, ${childName()}! 🌟`;
   setBubble(breakMsg);
   // Small delay lets the mic fully stop before Roo speaks
   setTimeout(() => playDinoVoice(breakMsg), 300);

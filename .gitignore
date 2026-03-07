@@ -30,3 +30,4 @@ terraform-gcp-key.json
 *.log
 tools/*_metrics.json
 gcp_metrics.json
+*.wav

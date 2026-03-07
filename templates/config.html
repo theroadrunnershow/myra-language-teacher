@@ -11,128 +11,187 @@
 </head>
 <body class="settings-page">
 
-<header>
+<header class="settings-header">
   <div class="header-inner">
     <a href="/" class="back-btn">← Back</a>
     <h1>⚙️ Settings</h1>
-    <span></span>
+    <span class="header-spacer" aria-hidden="true"></span>
   </div>
 </header>
 
 <main class="settings-main">
+  <div class="settings-layout">
+    <aside class="settings-hero">
+      <span class="settings-eyebrow" id="settings-eyebrow">{{ config.child_name + "'s lesson studio" if config.child_name else "Lesson studio" }}</span>
+      <h2>Set up a calmer, cleaner practice space.</h2>
+      <p>Choose the child profile, target language, and lesson style before starting a session.</p>
 
-  <div class="settings-card">
+      <div class="settings-hero-points">
+        <div class="hero-point">
+          <strong>Focused practice</strong>
+          <span>Pick one language and the categories that matter most.</span>
+        </div>
+        <div class="hero-point">
+          <strong>Adjust difficulty</strong>
+          <span>Tune pronunciation help, scoring strictness, and retry behavior.</span>
+        </div>
+        <div class="hero-point">
+          <strong>Make it personal</strong>
+          <span>Swap the color theme and choose the teaching mascot.</span>
+        </div>
+      </div>
+    </aside>
 
-    <h2>👶 Child's Name</h2>
-    <input type="text" id="child-name" class="text-input"
-           value="{{ config.child_name }}" placeholder="e.g. Myra" />
+    <div class="settings-card">
+      <section class="settings-section">
+        <div class="section-heading">
+          <span class="section-kicker">Profile</span>
+          <h2>👶 Child's Name</h2>
+        </div>
+        <p class="hint">This appears in the lesson header and voice prompts.</p>
+        <input type="text" id="child-name" class="text-input"
+               value="{{ config.child_name }}" placeholder="e.g. Myra" />
+      </section>
 
-    <hr />
+      <section class="settings-section">
+        <div class="section-heading">
+          <span class="section-kicker">Language</span>
+          <h2>🗣️ Language to Teach</h2>
+        </div>
+        <p class="hint">Choose one language to keep practice focused and consistent.</p>
+        <div class="checkbox-group language-group">
+          <label class="checkbox-label choice-card">
+            <input type="radio" name="language" id="lang-telugu" value="telugu"
+                   {% if config.languages and config.languages[0] == 'telugu' %}checked{% endif %} />
+            <span class="choice-copy">
+              <span class="choice-title">Telugu</span>
+              <span class="choice-subtitle">తెలుగు</span>
+            </span>
+          </label>
+          <label class="checkbox-label choice-card">
+            <input type="radio" name="language" id="lang-assamese" value="assamese"
+                   {% if config.languages and config.languages[0] == 'assamese' %}checked{% endif %} />
+            <span class="choice-copy">
+              <span class="choice-title">Assamese</span>
+              <span class="choice-subtitle">অসমীয়া</span>
+            </span>
+          </label>
+        </div>
+      </section>
 
-    <h2>🗣️ Language to Teach</h2>
-    <p class="hint">Select one language to practice.</p>
-    <div class="checkbox-group">
-      <label class="checkbox-label">
-        <input type="radio" name="language" id="lang-telugu" value="telugu"
-               {% if config.languages and config.languages[0] == 'telugu' %}checked{% endif %} />
-        <span>Telugu</span>
-        <span class="lang-sample">తెలుగు</span>
-      </label>
-      <label class="checkbox-label">
-        <input type="radio" name="language" id="lang-assamese" value="assamese"
-               {% if config.languages and config.languages[0] == 'assamese' %}checked{% endif %} />
-        <span>Assamese</span>
-        <span class="lang-sample">অসমীয়া</span>
-      </label>
-    </div>
+      <section class="settings-section">
+        <div class="section-heading">
+          <span class="section-kicker">Content</span>
+          <h2>📚 Word Categories</h2>
+        </div>
+        <p class="hint">Choose which topics should appear during practice.</p>
+        <div class="checkbox-group categories-group">
+          {% set category_labels = {
+              'animals': '🐾 Animals',
+              'colors': '🎨 Colors',
+              'body_parts': '🤚 Body Parts',
+              'numbers': '🔢 Numbers',
+              'food': '🍎 Food',
+              'common_objects': '🏠 Common Objects'
+          } %}
+          {% for cat in all_categories %}
+          <label class="checkbox-label category-card">
+            <input type="checkbox" class="cat-checkbox" value="{{ cat }}"
+                   {% if cat in config.categories %}checked{% endif %} />
+            <span class="choice-title">{{ category_labels.get(cat, cat.replace('_', ' ').title()) }}</span>
+          </label>
+          {% endfor %}
+        </div>
+      </section>
 
-    <hr />
+      <section class="settings-section">
+        <div class="section-heading">
+          <span class="section-kicker">Tuning</span>
+          <h2>🎛️ Advanced Options</h2>
+        </div>
+        <div class="settings-stack">
+          <label class="option-card option-card-toggle" for="show-romanized">
+            <span class="option-copy">
+              <span class="option-title">Show pronunciation guide</span>
+              <span class="option-subtitle">Display romanized text to make reading easier for beginners.</span>
+            </span>
+            <input type="checkbox" id="show-romanized"
+                   {% if config.show_romanized %}checked{% endif %} />
+          </label>
 
-    <h2>📚 Word Categories</h2>
-    <p class="hint">Choose which topics to practice.</p>
-    <div class="checkbox-group categories-group">
-      {% set category_labels = {
-          'animals': '🐾 Animals',
-          'colors': '🎨 Colors',
-          'body_parts': '🤚 Body Parts',
-          'numbers': '🔢 Numbers',
-          'food': '🍎 Food',
-          'common_objects': '🏠 Common Objects'
-      } %}
-      {% for cat in all_categories %}
-      <label class="checkbox-label">
-        <input type="checkbox" class="cat-checkbox" value="{{ cat }}"
-               {% if cat in config.categories %}checked{% endif %} />
-        <span>{{ category_labels.get(cat, cat.replace('_', ' ').title()) }}</span>
-      </label>
-      {% endfor %}
-    </div>
+          <div class="option-card option-card-range">
+            <div class="option-copy">
+              <label for="similarity-threshold" class="option-title">Accuracy required</label>
+              <span class="option-subtitle">Higher values make pronunciation scoring stricter.</span>
+            </div>
+            <div class="range-control">
+              <strong id="threshold-label" class="range-value">{{ config.similarity_threshold }}%</strong>
+              <input type="range" id="similarity-threshold"
+                     min="30" max="90" step="5"
+                     value="{{ config.similarity_threshold }}"
+                     oninput="document.getElementById('threshold-label').textContent = this.value + '%'" />
+            </div>
+          </div>
 
-    <hr />
+          <div class="option-card">
+            <div class="option-copy">
+              <label for="max-attempts" class="option-title">Max attempts before auto-skip</label>
+              <span class="option-subtitle">Set how many retries happen before moving to the next word.</span>
+            </div>
+            <select id="max-attempts" class="select-input">
+              {% for n in [2, 3, 4, 5] %}
+              <option value="{{ n }}" {% if config.max_attempts == n %}selected{% endif %}>{{ n }}</option>
+              {% endfor %}
+            </select>
+          </div>
+        </div>
+      </section>
 
-    <h2>🎛️ Advanced Options</h2>
+      <section class="settings-section">
+        <div class="section-heading">
+          <span class="section-kicker">Style</span>
+          <h2>✨ Look & Feel</h2>
+        </div>
 
-    <div class="option-row">
-      <label for="show-romanized">Show pronunciation guide (romanized)</label>
-      <input type="checkbox" id="show-romanized"
-             {% if config.show_romanized %}checked{% endif %} />
-    </div>
+        <div class="appearance-grid">
+          <div class="appearance-card">
+            <h3>🎨 Color Theme</h3>
+            <p class="hint">Pick a color scheme for the whole app.</p>
+            <div class="theme-picker" id="theme-picker">
+              <button type="button" class="theme-swatch" data-theme="pink"   style="background:#FF69B4" title="Pink" aria-label="Pink theme"></button>
+              <button type="button" class="theme-swatch" data-theme="blue"   style="background:#4FA3E0" title="Blue" aria-label="Blue theme"></button>
+              <button type="button" class="theme-swatch" data-theme="green"  style="background:#3CB371" title="Green" aria-label="Green theme"></button>
+              <button type="button" class="theme-swatch" data-theme="purple" style="background:#9B59B6" title="Purple" aria-label="Purple theme"></button>
+              <button type="button" class="theme-swatch" data-theme="orange" style="background:#E67E22" title="Orange" aria-label="Orange theme"></button>
+              <button type="button" class="theme-swatch" data-theme="yellow" style="background:#F4C430" title="Yellow" aria-label="Yellow theme"></button>
+            </div>
+          </div>
 
-    <div class="option-row">
-      <label for="similarity-threshold">
-        Accuracy required: <strong id="threshold-label">{{ config.similarity_threshold }}%</strong>
-      </label>
-      <input type="range" id="similarity-threshold"
-             min="30" max="90" step="5"
-             value="{{ config.similarity_threshold }}"
-             oninput="document.getElementById('threshold-label').textContent = this.value + '%'" />
-    </div>
+          <div class="appearance-card">
+            <h3>🐾 Favorite Animal</h3>
+            <p class="hint">Choose who teaches the words.</p>
+            <div class="mascot-picker" id="mascot-picker">
+              <button type="button" class="mascot-btn" data-mascot="dino"   title="Dino" aria-label="Dino mascot">🦕</button>
+              <button type="button" class="mascot-btn" data-mascot="cat"    title="Cat" aria-label="Cat mascot">🐱</button>
+              <button type="button" class="mascot-btn" data-mascot="dog"    title="Dog" aria-label="Dog mascot">🐶</button>
+              <button type="button" class="mascot-btn" data-mascot="panda"  title="Panda" aria-label="Panda mascot">🐼</button>
+              <button type="button" class="mascot-btn" data-mascot="fox"    title="Fox" aria-label="Fox mascot">🦊</button>
+              <button type="button" class="mascot-btn" data-mascot="rabbit" title="Rabbit" aria-label="Rabbit mascot">🐰</button>
+            </div>
+          </div>
+        </div>
+      </section>
 
-    <div class="option-row">
-      <label for="max-attempts">Max attempts before auto-skip</label>
-      <select id="max-attempts" class="select-input">
-        {% for n in [2, 3, 4, 5] %}
-        <option value="{{ n }}" {% if config.max_attempts == n %}selected{% endif %}>{{ n }}</option>
-        {% endfor %}
-      </select>
-    </div>
+      <section class="settings-actions">
+        <div class="btn-row centered">
+          <button type="button" class="btn btn-play" onclick="saveSettings()">💾 Save Settings</button>
+          <a href="/" class="btn btn-skip">🏠 Go Home</a>
+        </div>
 
-    <hr />
-
-    <h2>🎨 Color Theme</h2>
-    <p class="hint">Pick a color scheme for the whole app.</p>
-    <div class="theme-picker" id="theme-picker">
-      <button type="button" class="theme-swatch" data-theme="pink"   style="background:#FF69B4" title="Pink"></button>
-      <button type="button" class="theme-swatch" data-theme="blue"   style="background:#4FA3E0" title="Blue"></button>
-      <button type="button" class="theme-swatch" data-theme="green"  style="background:#3CB371" title="Green"></button>
-      <button type="button" class="theme-swatch" data-theme="purple" style="background:#9B59B6" title="Purple"></button>
-      <button type="button" class="theme-swatch" data-theme="orange" style="background:#E67E22" title="Orange"></button>
-      <button type="button" class="theme-swatch" data-theme="yellow" style="background:#F4C430" title="Yellow"></button>
-    </div>
-
-    <hr />
-
-    <h2>🐾 Favorite Animal</h2>
-    <p class="hint">Choose who teaches the words!</p>
-    <div class="mascot-picker" id="mascot-picker">
-      <button type="button" class="mascot-btn" data-mascot="dino"   title="Dino">🦕</button>
-      <button type="button" class="mascot-btn" data-mascot="cat"    title="Cat">🐱</button>
-      <button type="button" class="mascot-btn" data-mascot="dog"    title="Dog">🐶</button>
-      <button type="button" class="mascot-btn" data-mascot="panda"  title="Panda">🐼</button>
-      <button type="button" class="mascot-btn" data-mascot="fox"    title="Fox">🦊</button>
-      <button type="button" class="mascot-btn" data-mascot="rabbit" title="Rabbit">🐰</button>
-    </div>
-
-    <hr />
-
-    <div class="btn-row centered">
-      <button class="btn btn-play" onclick="saveSettings()">💾 Save Settings</button>
-      <a href="/" class="btn btn-skip">🏠 Go Home</a>
-    </div>
-
-    <div id="save-feedback" class="feedback-banner hidden success">✅ Settings saved!</div>
-
-  </div><!-- end settings-card -->
+        <div id="save-feedback" class="feedback-banner hidden success">✅ Settings saved!</div>
+      </section>
+    </div><!-- end settings-card -->
+  </div>
 
 </main>
 
@@ -142,6 +201,13 @@ const CONFIG_KEY = 'myra_config';
 // Track selected theme/mascot in JS state (not DOM inputs)
 let _selectedTheme = 'pink';
 let _selectedMascot = 'dino';
+
+function _syncChoiceSelection() {
+  document.querySelectorAll('.checkbox-label').forEach(label => {
+    const input = label.querySelector('input');
+    label.classList.toggle('is-selected', Boolean(input && input.checked));
+  });
+}
 
 function _selectTheme(theme) {
   _selectedTheme = theme;
@@ -160,6 +226,10 @@ function _selectMascot(mascot) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  document.querySelectorAll('.checkbox-label input').forEach(input => {
+    input.addEventListener('change', _syncChoiceSelection);
+  });
+
   // Wire theme swatches
   document.querySelectorAll('.theme-swatch').forEach(btn => {
     btn.addEventListener('click', () => _selectTheme(btn.dataset.theme));
@@ -177,6 +247,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     const childName = document.getElementById('child-name');
     if (childName && cfg.child_name) childName.value = cfg.child_name;
+    const eyebrow = document.getElementById('settings-eyebrow');
+    if (eyebrow && cfg.child_name) {
+      const n = cfg.child_name.trim();
+      eyebrow.textContent = `${n.charAt(0).toUpperCase() + n.slice(1).toLowerCase()}'s lesson studio`;
+    }
 
     // Set the single language radio button (use first element if array)
     const lang = Array.isArray(cfg.languages) ? cfg.languages[0] : cfg.languages;
@@ -210,10 +285,10 @@ document.addEventListener('DOMContentLoaded', () => {
     _selectTheme(cfg.theme ?? 'pink');
     _selectMascot(cfg.mascot ?? 'dino');
   } else {
-    // New user: clear all server-rendered defaults so they must choose their own settings
+    // New user: keep categories selected by default, but require name/language choice.
     document.getElementById('child-name').value = '';
     document.querySelectorAll('input[name="language"]').forEach(r => r.checked = false);
-    document.querySelectorAll('.cat-checkbox').forEach(cb => cb.checked = false);
+    document.querySelectorAll('.cat-checkbox').forEach(cb => cb.checked = true);
 
     // Update header and hide nav links so they can't skip setup
     const h1 = document.querySelector('h1');
@@ -225,6 +300,8 @@ document.addEventListener('DOMContentLoaded', () => {
     _selectTheme('pink');
     _selectMascot('dino');
   }
+
+  _syncChoiceSelection();
 });
 
 async function saveSettings() {

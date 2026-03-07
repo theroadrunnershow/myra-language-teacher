@@ -70,7 +70,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 DEFAULT_CONFIG = {
     "languages": ["telugu", "assamese"],
     "categories": ALL_CATEGORIES,
-    "child_name": "Myra",
+    "child_name": "",
     "show_romanized": True,
     "similarity_threshold": 50,  # % match required
     "max_attempts": 3,

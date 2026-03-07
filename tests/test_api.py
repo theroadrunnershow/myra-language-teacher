@@ -64,7 +64,7 @@ class TestGetConfig:
             assert key in data, f"Missing key '{key}' in /api/config response"
 
     def test_default_child_name(self, client):
-        assert client.get("/api/config").json()["child_name"] == "Myra"
+        assert client.get("/api/config").json()["child_name"] == ""
 
     def test_default_similarity_threshold(self, client):
         assert client.get("/api/config").json()["similarity_threshold"] == 50

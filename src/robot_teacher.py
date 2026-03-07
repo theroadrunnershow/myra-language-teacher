@@ -417,6 +417,7 @@ class RobotController:
         self.output_sample_rate = (
             get_output_rate() if callable(get_output_rate) else SAMPLE_RATE
         ) or SAMPLE_RATE
+        self._speaker_primed = False
         self._stop_event = threading.Event()
         self._bg_thread: threading.Thread | None = None
 
@@ -532,8 +533,24 @@ class RobotController:
 
     # ── Synchronized audio playback ───────────────────────────────────────────
 
+    def prime_speaker(self, warmup_duration: float = 0.25):
+        """Send a short silent frame once so the first real line is not clipped."""
+        if self._speaker_primed:
+            return
+
+        n_samples = max(1, int(round(self.output_sample_rate * warmup_duration)))
+        silence = np.zeros((n_samples, 1), dtype=np.float32)
+        logger.info(
+            f"Speaker: priming output with {warmup_duration:.2f}s silence @ "
+            f"{self.output_sample_rate} Hz"
+        )
+        self._mini.media.push_audio_sample(silence)
+        time.sleep(warmup_duration + 0.05)
+        self._speaker_primed = True
+
     def play_audio(self, samples: np.ndarray):
         """Push audio to the speaker, run speak animation, block until done."""
+        self.prime_speaker()
         duration = _audio_duration(samples, self.output_sample_rate)
         rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2)))
         logger.info(
@@ -546,6 +563,42 @@ class RobotController:
         time.sleep(duration + 0.15)  # small buffer for audio tail
         logger.info("Speaker: done")
         self._stop_background()
+
+
+# ── Celebration jingle ─────────────────────────────────────────────────────────
+
+def _generate_celebration_jingle(sample_rate: int = SAMPLE_RATE) -> np.ndarray:
+    """Synthesize a short ascending arpeggio (C5–E5–G5–C6) using numpy sine waves.
+
+    No external audio files required — pure numpy synthesis.
+    Returns shape (N, 1) float32 at the given sample rate.
+    """
+    # Note frequencies (Hz) and durations (s)
+    notes = [
+        (523.25, 0.12),   # C5
+        (659.25, 0.12),   # E5
+        (783.99, 0.12),   # G5
+        (1046.50, 0.50),  # C6 (held)
+    ]
+    segments = []
+    for freq, dur in notes:
+        n = int(sample_rate * dur)
+        t = np.linspace(0, dur, n, endpoint=False)
+        # Fundamental + first harmonic for a warmer tone
+        wave = 0.65 * np.sin(2 * np.pi * freq * t) + 0.20 * np.sin(2 * np.pi * freq * 2 * t)
+        # Simple ADSR-lite envelope: 10 ms attack, 40 ms release
+        env = np.ones(n, dtype=np.float32)
+        attack = min(int(0.010 * sample_rate), n)
+        release = min(int(0.040 * sample_rate), n)
+        env[:attack] = np.linspace(0.0, 1.0, attack)
+        env[n - release:] = np.linspace(1.0, 0.0, release)
+        segments.append((wave * env).astype(np.float32))
+
+    jingle = np.concatenate(segments)
+    peak = float(np.max(np.abs(jingle)))
+    if peak > 0:
+        jingle *= 0.70 / peak
+    return jingle.reshape(-1, 1)
 
 
 # ── Lesson helpers ─────────────────────────────────────────────────────────────
@@ -576,6 +629,7 @@ def run_lesson_word(
     categories: list,
     threshold: int,
     max_attempts: int,
+    child_name: str = "friend",
     mic_rate: int = SAMPLE_RATE,
     debug_audio: bool = False,
 ) -> str:
@@ -611,8 +665,8 @@ def run_lesson_word(
     except Exception as e:
         logger.warning(f"Word TTS failed: {e}")
 
-    # ── Prompt Myra to repeat ──────────────────────────────────────────────────
-    _say(robot, "Now you say it! Go ahead!")
+    # ── Prompt child to repeat ─────────────────────────────────────────────────
+    _say(robot, f"Now you say it, {child_name}! Go ahead!")
 
     # ── Attempt loop ──────────────────────────────────────────────────────────
     for attempt in range(1, max_attempts + 1):
@@ -704,10 +758,16 @@ def run_lesson_word(
         if is_correct:
             print("  ✓ Correct!\n")
             robot.celebrate()
+            # Play a short celebration jingle, then the praise voice line
+            try:
+                jingle = _generate_celebration_jingle(robot.output_sample_rate)
+                robot.play_audio(jingle)
+            except Exception as e:
+                logger.warning(f"Jingle playback failed (non-fatal): {e}")
             praise = random.choice([
                 "Amazing! You got it!",
                 "Wonderful! You said it perfectly!",
-                "Great job Myra! You are so smart!",
+                f"Great job {child_name}! You are so smart!",
                 "Yes! That is exactly right!",
             ])
             _say(robot, praise)
@@ -719,7 +779,7 @@ def run_lesson_word(
             retry = random.choice([
                 "Try again! You can do it!",
                 "Almost! One more time!",
-                "Keep trying Myra! You've got this!",
+                f"Keep trying {child_name}! You've got this!",
             ])
             _say(robot, retry)
             # Replay the word so Myra can hear it again before retrying
@@ -751,6 +811,7 @@ def run_lesson_session(
     num_words: int,
     threshold: int,
     max_attempts: int,
+    child_name: str = "friend",
     debug_audio: bool = False,
 ):
     """Manage the ReachyMini context and run a full lesson session."""
@@ -775,19 +836,20 @@ def run_lesson_session(
         logger.info(f"Speaker sample rate: {robot.output_sample_rate} Hz")
         mini.media.start_playing()
         mini.media.start_recording()
+        robot.prime_speaker()
 
         print("\n" + "=" * 44)
-        print("   🦕  Myra's Language Lesson  🦕")
+        print(f"   🦕  {child_name}'s Language Lesson  🦕")
         print("=" * 44 + "\n")
 
         robot.idle()
-        _say(robot, "Hi Myra! Let's learn some words today! Are you ready?")
+        _say(robot, f"Hi {child_name}! Let's learn some words today! Are you ready?")
 
         for i in range(num_words):
             print(f"\n=== Word {i + 1} of {num_words} ===")
             outcome = run_lesson_word(
                 mini, robot, languages, categories, threshold, max_attempts,
-                mic_rate=mic_rate, debug_audio=debug_audio,
+                child_name=child_name, mic_rate=mic_rate, debug_audio=debug_audio,
             )
             if outcome == "correct":
                 score += 1
@@ -801,8 +863,8 @@ def run_lesson_session(
 
         robot.celebrate()
         end_line = random.choice([
-            f"Great job Myra! We learned {num_words} words today!",
-            f"You got {score} out of {num_words}! You are amazing!",
+            f"Great job {child_name}! We learned {num_words} words today!",
+            f"You got {score} out of {num_words}! You are amazing, {child_name}!",
         ])
         _say(robot, end_line)
 
@@ -864,11 +926,27 @@ def main():
         help="Path to the myra-language-teacher directory on the Pi",
     )
     parser.add_argument(
+        "--child-name",
+        default="",
+        metavar="NAME",
+        help="Child's name used in voice prompts (prompted interactively if omitted)",
+    )
+    parser.add_argument(
         "--debug-audio",
         action="store_true",
         help="Play back each recording through the speaker before recognizing; save to /tmp/myra_debug.wav",
     )
     args = parser.parse_args()
+
+    # Resolve child's name
+    child_name = args.child_name.strip()
+    if not child_name:
+        try:
+            child_name = input("Child's name: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            child_name = ""
+    if not child_name:
+        parser.error("Child's name is required. Use --child-name or enter it when prompted.")
 
     # Resolve languages
     if args.language == "both":
@@ -915,6 +993,7 @@ def main():
             num_words=args.words,
             threshold=args.threshold,
             max_attempts=args.max_attempts,
+            child_name=child_name,
             debug_audio=args.debug_audio,
         )
     except KeyboardInterrupt:
