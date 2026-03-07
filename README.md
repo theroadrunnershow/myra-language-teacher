@@ -84,7 +84,12 @@ pip install -r requirements.txt -r requirements-robot.txt
 | `robot_teacher.py` | Drives the lesson loop on the Pi: starts the Myra server on port 8765, uses robot mics/speaker, and calls `/api/recognize` and `/api/tts`. |
 | `test_bridge.py` | Verifies audio bridge (mic → WAV → API) and TTS without the robot attached. Run with the server already running on port 8765. |
 
-Port **8765** is used to avoid conflict with the Reachy Mini daemon (port 8000). See `robot_teacher.py --help` for options (language, categories, threshold, etc.).
+Port **8765** is used to avoid conflict with the Reachy Mini daemon (port 8000). `robot_teacher.py` now supports:
+
+- `--runtime-mode cloud` to keep using the hosted Myra server
+- `--runtime-mode reachy_local` to run the FastAPI server and Whisper locally on the Reachy Pi
+- `--no-server` only with `reachy_local`, when a local Myra server is already running
+- `--words-sync-to-gcs never|session_end|shutdown` to control when locally-cached custom words are uploaded back to GCS
 
 ---
 

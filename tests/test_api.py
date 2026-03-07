@@ -472,6 +472,46 @@ class TestTranslateEndpoint:
 
 
 # ---------------------------------------------------------------------------
+# POST /api/internal/words/sync
+# ---------------------------------------------------------------------------
+
+
+class TestInternalWordSyncEndpoint:
+    def test_sync_calls_store_and_returns_ok(self, client):
+        class StoreStub:
+            is_configured = True
+            sync_to_gcs_policy = "session_end"
+
+            def __init__(self):
+                self.flush_calls = []
+                self.sync_calls = []
+
+            def flush_if_needed(self, force=False):
+                self.flush_calls.append(force)
+                return True
+
+            def sync_to_object_store(self, force=False):
+                self.sync_calls.append(force)
+                return True
+
+        original_store = getattr(app.state, "dynamic_words_store", None)
+        stub = StoreStub()
+        app.state.dynamic_words_store = stub
+        try:
+            resp = client.post("/api/internal/words/sync")
+        finally:
+            if original_store is None:
+                delattr(app.state, "dynamic_words_store")
+            else:
+                app.state.dynamic_words_store = original_store
+
+        assert resp.status_code == 200
+        assert resp.json()["synced"] is True
+        assert stub.flush_calls == [True]
+        assert stub.sync_calls == [True]
+
+
+# ---------------------------------------------------------------------------
 # TestPostConfigThemeMascot
 # ---------------------------------------------------------------------------
 

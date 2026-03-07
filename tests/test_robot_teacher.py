@@ -1,6 +1,13 @@
 import numpy as np
 
-from robot_teacher import RobotController
+from robot_teacher import (
+    CLOUD_SERVER_URL,
+    LOCAL_SERVER_URL,
+    RobotController,
+    configure_server_url,
+    resolve_server_url,
+    should_start_local_server,
+)
 
 
 class _FakeMedia:
@@ -52,3 +59,18 @@ def test_prime_speaker_is_idempotent(monkeypatch):
     controller.prime_speaker()
 
     assert len(mini.media.pushed_samples) == 1
+
+
+def test_resolve_server_url_supports_cloud_and_local():
+    assert resolve_server_url("cloud") == CLOUD_SERVER_URL
+    assert resolve_server_url("reachy_local") == LOCAL_SERVER_URL
+
+
+def test_configure_server_url_returns_local_url():
+    assert configure_server_url("reachy_local") == LOCAL_SERVER_URL
+
+
+def test_should_start_local_server_only_in_reachy_local_mode():
+    assert should_start_local_server("reachy_local", no_server=False) is True
+    assert should_start_local_server("reachy_local", no_server=True) is False
+    assert should_start_local_server("cloud", no_server=False) is False

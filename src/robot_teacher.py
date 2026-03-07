@@ -1,9 +1,10 @@
 """
-robot_teacher.py — Reachy Mini × Myra Language Teacher (Option B)
+robot_teacher.py — Reachy Mini × Myra Language Teacher
 
-The Myra FastAPI server runs locally on the Pi at port 8765.
-This script starts it as a subprocess, then drives a toddler-friendly
-lesson loop using the robot's microphones, speaker, and animations.
+This script can either talk to the hosted Myra server (`--runtime-mode cloud`)
+or start and use a Pi-local FastAPI server (`--runtime-mode reachy_local`).
+It then drives a toddler-friendly lesson loop using the robot's microphones,
+speaker, and animations.
 
 Usage:
   python robot_teacher.py [options]
@@ -13,8 +14,10 @@ Usage:
   --words      10                          (default: 10 words per session)
   --threshold  50                          (default: 50 similarity threshold)
   --max-attempts 3                         (default: 3 tries per word)
-  --no-server                              (skip auto-launching the Myra server)
+  --runtime-mode cloud|reachy_local
+  --no-server                              (only for reachy_local)
   --server-dir /home/pollen/myra-...      (path to the app directory on Pi)
+  --words-sync-to-gcs never|session_end|shutdown
 
 Port 8765 is used to avoid conflict with the Reachy Mini daemon (port 8000).
 DISABLE_PASS1=true is set in the server subprocess to skip the slow
@@ -58,10 +61,11 @@ logger = logging.getLogger(__name__)
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-# Option A: use existing GCP Cloud Run server
-# Option B: SERVER_URL = "http://localhost:8765" (server runs on Pi)
-SERVER_URL = "https://kiddos-telugu-teacher.com"
+RUNTIME_MODES = {"cloud", "reachy_local"}
+CLOUD_SERVER_URL = "https://kiddos-telugu-teacher.com"
 SERVER_PORT = 8765  # only used if starting a local server subprocess (Option B)
+LOCAL_SERVER_URL = f"http://127.0.0.1:{SERVER_PORT}"
+SERVER_URL = CLOUD_SERVER_URL
 
 RECORD_DURATION = 5.0   # seconds to record per attempt
 SAMPLE_RATE = 16000      # robot mic/speaker rate (fixed by SDK hardware)
@@ -261,6 +265,24 @@ def _make_session() -> requests.Session:
 _session = _make_session()
 
 
+def resolve_server_url(runtime_mode: str) -> str:
+    if runtime_mode == "cloud":
+        return CLOUD_SERVER_URL
+    if runtime_mode == "reachy_local":
+        return LOCAL_SERVER_URL
+    raise ValueError(f"Unknown runtime_mode '{runtime_mode}'")
+
+
+def configure_server_url(runtime_mode: str) -> str:
+    global SERVER_URL
+    SERVER_URL = resolve_server_url(runtime_mode)
+    return SERVER_URL
+
+
+def should_start_local_server(runtime_mode: str, no_server: bool) -> bool:
+    return runtime_mode == "reachy_local" and not no_server
+
+
 # ── HTTP client wrappers ───────────────────────────────────────────────────────
 
 def api_get_word(languages: list, categories: list) -> dict:
@@ -330,9 +352,23 @@ def api_recognize(
     return r.json()
 
 
+def api_sync_words_to_gcs() -> bool:
+    """POST /api/internal/words/sync → upload local custom words snapshot to GCS."""
+    r = _session.post(
+        f"{SERVER_URL}/api/internal/words/sync",
+        timeout=30,
+    )
+    r.raise_for_status()
+    return bool(r.json().get("synced"))
+
+
 # ── Server management ──────────────────────────────────────────────────────────
 
-def start_myra_server(app_dir: str = DEFAULT_APP_DIR) -> subprocess.Popen:
+def start_myra_server(
+    app_dir: str = DEFAULT_APP_DIR,
+    *,
+    words_sync_to_gcs: str = "never",
+) -> subprocess.Popen:
     """Launch the Myra FastAPI server as a subprocess on port 8765.
 
     Key environment overrides:
@@ -343,6 +379,7 @@ def start_myra_server(app_dir: str = DEFAULT_APP_DIR) -> subprocess.Popen:
     env = os.environ.copy()
     env["DISABLE_PASS1"] = "true"
     env["PYTHONUNBUFFERED"] = "1"
+    env["WORDS_SYNC_TO_GCS"] = words_sync_to_gcs
 
     logger.info(f"Starting Myra server at {app_dir} on port {SERVER_PORT}…")
     proc = subprocess.Popen(
@@ -1013,8 +1050,14 @@ def run_lesson_session(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Reachy Mini × Myra Language Teacher — Option B (fully on Pi)",
+        description="Reachy Mini × Myra Language Teacher",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument(
+        "--runtime-mode",
+        default="cloud",
+        metavar="MODE",
+        help="cloud | reachy_local",
     )
     parser.add_argument(
         "--language",
@@ -1051,13 +1094,19 @@ def main():
     parser.add_argument(
         "--no-server",
         action="store_true",
-        help="Skip auto-launching the Myra server (assume it is already running)",
+        help="Only for reachy_local: use an already-running local Myra server instead of auto-starting one",
     )
     parser.add_argument(
         "--server-dir",
         default=DEFAULT_APP_DIR,
         metavar="PATH",
         help="Path to the myra-language-teacher directory on the Pi",
+    )
+    parser.add_argument(
+        "--words-sync-to-gcs",
+        default="never",
+        metavar="POLICY",
+        help="For reachy_local: never | session_end | shutdown",
     )
     parser.add_argument(
         "--child-name",
@@ -1071,6 +1120,26 @@ def main():
         help="Play back each recording through the speaker before recognizing; save to /tmp/myra_debug.wav",
     )
     args = parser.parse_args()
+
+    runtime_mode = args.runtime_mode.strip().lower()
+    if runtime_mode not in RUNTIME_MODES:
+        parser.error(
+            f"Unknown --runtime-mode '{args.runtime_mode}'. "
+            "Use cloud or reachy_local."
+        )
+
+    words_sync_to_gcs = args.words_sync_to_gcs.strip().lower()
+    if words_sync_to_gcs not in {"never", "session_end", "shutdown"}:
+        parser.error(
+            f"Unknown --words-sync-to-gcs '{args.words_sync_to_gcs}'. "
+            "Use never, session_end, or shutdown."
+        )
+
+    if runtime_mode == "cloud" and args.no_server:
+        parser.error("--no-server is only valid with --runtime-mode reachy_local.")
+
+    if runtime_mode == "cloud" and words_sync_to_gcs != "never":
+        parser.error("--words-sync-to-gcs is only valid with --runtime-mode reachy_local.")
 
     # Resolve child's name
     child_name = args.child_name.strip()
@@ -1094,10 +1163,15 @@ def main():
     if not categories:
         parser.error("--categories produced an empty list. Check the value.")
 
+    configure_server_url(runtime_mode)
+
     # ── Server subprocess ──────────────────────────────────────────────────────
     server_proc = None
-    if not args.no_server:
-        server_proc = start_myra_server(app_dir=args.server_dir)
+    if should_start_local_server(runtime_mode, args.no_server):
+        server_proc = start_myra_server(
+            app_dir=args.server_dir,
+            words_sync_to_gcs=words_sync_to_gcs,
+        )
 
         def _shutdown():
             if server_proc and server_proc.poll() is None:
@@ -1118,6 +1192,10 @@ def main():
             sys.exit(1)
 
         warm_up_server()
+    elif runtime_mode == "reachy_local" and args.no_server and words_sync_to_gcs == "shutdown":
+        logger.warning(
+            "Using --no-server with --words-sync-to-gcs=shutdown means sync depends on the existing server's shutdown config."
+        )
 
     # ── Run the lesson ─────────────────────────────────────────────────────────
     try:
@@ -1133,6 +1211,15 @@ def main():
     except KeyboardInterrupt:
         print("\nLesson stopped.")
     finally:
+        if runtime_mode == "reachy_local" and words_sync_to_gcs == "session_end":
+            try:
+                synced = api_sync_words_to_gcs()
+                if synced:
+                    logger.info("Synced local custom words to GCS at session end.")
+                else:
+                    logger.info("Session-end word sync skipped (nothing new to upload or GCS not configured).")
+            except Exception as exc:
+                logger.warning("Session-end word sync failed: %s", exc)
         if server_proc and server_proc.poll() is None:
             server_proc.terminate()
             try:

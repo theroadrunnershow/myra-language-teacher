@@ -30,6 +30,7 @@ MAX_TRANSLATE_WORD_LEN = 50          # characters — prevents abuse of /api/tra
 VALID_LANGUAGES = {"telugu", "assamese", "english"}
 
 app = FastAPI(title="Myra Language Teacher")
+app.state.dynamic_words_store = None
 
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
@@ -63,6 +64,8 @@ app.add_middleware(
 
 # ── Static files & templates ──────────────────────────────────────────────────
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_WORDS_LOCAL_PATH = os.path.join(BASE_DIR, "data", "custom_words.runtime.v1.json")
+DEFAULT_WORDS_OBJECT_KEY = "words/custom_words.v1.json"
 app.mount("/static", StaticFiles(directory=os.path.join(BASE_DIR, "static")), name="static")
 templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
@@ -100,6 +103,17 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_choice(name: str, default: str, allowed: set[str]) -> str:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in allowed:
+        return value
+    logger.warning("Invalid value for %s=%r. Using default=%s", name, raw, default)
+    return default
+
+
 async def _flush_words_loop() -> None:
     try:
         while True:
@@ -111,24 +125,15 @@ async def _flush_words_loop() -> None:
         return
 
 
-async def _refresh_words_loop() -> None:
-    try:
-        while True:
-            await asyncio.sleep(60)
-            store = getattr(app.state, "dynamic_words_store", None)
-            if store is not None:
-                store.refresh_from_object_store()
-    except asyncio.CancelledError:
-        return
-
-
 @app.on_event("startup")
 async def startup_words_store() -> None:
     enabled = _env_bool("WORDS_STORE_ENABLED", True)
     store = DynamicWordsStore(
         enabled=enabled,
+        local_path=os.environ.get("WORDS_LOCAL_PATH", DEFAULT_WORDS_LOCAL_PATH).strip(),
         bucket_name=os.environ.get("WORDS_OBJECT_BUCKET", "").strip(),
-        object_key=os.environ.get("WORDS_OBJECT_KEY", "words/custom_words.v1.json").strip(),
+        object_key=os.environ.get("WORDS_OBJECT_KEY", DEFAULT_WORDS_OBJECT_KEY).strip(),
+        sync_to_gcs_policy=_env_choice("WORDS_SYNC_TO_GCS", "never", {"never", "session_end", "shutdown"}),
         flush_interval_sec=_env_int("WORDS_FLUSH_INTERVAL_SEC", 21600),
         flush_max_new_words=_env_int("WORDS_FLUSH_MAX_NEW_WORDS", 50),
         refresh_interval_sec=_env_int("WORDS_REFRESH_INTERVAL_SEC", 3600),
@@ -137,7 +142,6 @@ async def startup_words_store() -> None:
     app.state.dynamic_words_store = store
     set_dynamic_words_store(store)
     app.state.words_flush_task = asyncio.create_task(_flush_words_loop())
-    app.state.words_refresh_task = asyncio.create_task(_refresh_words_loop())
 
 
 @app.on_event("shutdown")
@@ -150,17 +154,11 @@ async def shutdown_words_store() -> None:
         except asyncio.CancelledError:
             pass
 
-    refresh_task = getattr(app.state, "words_refresh_task", None)
-    if refresh_task is not None:
-        refresh_task.cancel()
-        try:
-            await refresh_task
-        except asyncio.CancelledError:
-            pass
-
     store = getattr(app.state, "dynamic_words_store", None)
     if store is not None:
         store.flush_if_needed(force=True)
+        if store.should_sync_on_shutdown:
+            store.sync_to_object_store(force=True)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
@@ -172,6 +170,12 @@ async def health():
 
 # ── Page routes ───────────────────────────────────────────────────────────────
 _NO_CACHE = {"Cache-Control": "no-store, no-cache, must-revalidate"}
+
+
+def _is_local_request(request: Request) -> bool:
+    client = getattr(request, "client", None)
+    host = getattr(client, "host", "")
+    return host in {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
 @app.get("/")
@@ -269,6 +273,25 @@ async def api_translate(word: str = "", language: str = "telugu"):
     except Exception as exc:
         logger.error(f"Translate error for '{word}': {exc}")
         raise HTTPException(status_code=503, detail=f"Translation failed: {exc}")
+
+
+@app.post("/api/internal/words/sync")
+async def api_sync_words(request: Request):
+    if not _is_local_request(request):
+        raise HTTPException(status_code=403, detail="Word sync is only available from the local machine.")
+
+    store = getattr(app.state, "dynamic_words_store", None)
+    if store is None or not store.is_configured:
+        return {"status": "disabled", "synced": False}
+
+    store.flush_if_needed(force=True)
+    synced = store.sync_to_object_store(force=True)
+    status = "ok" if synced else "skipped"
+    return {
+        "status": status,
+        "synced": synced,
+        "policy": store.sync_to_gcs_policy,
+    }
 
 
 # ── API: TTS ──────────────────────────────────────────────────────────────────
