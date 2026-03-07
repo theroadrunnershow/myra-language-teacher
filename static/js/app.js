@@ -452,7 +452,7 @@ async function init() {
 
   if (state.config.child_name) {
     const name = childName();
-    els.childTitle.textContent = `🦕 ${name} Learns!`;
+    els.childTitle.textContent = `${name} Learns!`;
     document.title = `${name} Learns Languages 🦕`;
   }
 
@@ -1208,7 +1208,7 @@ async function teachCustomWord() {
 function attachButtonSounds() {
   ['btn-play', 'btn-record', 'btn-skip', 'btn-stop', 'btn-teach'].forEach(id => {
     const btn = $(id);
-    if (btn) btn.addEventListener('mousedown', playButtonTap);
+    if (btn) btn.addEventListener('pointerdown', playButtonTap, { passive: true });
   });
 }
 

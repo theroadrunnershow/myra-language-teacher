@@ -7,36 +7,58 @@
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
   <link rel="stylesheet" href="/static/css/style.css" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400;500;600;700;800&family=Nunito:wght@400;600;700;900&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@400;500;600;700;800&family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700;900&display=swap" rel="stylesheet" />
 </head>
-<body>
+<body class="home-page">
 
 <!-- ═══════════════════════ CONFETTI LAYER ═══════════════════════ -->
 <div id="confetti-container"></div>
 
 <!-- ═══════════════════════ HEADER ═══════════════════════ -->
-<header>
+<header class="home-header">
   <div class="header-inner">
-    <h1 id="child-name-title">🦕 {{ config.child_name or "Let's Learn" }}!</h1>
+    <div class="brand-lockup">
+      <span class="brand-icon" aria-hidden="true">🦕</span>
+      <div class="brand-copy">
+        <p class="brand-kicker">Tiny Talk Time</p>
+        <h1 id="child-name-title">{{ config.child_name or "Let's Learn" }}!</h1>
+      </div>
+    </div>
     <a href="/settings" class="settings-btn" title="Settings">⚙️</a>
   </div>
 </header>
 
 <!-- ═══════════════════════ MAIN LAYOUT ═══════════════════════ -->
-<main>
+<main class="home-main">
 
   <!-- ── DINO COLUMN ── -->
-  <section class="dino-col">
-    <div class="lang-badge" id="lang-badge">Telugu 🌟</div>
-    <div class="dino-wrapper" id="dino-wrapper">
+  <section class="dino-col hero-panel">
+    <div class="hero-copy">
+      <span class="hero-kicker">Listen, repeat, celebrate</span>
+      <h2>Short, happy word practice for little learners</h2>
+      <p class="hero-description">Hear the word, say it out loud, and collect stars one tiny win at a time.</p>
+
+      <div class="hero-status-row">
+        <div class="lang-badge" id="lang-badge">Telugu 🌟</div>
+
+        <!-- Score display -->
+        <div class="score-row">
+          <span class="score-pill">⭐ Score <strong id="score-display">0</strong></span>
+          <span class="score-pill">📚 Words <strong id="words-display">0</strong></span>
+        </div>
+      </div>
+    </div>
+
+    <div class="hero-stage">
 
       <!-- Speech bubble -->
       <div class="speech-bubble" id="speech-bubble">
         <span id="bubble-text">Hi! Let's learn words! 🌟</span>
       </div>
 
+      <div class="dino-wrapper" id="dino-wrapper">
       <!-- Pink Dino SVG -->
-      <svg id="dino-svg" viewBox="0 0 380 430" xmlns="http://www.w3.org/2000/svg" aria-label="Pink Dino Stuffy mascot">
+      <svg id="dino-svg" viewBox="0 18 380 452" xmlns="http://www.w3.org/2000/svg" aria-label="Pink Dino Stuffy mascot">
 
         <!-- ── TAIL (grouped for tail-wag animation) ── -->
         <g id="dino-tail">
@@ -141,93 +163,111 @@
 
       </svg>
       <!-- end dino SVG -->
-    </div><!-- end dino-wrapper -->
+      </div><!-- end dino-wrapper -->
+
+      <div class="hero-tip">
+        <span class="hero-tip-label">How to play</span>
+        <p>Tap <strong>Hear It!</strong>, then <strong>Say It!</strong> and cheer for every try.</p>
+      </div>
+    </div>
   </section>
 
   <!-- ── LESSON COLUMN ── -->
-  <section class="lesson-col">
+  <section class="lesson-col practice-panel">
+    <div class="practice-shell">
+      <section class="teach-panel">
+        <div class="home-section-heading">
+          <span class="section-kicker">Pick any word</span>
+          <h2>Teach a new favorite</h2>
+        </div>
 
-    <!-- Teach Me: custom word lookup (top of lesson) -->
-    <div class="teach-row">
-      <input type="text" id="teach-input" class="teach-input"
-             placeholder="Type any English word…" maxlength="50"
-             onkeydown="if(event.key==='Enter') teachCustomWord()" />
-      <button class="btn btn-teach" id="btn-teach" onclick="teachCustomWord()">
-        ✏️ Teach Me!
-      </button>
-    </div>
-    <p class="teach-hint">Type a word above, then click <strong>Say It!</strong> to practice.</p>
+        <!-- Teach Me: custom word lookup (top of lesson) -->
+        <div class="teach-row">
+          <label class="sr-only" for="teach-input">Type any English word</label>
+          <input type="text" id="teach-input" class="teach-input"
+                 placeholder="Type any English word…" maxlength="50"
+                 onkeydown="if(event.key==='Enter') teachCustomWord()" />
+          <button class="btn btn-teach" id="btn-teach" onclick="teachCustomWord()">
+            ✏️ Teach Me!
+          </button>
+        </div>
+        <p class="teach-hint">Type an English word to turn it into a quick speaking game.</p>
+      </section>
 
-    <!-- Word card -->
-    <div class="word-card" id="word-card">
+      <section class="word-stage">
+        <div class="word-card-header">
+          <span class="word-card-tag">Word of the moment</span>
 
-      <div class="word-emoji" id="word-emoji">🌟</div>
+          <!-- Attempt dots -->
+          <div class="attempt-dots" id="attempt-dots" aria-label="Attempts remaining">
+            <span class="dot" id="dot-1"></span>
+            <span class="dot" id="dot-2"></span>
+            <span class="dot" id="dot-3"></span>
+          </div>
+        </div>
 
-      <div class="word-english" id="word-english">Loading…</div>
+        <!-- Word card -->
+        <div class="word-card" id="word-card">
 
-      <div class="word-arrow">➜</div>
+          <div class="word-emoji" id="word-emoji">🌟</div>
 
-      <div class="word-translation" id="word-translation">…</div>
+          <div class="word-english" id="word-english">Loading…</div>
 
-      <div class="word-romanized" id="word-romanized"></div>
+          <div class="word-arrow">➜</div>
 
-    </div><!-- end word-card -->
+          <div class="word-translation" id="word-translation">…</div>
 
-    <!-- Feedback banner -->
-    <div class="feedback-banner hidden" id="feedback-banner">
-      <span id="feedback-text"></span>
-    </div>
+          <div class="word-romanized" id="word-romanized"></div>
 
-    <!-- Attempt dots -->
-    <div class="attempt-dots" id="attempt-dots">
-      <span class="dot" id="dot-1"></span>
-      <span class="dot" id="dot-2"></span>
-      <span class="dot" id="dot-3"></span>
-    </div>
+        </div><!-- end word-card -->
+      </section>
 
-    <!-- Action buttons -->
-    <div class="btn-row">
+      <!-- Feedback banner -->
+      <div class="feedback-banner hidden" id="feedback-banner" aria-live="polite">
+        <span id="feedback-text"></span>
+      </div>
 
-      <button class="btn btn-play" id="btn-play" title="Hear the word" onclick="playWord()">
-        🔊 Hear It!
-      </button>
+      <section class="controls-card">
+        <!-- Streak display (hidden until 3+ in a row) -->
+        <div id="streak-display" class="streak-display" hidden aria-live="polite">
+          <span id="streak-count">0</span> in a row! 🔥
+        </div>
 
-      <button class="btn btn-record" id="btn-record" onclick="playPromptThenRecord()">
-        🎤 Say It!
-      </button>
+        <!-- Action buttons -->
+        <div class="btn-row">
 
-      <button class="btn btn-skip" id="btn-skip" onclick="nextWord()" title="Skip to next word">
-        ⏭ Skip
-      </button>
+          <button class="btn btn-play" id="btn-play" title="Hear the word" onclick="playWord()">
+            🔊 Hear It!
+          </button>
 
-      <button class="btn btn-stop" id="btn-stop" onclick="stopFlow()" title="Take a break, stay on current word">
-        Let's take a break
-      </button>
+          <button class="btn btn-record" id="btn-record" onclick="playPromptThenRecord()">
+            🎤 Say It!
+          </button>
 
-    </div>
+          <button class="btn btn-skip" id="btn-skip" onclick="nextWord()" title="Skip to next word">
+            ⏭ Skip
+          </button>
 
-    <!-- Recording indicator -->
-    <div class="recording-indicator hidden" id="recording-indicator">
-      <span class="rec-dot"></span>
-      <span>Listening… <span id="rec-timer">5</span>s</span>
-    </div>
+          <button class="btn btn-stop" id="btn-stop" onclick="stopFlow()" title="Take a break, stay on current word">
+            Let's take a break
+          </button>
+        </div>
 
-    <!-- Debug panel (always visible while debugging) -->
-    <div id="debug-panel" class="debug-panel hidden">
-      <div id="debug-heard"></div>
-      <div id="debug-sim"></div>
-      <div id="debug-error"></div>
-    </div>
+        <!-- Recording indicator -->
+        <div class="recording-indicator hidden" id="recording-indicator">
+          <span class="rec-dot"></span>
+          <span>Listening… <span id="rec-timer">5</span>s</span>
+        </div>
 
-    <!-- Score display -->
-    <div class="score-row">
-      <span>⭐ Score: <strong id="score-display">0</strong></span>
-      <span>📚 Words: <strong id="words-display">0</strong></span>
-    </div>
+        <p class="controls-hint">Large buttons keep the lesson simple on laptops, tablets, and phones.</p>
+      </section>
 
-    <!-- Streak display (hidden until 3+ in a row) -->
-    <div id="streak-display" class="streak-display" hidden aria-live="polite">
-      <span id="streak-count">0</span> in a row! 🔥
+      <!-- Debug panel (always visible while debugging) -->
+      <div id="debug-panel" class="debug-panel hidden">
+        <div id="debug-heard"></div>
+        <div id="debug-sim"></div>
+        <div id="debug-error"></div>
+      </div>
     </div>
 
   </section><!-- end lesson-col -->
