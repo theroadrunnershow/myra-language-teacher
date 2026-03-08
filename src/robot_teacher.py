@@ -76,8 +76,15 @@ DEFAULT_LANGUAGES = ["telugu", "assamese"]
 DEFAULT_CATEGORIES = ["animals", "colors", "food", "numbers"]
 
 # Directory containing main.py — used to start the server subprocess.
-# Defaults to the same directory as this script.
-DEFAULT_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+# Auto-detects: if main.py is next to this script use that dir, otherwise
+# fall back to a src/ subdirectory (handles Pi deployments where
+# robot_teacher.py lives at project root but main.py is in src/).
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+DEFAULT_APP_DIR = (
+    _script_dir
+    if os.path.isfile(os.path.join(_script_dir, "main.py"))
+    else os.path.join(_script_dir, "src")
+)
 
 # Strip emoji from TTS text (gTTS chokes on Unicode emoji characters)
 _EMOJI_RE = re.compile(
@@ -395,8 +402,8 @@ def start_myra_server(
         ],
         cwd=app_dir,
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=None,   # inherit — server logs visible in terminal
+        stderr=None,
     )
     return proc
 
