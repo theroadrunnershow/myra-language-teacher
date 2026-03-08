@@ -476,7 +476,11 @@ class RobotController:
         """Signal any running background loop to stop and wait for it."""
         self._stop_event.set()
         if self._bg_thread and self._bg_thread.is_alive():
-            self._bg_thread.join(timeout=4.0)
+            # Skip join when called from within the background thread itself
+            # (e.g. _celebrate_loop calling idle() at its end) — joining the
+            # current thread raises RuntimeError("cannot join current thread").
+            if self._bg_thread is not threading.current_thread():
+                self._bg_thread.join(timeout=4.0)
         self._stop_event.clear()
         self._bg_thread = None
 
