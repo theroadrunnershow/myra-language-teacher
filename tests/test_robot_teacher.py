@@ -1,11 +1,15 @@
 import logging
+import threading
+from unittest.mock import MagicMock, call, patch
 
 import numpy as np
 
+import robot_teacher
 from robot_teacher import (
     CLOUD_SERVER_URL,
     LOCAL_SERVER_URL,
     RobotController,
+    _trigger_led_celebration,
     configure_server_url,
     resolve_server_url,
     should_start_local_server,
@@ -118,3 +122,82 @@ def test_speak_loop_handles_motion_timeout(monkeypatch, caplog):
 
     assert "Robot motion failed during speak nod up" in caplog.text
     assert len(mini.goto_calls) == 1
+
+
+# ── LED celebration tests ─────────────────────────────────────────────────────
+
+def test_trigger_led_celebration_posts_joy_then_off(monkeypatch):
+    """_trigger_led_celebration POSTs joy animation then turns LEDs off."""
+    monkeypatch.setattr("robot_teacher.time.sleep", lambda *_args, **_kwargs: None)
+    mock_post = MagicMock()
+    monkeypatch.setattr("robot_teacher.requests.post", mock_post)
+
+    _trigger_led_celebration("http://rmeyes.local", duration=0.0)
+
+    assert mock_post.call_count == 2
+    animate_call, off_call = mock_post.call_args_list
+    assert animate_call == call(
+        "http://rmeyes.local/api/v1/led-animate",
+        json={"animation": "joy", "brightness": 100, "speed": 30},
+        timeout=2.0,
+    )
+    assert off_call == call(
+        "http://rmeyes.local/api/v1/led",
+        json={"led": -1, "on": False},
+        timeout=2.0,
+    )
+
+
+def test_trigger_led_celebration_silently_skips_on_network_error(monkeypatch, caplog):
+    """Connection errors are swallowed and logged at DEBUG — no exception raised."""
+    monkeypatch.setattr("robot_teacher.time.sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "robot_teacher.requests.post",
+        MagicMock(side_effect=ConnectionError("no route to host")),
+    )
+
+    with caplog.at_level(logging.DEBUG):
+        _trigger_led_celebration("http://rmeyes.local", duration=0.0)  # must not raise
+
+    assert "LED celebration skipped" in caplog.text
+
+
+def test_celebrate_spawns_led_thread_when_enabled(monkeypatch):
+    """celebrate() starts an LED thread when REACHY_EYES_ENABLED is True."""
+    mini = _FakeMini()
+    controller = RobotController(mini)
+    monkeypatch.setattr("robot_teacher.REACHY_EYES_ENABLED", True)
+    monkeypatch.setattr("robot_teacher.REACHY_EYES_URL", "http://rmeyes.local")
+
+    spawned_targets = []
+    original_thread = threading.Thread
+
+    def capture_thread(*args, target=None, **kwargs):
+        spawned_targets.append(target)
+        t = original_thread(*args, target=target, **kwargs)
+        return t
+
+    monkeypatch.setattr("robot_teacher.threading.Thread", capture_thread)
+    controller.celebrate()
+
+    assert _trigger_led_celebration in spawned_targets
+
+
+def test_celebrate_skips_led_thread_when_disabled(monkeypatch):
+    """celebrate() does NOT start an LED thread when REACHY_EYES_ENABLED is False."""
+    mini = _FakeMini()
+    controller = RobotController(mini)
+    monkeypatch.setattr("robot_teacher.REACHY_EYES_ENABLED", False)
+
+    spawned_targets = []
+    original_thread = threading.Thread
+
+    def capture_thread(*args, target=None, **kwargs):
+        spawned_targets.append(target)
+        t = original_thread(*args, target=target, **kwargs)
+        return t
+
+    monkeypatch.setattr("robot_teacher.threading.Thread", capture_thread)
+    controller.celebrate()
+
+    assert _trigger_led_celebration not in spawned_targets

@@ -79,6 +79,13 @@ DEFAULT_THRESHOLD = 50   # permissive for a 4-year-old
 DEFAULT_LANGUAGES = ["telugu", "assamese"]
 DEFAULT_CATEGORIES = ["animals", "colors", "food", "numbers"]
 
+# ── Optional LED eyes (ESP32 mod — github.com/algoryn-nl/reachy-mini-esp32-eyes) ─
+# Set REACHY_EYES_ENABLED=true and optionally REACHY_EYES_URL to activate.
+REACHY_EYES_URL = os.environ.get("REACHY_EYES_URL", "http://rmeyes.local")
+REACHY_EYES_ENABLED = os.environ.get("REACHY_EYES_ENABLED", "").strip().lower() in {
+    "1", "true", "yes", "on"
+}
+
 # Directory containing main.py — used to start the server subprocess.
 # Auto-detects: if main.py is next to this script use that dir, otherwise
 # fall back to a src/ subdirectory (handles Pi deployments where
@@ -608,10 +615,15 @@ class RobotController:
         """Start 3-cycle celebration sequence in background (non-blocking).
 
         Returns immediately so audio can play in parallel.
+        Also fires a LED joy animation in parallel when REACHY_EYES_ENABLED=true.
         """
         self._stop_background()
         self._bg_thread = threading.Thread(target=self._celebrate_loop, daemon=True)
         self._bg_thread.start()
+        if REACHY_EYES_ENABLED:
+            threading.Thread(
+                target=_trigger_led_celebration, args=(REACHY_EYES_URL,), daemon=True
+            ).start()
 
     def _celebrate_loop(self):
         for _ in range(3):
@@ -718,6 +730,30 @@ class RobotController:
         logger.info("Speaker: done")
         if not suppress_speak_anim:
             self._stop_background()
+
+
+# ── LED celebration (optional ESP32 eyes mod) ──────────────────────────────────
+
+def _trigger_led_celebration(url: str, duration: float = 2.2) -> None:
+    """Flash a joy/rainbow animation on the ESP32 LED eyes mod.
+
+    Runs in a daemon thread so it never blocks the lesson flow.
+    Silently skips if the mod is unreachable or not installed.
+    """
+    try:
+        requests.post(
+            f"{url}/api/v1/led-animate",
+            json={"animation": "joy", "brightness": 100, "speed": 30},
+            timeout=2.0,
+        )
+        time.sleep(duration)
+        requests.post(
+            f"{url}/api/v1/led",
+            json={"led": -1, "on": False},
+            timeout=2.0,
+        )
+    except Exception as e:
+        logger.debug("LED celebration skipped (ESP32 eyes mod not available): %s", e)
 
 
 # ── Celebration jingle ─────────────────────────────────────────────────────────
