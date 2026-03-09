@@ -52,6 +52,10 @@ try:
 except ImportError:
     _ROBOT_SDK_AVAILABLE = False
 
+    def create_head_pose(**kwargs):
+        """Fallback used in tests when the Reachy SDK is unavailable."""
+        return kwargs
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-7s  %(message)s",
@@ -469,6 +473,9 @@ class RobotController:
         self._speaker_primed = False
         self._stop_event = threading.Event()
         self._bg_thread: threading.Thread | None = None
+        self._motion_failure_count = 0
+        self._motion_cooldown_until = 0.0
+        self._last_motion_error: str | None = None
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -489,6 +496,47 @@ class RobotController:
         self._bg_thread = threading.Thread(target=target, args=args, daemon=True)
         self._bg_thread.start()
 
+    def _sleep_interruptibly(self, duration: float):
+        """Sleep in small increments so stop requests interrupt animation cooldowns."""
+        remaining = max(float(duration), 0.0)
+        while remaining > 0 and not self._stop_event.is_set():
+            step = min(remaining, 0.05)
+            time.sleep(step)
+            remaining -= step
+
+    def _goto_target_safe(self, context: str, preserve_timing: bool = False, **kwargs) -> bool:
+        """Run a robot motion without letting hardware faults kill the lesson flow."""
+        duration = max(float(kwargs.get("duration", 0.0) or 0.0), 0.0)
+        now = time.monotonic()
+        if now < self._motion_cooldown_until:
+            if preserve_timing and duration:
+                self._sleep_interruptibly(duration)
+            return False
+
+        try:
+            self._mini.goto_target(**kwargs)
+        except Exception as e:
+            self._motion_failure_count += 1
+            backoff = min(5.0, max(duration, 0.2) * min(self._motion_failure_count, 5))
+            self._motion_cooldown_until = time.monotonic() + backoff
+            error_text = f"{type(e).__name__}: {e}"
+            if error_text != self._last_motion_error:
+                logger.warning(
+                    "Robot motion failed during %s: %s. Continuing without this animation; "
+                    "check motor connections and power if this persists.",
+                    context,
+                    error_text,
+                )
+                self._last_motion_error = error_text
+            return False
+
+        if self._motion_failure_count:
+            logger.info("Robot motion recovered.")
+        self._motion_failure_count = 0
+        self._motion_cooldown_until = 0.0
+        self._last_motion_error = None
+        return True
+
     # ── Idle: slow head sway, relaxed antennas ─────────────────────────────────
 
     def idle(self):
@@ -497,7 +545,9 @@ class RobotController:
 
     def _idle_loop(self):
         while not self._stop_event.is_set():
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "idle sway left",
+                preserve_timing=True,
                 head=create_head_pose(roll=8, degrees=True),
                 antennas=np.deg2rad([30, 30]),
                 duration=2.0,
@@ -505,7 +555,9 @@ class RobotController:
             )
             if self._stop_event.is_set():
                 break
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "idle sway right",
+                preserve_timing=True,
                 head=create_head_pose(roll=-8, degrees=True),
                 antennas=np.deg2rad([30, 30]),
                 duration=2.0,
@@ -517,7 +569,8 @@ class RobotController:
     def listen(self):
         """Hold a curious head tilt while Myra is speaking into the mic."""
         self._stop_background()
-        self._mini.goto_target(
+        self._goto_target_safe(
+            "listen pose",
             head=create_head_pose(roll=15, degrees=True),
             antennas=np.deg2rad([60, 60]),
             duration=0.8,
@@ -532,14 +585,18 @@ class RobotController:
 
     def _speak_loop(self):
         while not self._stop_event.is_set():
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "speak nod up",
+                preserve_timing=True,
                 head=create_head_pose(z=6, mm=True),
                 antennas=np.deg2rad([45, 20]),
                 duration=0.3,
             )
             if self._stop_event.is_set():
                 break
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "speak nod down",
+                preserve_timing=True,
                 head=create_head_pose(z=-2, mm=True),
                 antennas=np.deg2rad([20, 45]),
                 duration=0.3,
@@ -560,14 +617,18 @@ class RobotController:
         for _ in range(3):
             if self._stop_event.is_set():
                 return
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "celebrate bob up",
+                preserve_timing=True,
                 head=create_head_pose(z=15, mm=True),
                 antennas=[0.8, -0.8],
                 duration=0.3,
             )
             if self._stop_event.is_set():
                 return
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "celebrate bob down",
+                preserve_timing=True,
                 head=create_head_pose(z=-5, mm=True),
                 antennas=[-0.8, 0.8],
                 duration=0.3,
@@ -587,25 +648,31 @@ class RobotController:
 
     def _express_wrong_loop(self):
         # Droop antennas first so they're set before the shaking starts
-        self._mini.goto_target(
+        self._goto_target_safe(
+            "wrong pose antennas droop",
             antennas=np.deg2rad([-30, -30]),
             duration=0.2,
         )
         for _ in range(3):
             if self._stop_event.is_set():
                 return
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "wrong shake left",
+                preserve_timing=True,
                 head=create_head_pose(yaw=18, degrees=True),
                 duration=0.22,
             )
             if self._stop_event.is_set():
                 return
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "wrong shake right",
+                preserve_timing=True,
                 head=create_head_pose(yaw=-18, degrees=True),
                 duration=0.22,
             )
         if not self._stop_event.is_set():
-            self._mini.goto_target(
+            self._goto_target_safe(
+                "wrong reset pose",
                 head=create_head_pose(yaw=0, degrees=True),
                 antennas=np.deg2rad([0, 0]),
                 duration=0.35,

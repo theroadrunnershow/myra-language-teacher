@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 
 from robot_teacher import (
@@ -25,6 +27,14 @@ class _FakeMedia:
 class _FakeMini:
     def __init__(self, sample_rate: int = 16000):
         self.media = _FakeMedia(sample_rate=sample_rate)
+        self.goto_calls: list[dict] = []
+        self.goto_behavior = None
+
+    def goto_target(self, **kwargs):
+        self.goto_calls.append(kwargs)
+        if self.goto_behavior is not None:
+            return self.goto_behavior(**kwargs)
+        return None
 
 
 def test_play_audio_primes_speaker_once(monkeypatch):
@@ -74,3 +84,37 @@ def test_should_start_local_server_only_in_reachy_local_mode():
     assert should_start_local_server("reachy_local", no_server=False) is True
     assert should_start_local_server("reachy_local", no_server=True) is False
     assert should_start_local_server("cloud", no_server=False) is False
+
+
+def test_listen_handles_motion_errors(caplog):
+    mini = _FakeMini()
+    controller = RobotController(mini)
+
+    def fail_motion(**_kwargs):
+        raise Exception("Motor communication error! Check connections and power supply.")
+
+    mini.goto_behavior = fail_motion
+
+    with caplog.at_level(logging.WARNING):
+        controller.listen()
+
+    assert "Robot motion failed during listen pose" in caplog.text
+    assert len(mini.goto_calls) == 1
+
+
+def test_speak_loop_handles_motion_timeout(monkeypatch, caplog):
+    mini = _FakeMini()
+    controller = RobotController(mini)
+
+    def fail_once(**_kwargs):
+        controller._stop_event.set()
+        raise TimeoutError("Task did not complete in time.")
+
+    mini.goto_behavior = fail_once
+    monkeypatch.setattr("robot_teacher.time.sleep", lambda *_args, **_kwargs: None)
+
+    with caplog.at_level(logging.WARNING):
+        controller._speak_loop()
+
+    assert "Robot motion failed during speak nod up" in caplog.text
+    assert len(mini.goto_calls) == 1
