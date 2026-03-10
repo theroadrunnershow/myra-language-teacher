@@ -874,7 +874,7 @@ def run_lesson_word(
             pass
 
     # 3. Prompt the child to repeat
-    _say(robot, f"Now say it with me, {child_name}!", language)
+    _say(robot, f"{child_name} repeat after me!", language)
     if tts_mp3:
         try:
             _play(robot, tts_mp3)
