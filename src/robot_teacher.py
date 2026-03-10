@@ -36,6 +36,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import requests
@@ -807,6 +808,37 @@ def _say(robot: RobotController, text: str, language: str = "english"):
         time.sleep(1.5)  # pause so the lesson flow still feels natural
 
 
+def _fetch_tts_safe(text: str, language: str, slow: bool = False) -> bytes:
+    """Fetch TTS audio bytes, returning b'' on any failure.
+
+    Safe to call from background threads — never raises.
+    """
+    try:
+        return api_get_tts(text, language, slow=slow)
+    except Exception as e:
+        logger.warning(f"TTS prefetch failed for '{text[:40]}': {e}")
+        return b""
+
+
+def _collect_prefetch(
+    thread: threading.Thread | None,
+    data: dict,
+    out: dict | None,
+    timeout: float = 5.0,
+) -> None:
+    """Join the next-word prefetch thread and write its result into *out*.
+
+    Called at the end of run_lesson_word so the session loop can hand the
+    pre-fetched word/TTS to the next call without an extra network round-trip.
+    """
+    if out is None:
+        return
+    if thread is not None and thread.is_alive():
+        thread.join(timeout=timeout)
+    if data:
+        out["next"] = data
+
+
 # ── Single-word lesson cycle ───────────────────────────────────────────────────
 
 def run_lesson_word(
@@ -819,15 +851,29 @@ def run_lesson_word(
     child_name: str = "friend",
     mic_rate: int = SAMPLE_RATE,
     debug_audio: bool = False,
+    prefetch: dict | None = None,
+    prefetch_out: dict | None = None,
 ) -> str:
-    """Run one complete word lesson. Returns 'correct' | 'revealed' | 'error'."""
+    """Run one complete word lesson. Returns 'correct' | 'revealed' | 'error'.
 
-    # ── Fetch word ─────────────────────────────────────────────────────────────
-    try:
-        word = api_get_word(languages, categories)
-    except Exception as e:
-        logger.error(f"Failed to fetch word: {e}")
-        return "error"
+    prefetch:     optional {"word": <word_dict>, "tts_mp3": <bytes>} from a prior
+                  recording-window prefetch — skips a network round-trip at word start.
+    prefetch_out: mutable dict populated with {"next": {...}} before returning
+                  so the session loop can pass it as prefetch to the next call.
+    """
+
+    # ── Fetch word (use prefetch if available) ─────────────────────────────────
+    if prefetch and "word" in prefetch:
+        word = prefetch["word"]
+        tts_mp3_prefetched = prefetch.get("tts_mp3", b"")
+        logger.info("Using prefetched word: %s", word.get("english"))
+    else:
+        try:
+            word = api_get_word(languages, categories)
+        except Exception as e:
+            logger.error(f"Failed to fetch word: {e}")
+            return "error"
+        tts_mp3_prefetched = b""
 
     language = word["language"]
     translation = word["translation"]
@@ -845,18 +891,51 @@ def run_lesson_word(
     # Recording is restarted fresh right before each recognition attempt.
     mini.media.stop_recording()
     robot.idle()
-    tts_mp3 = b""
-    try:
-        tts_mp3 = api_get_tts(translation, language, slow=True)
-    except Exception as e:
-        logger.warning(f"Word TTS failed: {e}")
 
-    roman = romanized.lower()
     eng = word["english"].lower()
     lang_display = language.capitalize()
 
+    # Build all 3 teaching phrases now so their TTS can be fetched in parallel.
+    phrase1 = f"{child_name}, do you know what this word means?"
+    phrase2 = f"{eng.capitalize()}! It means {eng} in {lang_display}."
+    phrase3 = f"{child_name} repeat after me!"
+
+    # Fetch word TTS + all 3 teaching phrase TTS in parallel (#2).
+    # If word TTS was already prefetched, skip that fetch to save a thread slot.
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        fut_word = (
+            None if tts_mp3_prefetched
+            else pool.submit(api_get_tts, translation, language, True)
+        )
+        fut_p1 = pool.submit(_fetch_tts_safe, phrase1, language)
+        fut_p2 = pool.submit(_fetch_tts_safe, phrase2, language)
+        fut_p3 = pool.submit(_fetch_tts_safe, phrase3, language)
+
+        tts_mp3 = tts_mp3_prefetched
+        if fut_word is not None:
+            try:
+                tts_mp3 = fut_word.result()
+            except Exception as e:
+                logger.warning(f"Word TTS failed: {e}")
+                tts_mp3 = b""
+
+        # _fetch_tts_safe never raises — returns b"" on failure
+        phrase1_mp3 = fut_p1.result()
+        phrase2_mp3 = fut_p2.result()
+        phrase3_mp3 = fut_p3.result()
+
+    def _play_phrase(mp3_bytes: bytes, fallback_text: str) -> None:
+        """Play pre-fetched phrase MP3; fall back to live _say() on failure."""
+        if mp3_bytes:
+            try:
+                _play(robot, mp3_bytes)
+                return
+            except Exception as e:
+                logger.warning(f"Pre-fetched phrase playback failed: {e}")
+        _say(robot, fallback_text, language)
+
     # 1. Curiosity hook — one voice throughout (lesson language for all speech)
-    _say(robot, f"{child_name}, do you know what this word means?", language)
+    _play_phrase(phrase1_mp3, phrase1)
     if tts_mp3:
         try:
             _play(robot, tts_mp3)
@@ -865,7 +944,7 @@ def run_lesson_word(
             pass
 
     # 2. Reveal the meaning, then play the native word again
-    _say(robot, f"{eng.capitalize()}! It means {eng} in {lang_display}.", language)
+    _play_phrase(phrase2_mp3, phrase2)
     if tts_mp3:
         try:
             _play(robot, tts_mp3)
@@ -874,13 +953,29 @@ def run_lesson_word(
             pass
 
     # 3. Prompt the child to repeat
-    _say(robot, f"{child_name} repeat after me!", language)
+    _play_phrase(phrase3_mp3, phrase3)
     if tts_mp3:
         try:
             _play(robot, tts_mp3)
             time.sleep(0.3)
         except Exception:
             pass
+
+    # ── Next-word prefetch — started once on attempt 1, during recording (#1, #5)
+    # Fetches the next word + its TTS while Myra is recording (5 s dead time).
+    # The result is collected at the end of this function and passed to the next
+    # run_lesson_word call via prefetch_out, eliminating the word-start latency.
+    _next_word_data: dict = {}
+    _prefetch_thread: threading.Thread | None = None
+
+    def _run_prefetch() -> None:
+        try:
+            nw = api_get_word(languages, categories)
+            nt = api_get_tts(nw["translation"], nw["language"], slow=True)
+            _next_word_data.update({"word": nw, "tts_mp3": nt})
+            logger.info("Next-word prefetch ready: %s", nw.get("english"))
+        except Exception as e:
+            logger.debug(f"Next-word prefetch failed (non-fatal): {e}")
 
     # ── Attempt loop ──────────────────────────────────────────────────────────
     for attempt in range(1, max_attempts + 1):
@@ -892,6 +987,14 @@ def run_lesson_word(
         mini.media.start_recording()
         time.sleep(0.3)  # let hardware initialize
         _drain_input_audio_queue(mini, mic_rate, max_duration=1.5)
+
+        # Launch next-word prefetch once, on the first attempt, during recording.
+        # Subsequent attempts reuse the same result (thread already done by then).
+        if attempt == 1:
+            _prefetch_thread = threading.Thread(
+                target=_run_prefetch, daemon=True, name="next-word-prefetch"
+            )
+            _prefetch_thread.start()
 
         try:
             chunks = []
@@ -984,12 +1087,26 @@ def run_lesson_word(
                 f"Yes, {child_name}! That is exactly right!",
             ])
             robot.celebrate()  # non-blocking — animation runs while audio plays
+
+            # Fetch praise TTS in a thread while jingle generates locally (#3).
+            # celebrate() animation runs in background throughout all of this.
+            praise_mp3: bytes = b""
+            _praise_result: list[bytes] = [b""]
+
+            def _fetch_praise() -> None:
+                _praise_result[0] = _fetch_tts_safe(praise_text, language)
+
+            _praise_thread = threading.Thread(target=_fetch_praise, daemon=True)
+            _praise_thread.start()
+            jingle = _generate_celebration_jingle(robot.output_sample_rate)
+            _praise_thread.join(timeout=15.0)
+            praise_mp3 = _praise_result[0]
+
             # Mix jingle + praise voice into one buffer so they play simultaneously.
             try:
-                jingle = _generate_celebration_jingle(robot.output_sample_rate)
-                praise_mp3 = api_get_tts(praise_text, language, slow=False)
-                praise_samples = mp3_bytes_to_robot_samples(
-                    praise_mp3, output_rate=robot.output_sample_rate
+                praise_samples = (
+                    mp3_bytes_to_robot_samples(praise_mp3, output_rate=robot.output_sample_rate)
+                    if praise_mp3 else np.zeros((1, 1), dtype=np.float32)
                 )
                 j_len, p_len = len(jingle), len(praise_samples)
                 mixed = np.zeros((max(j_len, p_len), 1), dtype=np.float32)
@@ -1000,28 +1117,58 @@ def run_lesson_word(
             except Exception as e:
                 logger.warning(f"Celebration audio failed: {e}")
                 _say(robot, praise_text, language)   # fallback: voice only
+
+            _collect_prefetch(_prefetch_thread, _next_word_data, prefetch_out)
             return "correct"
 
         # Wrong answer — shake head + play "uh oh" jingle simultaneously
         robot.express_wrong()  # non-blocking — animation runs while jingle plays
-        try:
-            uhoh = _generate_uhoh_jingle(robot.output_sample_rate)
-            robot.play_audio(uhoh, suppress_speak_anim=True)
-        except Exception as e:
-            logger.warning(f"Uh-oh jingle playback failed (non-fatal): {e}")
+
         if attempt < max_attempts:
             retry = random.choice([
                 f"Try again, {child_name}! Remember, it means {eng}. Say it!",
                 f"Almost! It means {eng}. One more time, {child_name}!",
                 f"You've got this, {child_name}! Say it!",
             ])
-            _say(robot, retry, language)
+            # Fetch retry TTS in a thread while the uhoh jingle plays (#4).
+            # By the time ~0.6 s of jingle finishes, TTS is ready to play.
+            _retry_result: list[bytes] = [b""]
+
+            def _fetch_retry() -> None:
+                _retry_result[0] = _fetch_tts_safe(retry, language)
+
+            _retry_thread = threading.Thread(target=_fetch_retry, daemon=True)
+            _retry_thread.start()
+            try:
+                uhoh = _generate_uhoh_jingle(robot.output_sample_rate)
+                robot.play_audio(uhoh, suppress_speak_anim=True)
+            except Exception as e:
+                logger.warning(f"Uh-oh jingle playback failed (non-fatal): {e}")
+            _retry_thread.join(timeout=15.0)
+            retry_mp3 = _retry_result[0]
+
+            if retry_mp3:
+                try:
+                    _play(robot, retry_mp3)
+                except Exception as e:
+                    logger.warning(f"Retry TTS playback failed: {e}")
+                    _say(robot, retry, language)
+            else:
+                _say(robot, retry, language)
+
             if tts_mp3:
                 try:
                     _play(robot, tts_mp3)
                     time.sleep(0.3)
                 except Exception:
                     pass
+        else:
+            # Last attempt — no retry needed, just play the jingle
+            try:
+                uhoh = _generate_uhoh_jingle(robot.output_sample_rate)
+                robot.play_audio(uhoh, suppress_speak_anim=True)
+            except Exception as e:
+                logger.warning(f"Uh-oh jingle playback failed (non-fatal): {e}")
 
     # ── Out of attempts — reveal the word ─────────────────────────────────────
     print(f"\n  ℹ️  The word was: {translation} ({romanized})\n")
@@ -1034,6 +1181,7 @@ def run_lesson_word(
             pass
     _say(robot, f"That's okay, {child_name}! Let's try the next one!", language)
     mini.media.start_recording()  # restore recording for the next word
+    _collect_prefetch(_prefetch_thread, _next_word_data, prefetch_out)
     return "revealed"
 
 
@@ -1098,12 +1246,21 @@ def run_lesson_session(
         else:
             time.sleep(1.5)
 
+        # next_prefetch carries {"word": ..., "tts_mp3": ...} produced during
+        # the recording window of the previous word, eliminating the word-fetch
+        # and word-TTS network round-trips at the start of each lesson.
+        next_prefetch: dict | None = None
+
         for i in range(num_words):
             print(f"\n=== Word {i + 1} of {num_words} ===")
+            prefetch_out: dict = {}
             outcome = run_lesson_word(
                 mini, robot, languages, categories, threshold, max_attempts,
                 child_name=child_name, mic_rate=mic_rate, debug_audio=debug_audio,
+                prefetch=next_prefetch,
+                prefetch_out=prefetch_out,
             )
+            next_prefetch = prefetch_out.get("next")
             if outcome == "correct":
                 score += 1
             elif outcome == "error":
