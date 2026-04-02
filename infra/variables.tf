@@ -41,7 +41,7 @@ variable "billing_account_id" {
 variable "budget_limit" {
   description = "Monthly budget limit in USD - kill-switch fires when this is hit"
   type        = number
-  default     = 50
+  default     = 15
 }
 
 variable "daily_budget_limit" {

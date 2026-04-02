@@ -5,9 +5,8 @@ resource "google_cloud_run_v2_service" "app" {
   name     = "dino-app"
   location = var.region
 
-  # Only accept traffic from the Global Load Balancer (and internal GCP services).
-  # This prevents direct *.run.app URL access that would bypass Cloud Armor WAF.
-  ingress = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  # Accept all traffic directly — no load balancer needed for a hobby project.
+  ingress = "INGRESS_TRAFFIC_ALL"
 
   template {
     scaling {

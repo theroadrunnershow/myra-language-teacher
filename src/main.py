@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import time
+from collections import defaultdict
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -33,6 +34,52 @@ app = FastAPI(title="Myra Language Teacher")
 app.state.dynamic_words_store = None
 
 
+class RateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-IP rate limiter (replaces Cloud Armor). Active only when APP_ENV=production."""
+
+    # (path_prefix, requests_per_minute) — first match wins
+    _RULES = [
+        ("/api/recognize", 10),
+        ("/api/tts", 30),
+        ("/api/dino-voice", 30),
+        ("/api/translate", 20),
+        ("/api/", 100),
+    ]
+
+    def __init__(self, app, enabled: bool = True):
+        super().__init__(app)
+        self._enabled = enabled
+        self._windows: dict = defaultdict(list)
+        self._lock = asyncio.Lock()
+
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if not self._enabled:
+            return await call_next(request)
+
+        client = getattr(request, "client", None)
+        ip = getattr(client, "host", "unknown") if client else "unknown"
+        path = request.url.path
+        now = time.time()
+        cutoff = now - 60.0
+
+        for prefix, limit in self._RULES:
+            if path.startswith(prefix):
+                key = (ip, prefix)
+                async with self._lock:
+                    ts = self._windows[key]
+                    self._windows[key] = [t for t in ts if t > cutoff]
+                    if len(self._windows[key]) >= limit:
+                        return Response(
+                            content='{"detail":"Too many requests"}',
+                            status_code=429,
+                            media_type="application/json",
+                        )
+                    self._windows[key].append(now)
+                break
+
+        return await call_next(request)
+
+
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add defensive security headers to every response."""
 
@@ -54,6 +101,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(SecurityHeadersMiddleware)
+
+# Rate limiting — enabled only in production (APP_ENV=production).
+# Disabled in dev/test so the test suite is unaffected.
+_rate_limit_enabled = os.environ.get("APP_ENV") == "production"
+app.add_middleware(RateLimitMiddleware, enabled=_rate_limit_enabled)
 
 app.add_middleware(
     CORSMiddleware,
