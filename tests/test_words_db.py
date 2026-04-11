@@ -5,6 +5,7 @@ All tests are pure (no I/O, no network, no mocking required) because the
 module is a self-contained in-memory database.
 """
 import random
+import re
 import pytest
 
 from words_db import (
@@ -21,6 +22,10 @@ from words_db import (
 
 SUPPORTED_LANGUAGES = ("telugu", "assamese")
 ROMAN_KEYS = {"telugu": "tel_roman", "assamese": "asm_roman"}
+
+
+def _normalize_english(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]+", "", text.lower())).strip()
 
 
 # ---------------------------------------------------------------------------
@@ -65,6 +70,26 @@ class TestDatabaseIntegrity:
             english_words = [w["english"] for w in words]
             assert len(english_words) == len(set(english_words)), (
                 f"Duplicate English words in category '{cat}'"
+            )
+
+    def test_phrases_have_non_empty_romanization(self):
+        for phrase in WORD_DATABASE["phrases"]:
+            assert phrase["tel_roman"].strip(), f"Empty Telugu romanization for '{phrase['english']}'"
+            assert phrase["asm_roman"].strip(), f"Empty Assamese romanization for '{phrase['english']}'"
+
+    def test_phrases_have_no_html_entities(self):
+        for phrase in WORD_DATABASE["phrases"]:
+            assert "&#" not in phrase["assamese"], f"HTML entity found in Assamese text for '{phrase['english']}'"
+            assert "&amp;" not in phrase["assamese"], f"HTML entity found in Assamese text for '{phrase['english']}'"
+
+    def test_phrases_have_no_normalized_duplicate_english(self):
+        normalized = [_normalize_english(p["english"]) for p in WORD_DATABASE["phrases"]]
+        assert len(normalized) == len(set(normalized)), "Duplicate normalized English phrases in 'phrases'"
+
+    def test_phrases_do_not_use_wrong_orange_article(self):
+        for phrase in WORD_DATABASE["phrases"]:
+            assert " a orange " not in f" {phrase['english'].lower()} ", (
+                f"Wrong article in phrase '{phrase['english']}'"
             )
 
 

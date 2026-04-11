@@ -4,7 +4,7 @@ A toddler-friendly web app that teaches Telugu and Assamese to Myra (age 4) thro
 
 ## Stack
 - **Backend**: Python / FastAPI (`main.py`), port 8000
-- **STT**: OpenAI Whisper (offline, lazy-loaded, `base` model ~140 MB)
+- **STT**: faster-whisper (CTranslate2 backend, `tiny` model, int8 CPU quantization)
 - **TTS**: gTTS (Google TTS, requires internet; Telugu=`te`, Assamese=`as`)
 - **Audio conversion**: pydub + ffmpeg (WebM/MP4/OGG → WAV for Whisper)
 - **Fuzzy matching**: rapidfuzz `token_sort_ratio`, threshold configurable in settings
@@ -15,7 +15,6 @@ A toddler-friendly web app that teaches Telugu and Assamese to Myra (age 4) thro
 - **Service**: Cloud Run (`dino-app`), min=0 / max=2 instances
 - **Resources**: 1 vCPU, 3 GB RAM per instance
 - **Registry**: Artifact Registry (`{region}-docker.pkg.dev/{project_id}/myra`)
-- **WAF**: Cloud Armor
 - **State backend**: GCS bucket `myra-tfstate/myra/terraform.tfstate`
 - **Budget kill-switch**: Cloud Run scales to 0 when monthly spend exceeds limit (`budgets.tf`)
 - **Scale-to-zero**: Native Cloud Run feature (`min_instance_count=0`)
@@ -27,13 +26,14 @@ myra-language-teacher/
 │   ├── main.py               # FastAPI app — all routes, request handling
 │   ├── speech_service.py     # Whisper STT + audio conversion pipeline
 │   ├── tts_service.py        # gTTS wrapper (async)
-│   ├── words_db.py           # In-memory word database (60+ words, 6 categories)
+│   ├── words_db.py           # In-memory word database (601 words, 8 categories)
 │   ├── translate_service.py  # Google Cloud Translate wrapper
 │   ├── dynamic_words_store.py # GCS-backed dynamic word cache
 │   └── robot_teacher.py      # Raspberry Pi / Reachy Mini robot controller
 ├── config.json           # Default server config (Assamese-focused)
 ├── requirements.txt      # Runtime dependencies
 ├── requirements-dev.txt  # Test dependencies (pytest, httpx, anyio)
+├── requirements-robot.txt # Robot-specific dependencies (Reachy Mini)
 ├── Dockerfile            # GCP Cloud Run image (Python 3.11-slim + ffmpeg)
 ├── pytest.ini            # Pytest config (asyncio_mode=auto, pythonpath=src)
 │
@@ -43,30 +43,39 @@ myra-language-teacher/
 │
 ├── static/
 │   ├── css/style.css     # Toddler-friendly bubbly pink theme
-│   └── js/app.js         # Vanilla JS state machine + animations
+│   ├── js/app.js         # Vanilla JS state machine + animations
+│   ├── js/mascots.js     # Mascot SVG/animation definitions
+│   └── favicon.svg
 │
 ├── tests/
-│   ├── conftest.py       # Stubs whisper/noisereduce; Whisper cache fixture
-│   ├── test_api.py       # FastAPI route tests (40+ tests)
-│   ├── test_words_db.py  # Database integrity tests (25+ tests)
-│   ├── test_speech_service.py  # STT pipeline tests (60+ tests)
-│   ├── test_tts_service.py    # TTS service tests
+│   ├── conftest.py       # Stubs faster-whisper/noisereduce; Whisper cache fixture
+│   ├── test_api.py       # FastAPI route tests (85 tests)
+│   ├── test_words_db.py  # Database integrity tests (26 tests)
+│   ├── test_speech_service.py  # STT pipeline tests (51 tests)
+│   ├── test_tts_service.py    # TTS service tests (21 tests)
+│   ├── test_robot_teacher.py  # Robot controller tests (15 tests)
+│   ├── test_translate_service.py # Translation service tests (21 tests)
+│   ├── test_dynamic_words_store.py # Dynamic word store tests (6 tests)
+│   ├── test_security.py       # Security/rate-limit tests (31 tests)
 │   └── test_bridge.py         # Audio bridge integration tests (requires live server)
 │
 ├── infra/
 │   ├── providers.tf      # GCS backend, Google provider ~5.0
 │   ├── cloud_run.tf      # Cloud Run service (scaling, probes, timeout)
 │   ├── artifact_registry.tf  # Docker image registry
-│   ├── cloud_armor.tf    # WAF rules
+│   ├── apis.tf           # GCP APIs to enable
 │   ├── variables.tf      # project_id, region, budget_limit, etc.
 │   ├── budgets.tf        # Monthly budget + kill-switch trigger
 │   ├── secret_manager.tf # GCP Secret Manager integration
-│   ├── load_balancer.tf  # Cloud Load Balancing
+│   ├── translate_iam.tf  # IAM for Cloud Translate
+│   ├── words_storage.tf  # GCS bucket for custom words
 │   ├── outputs.tf        # Service URL outputs
 │   ├── GCP_MIGRATION.md  # AWS → GCP migration notes
 │   └── lambda/
-│       ├── kill_ecs.py   # Legacy: AWS ECS scale-to-zero
-│       └── kill_run.py   # GCP: Cloud Run scale-to-zero
+│       ├── kill_ecs.py        # Legacy: AWS ECS scale-to-zero
+│       ├── kill_run.py        # GCP: Cloud Run scale-to-zero
+│       ├── restore_run.py     # GCP: restore Cloud Run min instances
+│       └── daily_guardrail.py # Daily spend guardrail check
 │
 ├── deploy/
 │   ├── bootstrap.sh      # Initial GCP project setup
@@ -77,8 +86,9 @@ myra-language-teacher/
 │   └── settings.json     # Claude Code preferences
 │
 └── tasks/
-    ├── todo.md           # Active task tracking
-    └── lessons.md        # Self-improvement notes after corrections
+    ├── plan-reachy-integration.md  # Reachy Mini robot integration plan
+    ├── security-review.md          # Security audit findings
+    └── ux-improvements.md          # UX enhancement proposals
 ```
 
 ## Running Locally
@@ -105,20 +115,24 @@ pytest -v                 # verbose output
 **Mocking strategy:**
 - `main.generate_tts` and `main.recognize_speech` are `AsyncMock`ed — no network/Whisper in API tests
 - `words_db` is **not** mocked — tests use real in-memory data
-- `conftest.py` stubs `whisper` and `noisereduce` at import time for `test_speech_service.py`
+- `conftest.py` stubs `faster_whisper` and `noisereduce` at import time for `test_speech_service.py`
 
 ## API Endpoints
 
 | Method | Endpoint | Purpose |
 |--------|----------|---------|
+| GET | `/health` | Lightweight Cloud Run liveness probe |
 | GET | `/` | Main learning page |
 | GET | `/settings` | Settings configuration page |
 | GET | `/api/config` | Returns merged default config (JSON) |
 | POST | `/api/config` | Validates and merges config; no server-side persistence |
 | GET | `/api/word` | Random word; supports `?languages=&categories=` query params |
+| GET | `/api/translate` | Translate English word to Telugu/Assamese (cache → db → GCP API) |
 | GET | `/api/tts` | Text-to-speech stream (audio/mpeg); params: `text`, `language`, `slow` |
+| GET | `/api/dino-voice` | English TTS for character voice lines |
 | POST | `/api/recognize` | Speech recognition; multipart form with audio file + metadata |
 | GET | `/api/words/all` | All words for given languages/categories |
+| POST | `/api/internal/words/sync` | Sync dynamic words to GCS (localhost-only) |
 
 ### `/api/recognize` Request Shape
 ```
@@ -140,24 +154,40 @@ File field:  audio (WebM/MP4/OGG/WAV bytes)
 }
 ```
 
-## Config Defaults (`config.json`)
+## Config Defaults
+
+**`DEFAULT_CONFIG` in `main.py`** (authoritative — sent to clients):
+```json
+{
+  "languages": ["telugu", "assamese"],
+  "categories": ["animals", "colors", "body_parts", "numbers", "food", "common_objects", "verbs", "phrases"],
+  "child_name": "",
+  "show_romanized": true,
+  "similarity_threshold": 50,
+  "max_attempts": 3,
+  "theme": "pink",
+  "mascot": "dino"
+}
+```
+
+**`config.json`** (file on disk — legacy/unused, kept for reference):
 ```json
 {
   "languages": ["assamese"],
   "categories": ["animals", "colors", "body_parts", "numbers", "food", "common_objects"],
-  "child_name": "Myra",
+  "child_name": "",
   "show_romanized": true,
   "similarity_threshold": 85,
   "max_attempts": 3
 }
 ```
 
-Config is **client-side (sessionStorage)** — no server-side persistence needed. The server's `config.json` provides defaults that are merged with sessionStorage on page load.
+Config is **client-side (sessionStorage)** — no server-side persistence. `GET /api/config` returns `DEFAULT_CONFIG` from `main.py`, merged with sessionStorage on page load.
 
 ## Word Database (`words_db.py`)
 
 **Structure:** Python dict, in-memory, immutable (no DB)
-**Coverage:** 60+ words across 6 categories, 2 languages
+**Coverage:** 601 words across 8 categories, 2 languages
 
 Each word entry:
 ```json
@@ -174,7 +204,7 @@ Each word entry:
 **Key functions:**
 - `get_random_word(category, language)` → single word dict
 - `get_all_words_for_language(language, categories)` → filtered list
-- `ALL_CATEGORIES` → `["animals", "colors", "body_parts", "numbers", "food", "common_objects"]`
+- `ALL_CATEGORIES` → `["animals", "colors", "body_parts", "numbers", "food", "common_objects", "verbs", "phrases"]`
 
 Romanized fields (`tel_roman`, `asm_roman`) are ASCII phonetic guides used as fallback targets in fuzzy matching.
 
@@ -203,27 +233,40 @@ Browser WebM/OGG/MP4 audio
 |------|---------|---------|
 | `NOISE_REDUCTION_ENABLED` | `False` | Spectral subtraction + high-pass filter |
 | `INITIAL_PROMPT_ENABLED` | `True` | Bias Whisper with expected word |
+| `DISABLE_PASS1` | `False` (env var) | Skip native-language pass; use English-only pass |
+
+### Whisper Backend
+- **Library:** `faster-whisper` (CTranslate2, ~4× faster than openai-whisper on CPU)
+- **Model:** `tiny`, `int8` compute type, `beam_size=1` (greedy), `vad_filter=True`
 
 ### Similarity Scoring
 - **Algorithm:** `rapidfuzz.token_sort_ratio` (0–100)
 - **Normalization:** Unicode NFC, lowercase, strip punctuation
-- **Threshold:** Configurable per session (default 85)
+- **Threshold:** Configurable per session (default 50)
 
 ## Frontend Architecture (`static/js/app.js`)
 
 ### State Object
 ```javascript
 {
-  currentWord: null,
-  config: {},
+  currentWord: null,        // {english, translation, emoji, romanized, language, category}
+  config: {},               // merged server defaults + sessionStorage
   score: 0,
   wordsAttempted: 0,
   attempts: 0,
   maxAttempts: 3,
+  streak: 0,                // consecutive correct answers
   isRecording: false,
   mediaRecorder: null,
   audioChunks: [],
-  pendingTimeoutIds: []   // tracks cancellable timers (Stop button)
+  recTimerInterval: null,
+  ttsAudio: null,           // current word pronunciation Audio object
+  voiceAudio: null,         // character voice line Audio object
+  pendingTimeoutIds: [],    // cancellable timers (Stop button)
+  stopRequested: false,
+  blinkTimerId: null,
+  generation: 0,            // incremented on new word/stop (async cancellation)
+  activeMascot: "dino"      // dino | cat | dog | panda | fox | rabbit
 }
 ```
 
@@ -257,7 +300,7 @@ Mouth is animated via SVG path manipulation in `animateMouth(open)` with 130ms p
 ### Dockerfile Key Notes
 - Base: `python:3.11-slim`
 - ffmpeg installed at build time
-- Whisper `base` model **pre-downloaded** during image build (avoids cold-start delay)
+- faster-whisper `tiny` model **pre-downloaded** during image build (avoids cold-start delay)
 - Single `uvicorn` worker (keeps Whisper model in RAM)
 - Port 8000
 
@@ -328,12 +371,12 @@ terraform apply -var="project_id=<YOUR_PROJECT>"
 - Go fix failing CI tests without being told how
 
 ## Task Management
-1. **Plan First**: Write plan to `tasks/todo.md` with checkable items
+1. **Plan First**: Use TodoWrite to track tasks with checkable items
 2. **Verify Plan**: Check in before starting implementation
 3. **Track Progress**: Mark items complete as you go
 4. **Explain Changes**: High-level summary at each step
-5. **Document Results**: Add review section to `tasks/todo.md`
-6. **Capture Lessons**: Update `tasks/lessons.md` after corrections
+5. **Document Results**: Review in final response after task completes
+6. **Capture Lessons**: Use memory system to record corrections for future sessions
 
 ## Core Principles
 - **Simplicity First**: Make every change as simple as possible. Impact minimal code.
