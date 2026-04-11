@@ -30,7 +30,7 @@ ROMAN_KEYS = {"telugu": "tel_roman", "assamese": "asm_roman"}
 
 class TestDatabaseIntegrity:
     def test_all_categories_present(self):
-        expected = {"animals", "colors", "body_parts", "numbers", "food", "common_objects", "verbs"}
+        expected = {"animals", "colors", "body_parts", "numbers", "food", "common_objects", "verbs", "phrases"}
         assert set(ALL_CATEGORIES) == expected
 
     def test_every_word_has_required_keys(self):
@@ -56,6 +56,9 @@ class TestDatabaseIntegrity:
             assert len(WORD_DATABASE[cat]) >= 6, (
                 f"Category '{cat}' has fewer than 6 words"
             )
+
+    def test_phrases_category_has_500_added_entries(self):
+        assert len(WORD_DATABASE['phrases']) >= 512
 
     def test_no_duplicate_english_words_per_category(self):
         for cat, words in WORD_DATABASE.items():

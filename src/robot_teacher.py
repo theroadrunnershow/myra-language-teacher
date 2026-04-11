@@ -79,6 +79,8 @@ DEFAULT_THRESHOLD = 50   # permissive for a 4-year-old
 
 DEFAULT_LANGUAGES = ["telugu", "assamese"]
 DEFAULT_CATEGORIES = ["animals", "colors", "food", "numbers"]
+REPLAY_WORD_BATCH = 5
+PLAY_AGAIN_RECORD_DURATION_SEC = 4.0
 
 # Directory containing main.py — used to start the server subprocess.
 # Auto-detects: if main.py is next to this script use that dir, otherwise
@@ -474,6 +476,8 @@ class RobotController:
         self._speaker_primed = False
         self._stop_event = threading.Event()
         self._bg_thread: threading.Thread | None = None
+        self._bg_generation = 0
+        self._motion_lock = threading.Lock()
         self._motion_failure_count = 0
         self._motion_cooldown_until = 0.0
         self._last_motion_error: str | None = None
@@ -482,61 +486,124 @@ class RobotController:
 
     def _stop_background(self):
         """Signal any running background loop to stop and wait for it."""
+        self._bg_generation += 1
         self._stop_event.set()
-        if self._bg_thread and self._bg_thread.is_alive():
+        bg_thread = self._bg_thread
+        if bg_thread and bg_thread.is_alive():
             # Skip join when called from within the background thread itself
             # (e.g. _celebrate_loop calling idle() at its end) — joining the
             # current thread raises RuntimeError("cannot join current thread").
-            if self._bg_thread is not threading.current_thread():
-                self._bg_thread.join(timeout=4.0)
-        self._stop_event.clear()
+            if bg_thread is not threading.current_thread():
+                bg_thread.join(timeout=4.0)
+                if bg_thread.is_alive():
+                    logger.warning(
+                        "Previous robot animation thread did not stop within 4.0s; "
+                        "suppressing stale motions until it exits."
+                    )
         self._bg_thread = None
 
     def _start_background(self, target, *args):
         self._stop_background()
-        self._bg_thread = threading.Thread(target=target, args=args, daemon=True)
+        self._stop_event.clear()
+        token = self._bg_generation
+        self._bg_thread = threading.Thread(target=target, args=(token, *args), daemon=True)
         self._bg_thread.start()
 
-    def _sleep_interruptibly(self, duration: float):
+    def _background_should_stop(self, token: int | None = None) -> bool:
+        if token is None:
+            return False
+        if self._stop_event.is_set():
+            return True
+        return token != self._bg_generation
+
+    def _sleep_interruptibly(self, duration: float, token: int | None = None):
         """Sleep in small increments so stop requests interrupt animation cooldowns."""
         remaining = max(float(duration), 0.0)
-        while remaining > 0 and not self._stop_event.is_set():
+        while remaining > 0 and not self._background_should_stop(token):
             step = min(remaining, 0.05)
             time.sleep(step)
             remaining -= step
 
-    def _goto_target_safe(self, context: str, preserve_timing: bool = False, **kwargs) -> bool:
+    def _record_motion_failure(self, context: str, error: Exception, duration: float) -> bool:
+        self._motion_failure_count += 1
+        backoff = min(5.0, max(duration, 0.2) * min(self._motion_failure_count, 5))
+        self._motion_cooldown_until = time.monotonic() + backoff
+        error_text = f"{type(error).__name__}: {error}"
+        if error_text != self._last_motion_error:
+            logger.warning(
+                "Robot motion failed during %s: %s. Continuing without this animation; "
+                "check motor connections and power if this persists.",
+                context,
+                error_text,
+            )
+            self._last_motion_error = error_text
+        return False
+
+    def _acquire_motion_slot(
+        self, duration: float, token: int | None = None, timeout_slack: float = 0.35
+    ) -> bool:
+        deadline = time.monotonic() + max(duration + timeout_slack, 0.5)
+        while time.monotonic() < deadline and not self._background_should_stop(token):
+            remaining = deadline - time.monotonic()
+            if self._motion_lock.acquire(timeout=min(0.05, max(remaining, 0.0))):
+                return True
+        return False
+
+    def _goto_target_safe(
+        self,
+        context: str,
+        preserve_timing: bool = False,
+        token: int | None = None,
+        **kwargs,
+    ) -> bool:
         """Run a robot motion without letting hardware faults kill the lesson flow."""
         duration = max(float(kwargs.get("duration", 0.0) or 0.0), 0.0)
+        if self._background_should_stop(token):
+            return False
         now = time.monotonic()
         if now < self._motion_cooldown_until:
             if preserve_timing and duration:
-                self._sleep_interruptibly(duration)
+                self._sleep_interruptibly(duration, token=token)
             return False
 
-        try:
-            self._mini.goto_target(**kwargs)
-        except Exception as e:
-            self._motion_failure_count += 1
-            backoff = min(5.0, max(duration, 0.2) * min(self._motion_failure_count, 5))
-            self._motion_cooldown_until = time.monotonic() + backoff
-            error_text = f"{type(e).__name__}: {e}"
-            if error_text != self._last_motion_error:
-                logger.warning(
-                    "Robot motion failed during %s: %s. Continuing without this animation; "
-                    "check motor connections and power if this persists.",
+        motion_kwargs = dict(kwargs)
+        for attempt in range(2):
+            attempt_duration = max(float(motion_kwargs.get("duration", 0.0) or 0.0), 0.0)
+            if not self._acquire_motion_slot(attempt_duration, token=token):
+                if self._background_should_stop(token):
+                    return False
+                return self._record_motion_failure(
                     context,
-                    error_text,
+                    TimeoutError("Previous motion is still in progress."),
+                    attempt_duration,
                 )
-                self._last_motion_error = error_text
-            return False
 
-        if self._motion_failure_count:
-            logger.info("Robot motion recovered.")
-        self._motion_failure_count = 0
-        self._motion_cooldown_until = 0.0
-        self._last_motion_error = None
-        return True
+            try:
+                self._mini.goto_target(**motion_kwargs)
+            except TimeoutError as e:
+                if attempt == 0 and not self._background_should_stop(token):
+                    retry_duration = max(attempt_duration * 2.0, attempt_duration + 0.25, 0.5)
+                    motion_kwargs = {**motion_kwargs, "duration": retry_duration}
+                    logger.info(
+                        "Robot motion timed out during %s; retrying once with %.2fs duration.",
+                        context,
+                        retry_duration,
+                    )
+                    continue
+                return self._record_motion_failure(context, e, attempt_duration)
+            except Exception as e:
+                return self._record_motion_failure(context, e, attempt_duration)
+            else:
+                if self._motion_failure_count:
+                    logger.info("Robot motion recovered.")
+                self._motion_failure_count = 0
+                self._motion_cooldown_until = 0.0
+                self._last_motion_error = None
+                return True
+            finally:
+                self._motion_lock.release()
+
+        return False
 
     # ── Idle: slow head sway, relaxed antennas ─────────────────────────────────
 
@@ -544,21 +611,23 @@ class RobotController:
         """Start looping idle sway animation in the background."""
         self._start_background(self._idle_loop)
 
-    def _idle_loop(self):
-        while not self._stop_event.is_set():
+    def _idle_loop(self, token: int):
+        while not self._background_should_stop(token):
             self._goto_target_safe(
                 "idle sway left",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(roll=8, degrees=True),
                 antennas=np.deg2rad([30, 30]),
                 duration=2.0,
                 method="minjerk",
             )
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 break
             self._goto_target_safe(
                 "idle sway right",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(roll=-8, degrees=True),
                 antennas=np.deg2rad([30, 30]),
                 duration=2.0,
@@ -584,20 +653,22 @@ class RobotController:
         """Start looping speak animation in the background."""
         self._start_background(self._speak_loop)
 
-    def _speak_loop(self):
-        while not self._stop_event.is_set():
+    def _speak_loop(self, token: int):
+        while not self._background_should_stop(token):
             self._goto_target_safe(
                 "speak nod up",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(z=6, mm=True),
                 antennas=np.deg2rad([45, 20]),
                 duration=0.3,
             )
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 break
             self._goto_target_safe(
                 "speak nod down",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(z=-2, mm=True),
                 antennas=np.deg2rad([20, 45]),
                 duration=0.3,
@@ -610,31 +681,32 @@ class RobotController:
 
         Returns immediately so audio can play in parallel.
         """
-        self._stop_background()
-        self._bg_thread = threading.Thread(target=self._celebrate_loop, daemon=True)
-        self._bg_thread.start()
+        self._start_background(self._celebrate_loop)
 
-    def _celebrate_loop(self):
+    def _celebrate_loop(self, token: int):
         for _ in range(3):
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 return
             self._goto_target_safe(
                 "celebrate bob up",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(z=15, mm=True),
                 antennas=[0.8, -0.8],
                 duration=0.3,
             )
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 return
             self._goto_target_safe(
                 "celebrate bob down",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(z=-5, mm=True),
                 antennas=[-0.8, 0.8],
                 duration=0.3,
             )
-        self.idle()
+        if not self._background_should_stop(token):
+            self.idle()
 
     # ── Wrong: head shake + drooping antennas ─────────────────────────────────
 
@@ -643,42 +715,45 @@ class RobotController:
 
         Returns immediately so the uh-oh jingle can play in parallel.
         """
-        self._stop_background()
-        self._bg_thread = threading.Thread(target=self._express_wrong_loop, daemon=True)
-        self._bg_thread.start()
+        self._start_background(self._express_wrong_loop)
 
-    def _express_wrong_loop(self):
+    def _express_wrong_loop(self, token: int):
         # Droop antennas first so they're set before the shaking starts
         self._goto_target_safe(
             "wrong pose antennas droop",
+            token=token,
             antennas=np.deg2rad([-30, -30]),
             duration=0.2,
         )
         for _ in range(3):
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 return
             self._goto_target_safe(
                 "wrong shake left",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(yaw=18, degrees=True),
                 duration=0.22,
             )
-            if self._stop_event.is_set():
+            if self._background_should_stop(token):
                 return
             self._goto_target_safe(
                 "wrong shake right",
                 preserve_timing=True,
+                token=token,
                 head=create_head_pose(yaw=-18, degrees=True),
                 duration=0.22,
             )
-        if not self._stop_event.is_set():
+        if not self._background_should_stop(token):
             self._goto_target_safe(
                 "wrong reset pose",
+                token=token,
                 head=create_head_pose(yaw=0, degrees=True),
                 antennas=np.deg2rad([0, 0]),
                 duration=0.35,
             )
-        self.idle()
+        if not self._background_should_stop(token):
+            self.idle()
 
     # ── Synchronized audio playback ───────────────────────────────────────────
 
@@ -837,6 +912,103 @@ def _collect_prefetch(
         thread.join(timeout=timeout)
     if data:
         out["next"] = data
+
+
+def _interpret_play_again_transcript(transcribed: str) -> bool | None:
+    """Map recognized speech to yes/no, returning None when unclear."""
+    normalized = re.sub(r"[^a-z\s]", " ", (transcribed or "").strip().lower())
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return None
+
+    yes_tokens = {"yes", "yeah", "yep", "yup", "sure", "okay", "ok", "again", "more"}
+    no_tokens = {"no", "nope", "nah", "done", "stop", "finished"}
+    tokens = set(normalized.split())
+
+    if "not" in tokens and "again" in tokens:
+        return False
+    if tokens & no_tokens:
+        return False
+    if tokens & yes_tokens:
+        return True
+    return None
+
+
+def _capture_play_again_response(
+    mini,
+    mic_rate: int,
+    duration: float = PLAY_AGAIN_RECORD_DURATION_SEC,
+) -> str:
+    """Capture a short spoken yes/no answer and return the recognized transcript."""
+    mini.media.start_recording()
+    time.sleep(0.3)
+    _drain_input_audio_queue(mini, mic_rate, max_duration=1.0)
+
+    chunks = []
+    deadline = time.time() + max(float(duration), 0.0)
+    while time.time() < deadline:
+        sample = mini.media.get_audio_sample()
+        if sample is not None:
+            mono = _extract_first_channel(sample)
+            if mono.size:
+                chunks.append(mono)
+        time.sleep(0.02)
+
+    mini.media.stop_recording()
+
+    if not chunks:
+        logger.info("Play-again prompt heard no speech.")
+        return ""
+
+    raw = np.concatenate(chunks)
+    wav_bytes = mic_samples_to_wav_bytes(raw, actual_rate=mic_rate)
+    try:
+        result = api_recognize(
+            wav_bytes,
+            language="english",
+            expected_word="yes or no",
+            romanized="yes or no",
+            threshold=0,
+        )
+    except Exception as exc:
+        logger.warning("Play-again recognition failed: %s", exc)
+        return ""
+
+    transcript = (result.get("transcribed") or "").strip()
+    logger.info("Play-again transcript: %r", transcript)
+    return transcript
+
+
+def _prompt_play_again(
+    mini,
+    robot: RobotController,
+    child_name: str,
+    mic_rate: int,
+    recognize_func=_capture_play_again_response,
+    duration: float = PLAY_AGAIN_RECORD_DURATION_SEC,
+) -> bool:
+    """Ask whether to continue the lesson, using spoken mic recognition."""
+    ask_line = random.choice([
+        f"Play again, {child_name}? We can learn {REPLAY_WORD_BATCH} more words!",
+        f"Do you want to keep going, {child_name}? I have {REPLAY_WORD_BATCH} more words ready!",
+        f"Play again? If you want, we can do {REPLAY_WORD_BATCH} more words!",
+    ])
+    robot.idle()
+    _say(robot, ask_line)
+
+    print(f"Play again? Listening for {duration:.0f} seconds...")
+    transcript = recognize_func(mini, mic_rate, duration)
+    decision = _interpret_play_again_transcript(transcript)
+    if decision is True:
+        return True
+    if decision is False:
+        return False
+
+    if transcript:
+        logger.info("Treating unclear play-again response %r as 'no'.", transcript)
+    else:
+        logger.info("No play-again response received; ending session.")
+    return False
 
 
 # ── Single-word lesson cycle ───────────────────────────────────────────────────
@@ -1195,6 +1367,7 @@ def run_lesson_session(
     max_attempts: int,
     child_name: str = "friend",
     debug_audio: bool = False,
+    play_again_prompt_func=None,
 ):
     """Manage the ReachyMini context and run a full lesson session."""
     if not _ROBOT_SDK_AVAILABLE:
@@ -1205,6 +1378,10 @@ def run_lesson_session(
         )
 
     score = 0
+    words_completed = 0
+    session_target_words = num_words
+    if play_again_prompt_func is None:
+        play_again_prompt_func = _prompt_play_again
 
     with ReachyMini(media_backend="default") as mini:
         robot = RobotController(mini)
@@ -1251,8 +1428,8 @@ def run_lesson_session(
         # and word-TTS network round-trips at the start of each lesson.
         next_prefetch: dict | None = None
 
-        for i in range(num_words):
-            print(f"\n=== Word {i + 1} of {num_words} ===")
+        while words_completed < session_target_words:
+            print(f"\n=== Word {words_completed + 1} of {session_target_words} ===")
             prefetch_out: dict = {}
             outcome = run_lesson_word(
                 mini, robot, languages, categories, threshold, max_attempts,
@@ -1261,20 +1438,35 @@ def run_lesson_session(
                 prefetch_out=prefetch_out,
             )
             next_prefetch = prefetch_out.get("next")
+            words_completed += 1
             if outcome == "correct":
                 score += 1
             elif outcome == "error":
                 logger.warning("Skipping word due to error.")
 
+            if words_completed < session_target_words:
+                continue
+
+            print(f"\n  Completed {words_completed} words.")
+            if not play_again_prompt_func(mini, robot, child_name, mic_rate):
+                break
+
+            session_target_words += REPLAY_WORD_BATCH
+            print(
+                f"  ▶ Adding {REPLAY_WORD_BATCH} more words. "
+                f"New session size: {session_target_words}"
+            )
+            _say(robot, f"Yay {child_name}! Let's learn {REPLAY_WORD_BATCH} more words!")
+
         # ── End of session ─────────────────────────────────────────────────────
         print("\n" + "=" * 44)
-        print(f"  Session complete!  Score: {score} / {num_words}")
+        print(f"  Session complete!  Score: {score} / {words_completed}")
         print("=" * 44 + "\n")
 
         robot.celebrate()
         end_line = random.choice([
-            f"Great job {child_name}! We learned {num_words} words today!",
-            f"You got {score} out of {num_words}! You are amazing, {child_name}!",
+            f"Great job {child_name}! We learned {words_completed} words today!",
+            f"You got {score} out of {words_completed}! You are amazing, {child_name}!",
         ])
         _say(robot, end_line)
 
