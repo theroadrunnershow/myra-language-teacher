@@ -8,22 +8,24 @@ A fun, toddler-friendly web app that teaches **Telugu**, **Assamese**, **Tamil**
 - 🔊 **Hear It!** – plays just the target-language word via TTS
 - 🎤 **Say It!** – dino says *"Myra, repeat after me! word"* then listens via microphone
 - 🔁 After a wrong answer the prompt replays automatically before the next attempt
-- 📚 **60+ words** across 6 categories (Animals, Colors, Body Parts, Numbers, Food, Objects)
+- 📚 **600+ words** across 8 categories (Animals, Colors, Body Parts, Numbers, Food, Common Objects, Verbs, Phrases)
 - 🌟 Score tracking with confetti celebrations on correct answers
+- 🎨 6 colour themes and 6 mascots (dino, cat, dog, panda, fox, rabbit)
 - 🐛 **Debug panel** – shows exactly what Whisper heard and the match score (useful while tuning)
 - ⚙️ **Settings page** – configure child's name, languages, categories, and difficulty
 
 ## 🛠 Tech Stack
 
 
-| Layer            | Technology                                             |
-| ---------------- | ------------------------------------------------------ |
-| Backend          | Python 3.10+ / FastAPI                                 |
-| Speech-to-Text   | OpenAI Whisper `20250625` (offline, no API key needed) |
-| Text-to-Speech   | gTTS (Google TTS, requires internet)                   |
-| Audio conversion | pydub + ffmpeg (WebM / MP4 / OGG → WAV)                |
-| Fuzzy matching   | rapidfuzz (`token_sort_ratio`, 0–100 scale)            |
-| Frontend         | Vanilla HTML / CSS / JS + Jinja2 templates             |
+| Layer            | Technology                                                  |
+| ---------------- | ----------------------------------------------------------- |
+| Backend          | Python 3.11 / FastAPI                                       |
+| Speech-to-Text   | faster-whisper (`tiny` model, CTranslate2, offline, no API key needed) |
+| Text-to-Speech   | gTTS (Google TTS, requires internet)                        |
+| Audio conversion | pydub + ffmpeg (WebM / MP4 / OGG → WAV)                     |
+| Fuzzy matching   | rapidfuzz (`token_sort_ratio`, 0–100 scale)                 |
+| Translation      | Google Cloud Translate (on-demand, cached to GCS)           |
+| Frontend         | Vanilla HTML / CSS / JS + Jinja2 templates                  |
 
 
 ---
@@ -33,7 +35,7 @@ A fun, toddler-friendly web app that teaches **Telugu**, **Assamese**, **Tamil**
 ### 1. Prerequisites
 
 ```bash
-# Python 3.10+
+# Python 3.11+
 python3 --version
 
 # ffmpeg (required by pydub for audio conversion)
@@ -57,12 +59,12 @@ source venv/bin/activate     # macOS/Linux
 pip install -r requirements.txt
 ```
 
-> The Whisper `base` model (~140 MB) downloads automatically on the **first** speech recognition call.
+> The faster-whisper `tiny` model (~39 MB) downloads automatically on the **first** speech recognition call if not already cached locally.
 
 ### 4. Run the server
 
 ```bash
-python main.py
+PYTHONPATH=src python src/main.py
 ```
 
 Open **[http://localhost:8000](http://localhost:8000)** in your browser.
@@ -209,8 +211,8 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 ### Speech recognition details
 
 - Audio MIME type is detected from the browser (`audio/webm`, `audio/mp4`, etc.) and the correct extension is used when converting with ffmpeg.
-- Whisper is run with the target language forced (`te` for Telugu, `as` for Assamese, `ta` for Tamil, `ml` for Malayalam). If the output is too short, it falls back to auto-detect.
-- Matching runs twice: once against the **native script** and once against the **romanized pronunciation** (e.g. "pilli"). The higher of the two scores is used — this handles cases where Whisper outputs Latin transliteration instead of the native script.
+- Whisper is run **twice per recording** (dual-pass): once forced to the target language (e.g. `te` for Telugu) to get native script output, and once forced to English for romanized/phonetic output. The higher score of the two passes is used — this handles Whisper's tendency to output Latin transliteration instead of the native script.
+- Matching runs against both the **native script** and the **romanized pronunciation** (e.g. "pilli"). The higher of the two scores wins.
 
 ---
 
@@ -219,17 +221,19 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 Visit **[http://localhost:8000/settings](http://localhost:8000/settings)** to configure:
 
 
-| Setting           | Description                                                     |
-| ----------------- | --------------------------------------------------------------- |
-| Child's name      | Used in the spoken prompt ("Myra, repeat after me!") and header |
-| Languages         | Telugu, Assamese, Tamil, Malayalam, or a mixed lesson rotation  |
-| Categories        | Animals, Colors, Body Parts, Numbers, Food, Common Objects      |
-| Show romanized    | Show phonetic pronunciation guide below the translation         |
-| Accuracy required | Minimum fuzzy-match score to count as correct (30–90%)          |
-| Max attempts      | How many tries before auto-advancing (2–5)                      |
+| Setting           | Description                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------ |
+| Child's name      | Used in the spoken prompt ("Myra, repeat after me!") and header                      |
+| Languages         | Telugu, Assamese, Tamil, Malayalam, or a mixed lesson rotation                       |
+| Categories        | Animals, Colors, Body Parts, Numbers, Food, Common Objects, Verbs, Phrases           |
+| Show romanized    | Show phonetic pronunciation guide below the translation                              |
+| Accuracy required | Minimum fuzzy-match score to count as correct (30–90%)                               |
+| Max attempts      | How many tries before auto-advancing (2–5)                                           |
+| Theme             | Colour theme: pink, blue, green, purple, orange, or yellow                           |
+| Mascot            | Character: dino, cat, dog, panda, fox, or rabbit                                     |
 
 
-Settings are saved to `config.json` and take effect immediately.
+Settings are stored in **browser sessionStorage** and take effect immediately. They are not persisted server-side.
 
 ---
 
@@ -260,109 +264,128 @@ Use this to quickly diagnose problems:
 
 ```
 myra-language-teacher/
-├── main.py              # FastAPI app & all API routes
-├── words_db.py          # Word database (Telugu + Assamese + Tamil + Malayalam + romanized)
-├── speech_service.py    # Whisper STT, MIME detection, romanized fallback
-├── tts_service.py       # gTTS text-to-speech (async wrapper)
+├── src/
+│   ├── main.py                  # FastAPI app & all API routes
+│   ├── words_db.py              # Word database (600+ words across 4 languages)
+│   ├── speech_service.py        # faster-whisper STT, dual-pass, MIME detection
+│   ├── tts_service.py           # gTTS text-to-speech (async wrapper)
+│   ├── translate_service.py     # Google Cloud Translate (on-demand, cached)
+│   ├── dynamic_words_store.py   # GCS-backed dynamic word cache
+│   └── robot_teacher.py         # Reachy Mini lesson driver (runs on Pi)
 ├── requirements.txt
-├── requirements-robot.txt # Robot mode deps (Reachy Mini, soundfile, requests) — install on Raspberry Pi
-├── robot_teacher.py       # Reachy Mini lesson driver (runs on Pi)
-├── test_bridge.py         # Tests audio/TTS bridge (no robot required)
-├── config.json            # Auto-created on first run; stores your settings
+├── requirements-dev.txt         # Test dependencies (pytest, httpx, anyio)
+├── requirements-robot.txt       # Robot mode deps (Reachy Mini, soundfile, requests)
+├── Dockerfile                   # GCP Cloud Run image (Python 3.11-slim + ffmpeg + pre-cached Whisper model)
+├── pytest.ini
 ├── templates/
-│   ├── index.html       # Main learning page (pink dino SVG + lesson UI)
-│   └── config.html      # Settings page
-└── static/
-    ├── css/style.css    # All styles + animations
-    └── js/app.js        # Recording, TTS playback, confetti, dino expressions
+│   ├── index.html               # Main learning page (pink dino SVG + lesson UI)
+│   └── config.html              # Settings page
+├── static/
+│   ├── css/style.css            # All styles + animations
+│   └── js/app.js                # Recording, TTS playback, confetti, dino expressions
+├── tests/
+│   ├── conftest.py              # Stubs faster-whisper / noisereduce at import time
+│   ├── test_api.py              # FastAPI route tests
+│   ├── test_words_db.py         # Database integrity tests
+│   ├── test_speech_service.py   # STT pipeline tests
+│   ├── test_tts_service.py      # TTS service tests
+│   ├── test_robot_teacher.py    # Reachy Mini integration tests
+│   ├── test_translate_service.py
+│   ├── test_dynamic_words_store.py
+│   ├── test_security.py         # Security / rate-limit tests
+│   └── test_bridge.py           # Audio bridge integration (requires live server on :8765)
+├── infra/                       # Terraform — GCP Cloud Run infrastructure
+│   ├── providers.tf
+│   ├── cloud_run.tf
+│   ├── artifact_registry.tf
+│   ├── budgets.tf
+│   ├── secret_manager.tf
+│   ├── variables.tf
+│   └── GCP_MIGRATION.md         # AWS → GCP migration notes
+└── deploy/
+    ├── bootstrap.sh             # Initial GCP project setup
+    └── build-push.sh            # Docker build + push to Artifact Registry
 ```
 
 ---
 
-## 🔮 AWS Deployment Plan
+## ☁️ GCP Deployment
 
 ### Architecture
 
 ```
-Browser ──HTTPS──▶ CloudFront ──▶ WAF ──▶ ALB ──▶ ECS Fargate (FastAPI + Whisper)
-                        │                              │
-                        ▼                              ▼
-                       S3                         NAT Gateway ──▶ Google (gTTS)
-                 (static frontend)
+Browser ──HTTPS──▶ Cloud Run (FastAPI + faster-whisper)
+                        │
+                        ├──▶ Google TTS (gTTS, internet)
+                        ├──▶ Google Cloud Translate (on-demand translations)
+                        └──▶ GCS (dynamic word cache + Terraform state)
 ```
 
 
-| Component          | AWS service                  | Notes                                                                            |
-| ------------------ | ---------------------------- | -------------------------------------------------------------------------------- |
-| Frontend           | S3 + CloudFront              | Static HTML/CSS/JS; CDN edge caching                                             |
-| Backend            | ECS Fargate                  | Whisper stays warm in memory; Lambda too slow (cold-start re-loads 140 MB model) |
-| Load balancer      | ALB                          | Health-checks ECS; only public entry point to private subnet                     |
-| Networking         | VPC (public/private subnets) | ECS has no public IP; only ALB exposed                                           |
-| Container registry | ECR                          | Private; image scanning enabled                                                  |
-| Config storage     | SSM Parameter Store          | Replaces `config.json`; encrypted at rest                                        |
-| TTS (future)       | Amazon Polly                 | Eliminates Google dependency; Telugu supported                                   |
+| Component          | GCP service                  | Notes                                                                        |
+| ------------------ | ---------------------------- | ---------------------------------------------------------------------------- |
+| Backend            | Cloud Run (`dino-app`)       | 1 vCPU, 3 GB RAM; scales 0–2 instances; single Uvicorn worker keeps Whisper warm |
+| Container registry | Artifact Registry            | Private; image tagged `latest`                                               |
+| Translation cache  | GCS bucket                   | On-demand translations cached to avoid repeat API calls                      |
+| Dynamic words      | GCS bucket                   | Custom word lists synced from the Pi                                         |
+| Secrets            | Secret Manager               | API keys and env config                                                      |
+| State backend      | GCS bucket (`myra-tfstate`)  | Terraform remote state                                                       |
 
 
-### DDoS / Cost Guardrails (no login required)
+### Scale-to-Zero & Cost Guardrails
 
-**WAF rate limits** (at CloudFront edge — bots never reach ECS):
+**Cloud Run** scales to zero when idle — no running instances means $0 compute cost:
 
+- `min_instance_count = 0` — scales to zero when idle
+- `max_instance_count = 2` — hard cap on concurrent instances
+
+**Budget kill-switch** (`infra/budgets.tf`):
+
+| Threshold            | Action                                                               |
+| -------------------- | -------------------------------------------------------------------- |
+| Monthly limit (default $15) | Cloud Scheduler trigger scales Cloud Run to 0; app goes offline |
+
+Restart manually when ready.
+
+**Rate limiting** (FastAPI middleware — applied before requests reach the app):
 
 | Endpoint           | Limit per IP |
 | ------------------ | ------------ |
 | `/api/recognize`   | 10 req/min   |
 | `/api/tts`         | 30 req/min   |
-| All other `/api/`* | 100 req/min  |
+| All other `/api/*` | 100 req/min  |
 
+**Audio size limit:** 10 MB hard cap on uploaded audio in FastAPI. A 5-second recording is ~160 KB — 10 MB is 60× headroom for legitimate use.
 
-**ECS hard cap:** max 2 Fargate tasks. Auto-scaling can never spin up more, bounding compute cost regardless of traffic.
+### Build & Deploy
 
-**Audio size limit:** 5 MB hard cap on uploaded audio in FastAPI. A 5-second recording is ~160 KB — 5 MB is 30× headroom for legitimate use.
+**Build and push the Docker image to Artifact Registry:**
 
-**Single budget — $50/month hard kill:**
-
-
-| Threshold  | Action                                                                                     |
-| ---------- | ------------------------------------------------------------------------------------------ |
-| $40 (80%)  | Email alert → "investigate"                                                                |
-| $50 (100%) | **Automated kill** — Budget Action sets ECS desired tasks to 0; SNS push notification sent |
-
-
-App goes offline when the kill fires. Restart manually via console or CLI when ready.
-
-**Nightly scale-to-zero** (EventBridge Scheduler):
-
-- `8:00 PM` → ECS desired = 0
-- `7:30 AM` → ECS desired = 1
-- Saves ~$15–18/month vs always-on
-
-**Cost Anomaly Detection:** free AWS ML service; emails on unusual spending spikes.
-
-### Estimated Monthly Cost
-
-
-| Scenario                                                     | Cost                    |
-| ------------------------------------------------------------ | ----------------------- |
-| Normal home use (evenings + weekends, nightly scale-to-zero) | ~$22–28/mo              |
-| Heavy all-day use                                            | ~$42/mo                 |
-| DDoS hits (WAF throttles, ECS capped at 2 tasks)             | ~$48/mo                 |
-| Hard stop triggers                                           | ≤ $50, app goes offline |
-
-
-### Files to Add for Deployment
-
+```bash
+./deploy/build-push.sh
 ```
-myra-language-teacher/
-├── Dockerfile           # Python + ffmpeg + app
-├── .dockerignore
-└── infra/               # Terraform
-    ├── ecr.tf           # Container registry
-    ├── ecs.tf           # Fargate task + service + auto-scaling
-    ├── alb.tf           # Load balancer
-    ├── cloudfront.tf    # CDN + WAF + rate limit rules
-    ├── vpc.tf           # Network (public/private subnets, NAT)
-    ├── iam.tf           # ECS task role (least-privilege)
-    ├── ssm.tf           # Parameter Store entries (replaces config.json)
-    ├── budgets.tf       # $50 budget + automated kill action
-    └── scheduler.tf     # Nightly scale-to-zero
+
+**Deploy / update GCP infrastructure with Terraform:**
+
+```bash
+cd infra
+terraform init
+terraform plan  -var="project_id=<YOUR_PROJECT>"
+terraform apply -var="project_id=<YOUR_PROJECT>"
 ```
+
+**First-time GCP project setup:**
+
+```bash
+./deploy/bootstrap.sh
+```
+
+> See `infra/GCP_MIGRATION.md` for full migration notes from the previous AWS setup.
+
+### Docker Notes
+
+- Base image: `python:3.11-slim`
+- ffmpeg installed at build time
+- faster-whisper `tiny` model **pre-downloaded** during image build — avoids cold-start delay on Cloud Run
+- Single Uvicorn worker keeps the Whisper model resident in RAM between requests
+- Startup probe allows up to 120 s for the model to load; liveness probe checks every 30 s
