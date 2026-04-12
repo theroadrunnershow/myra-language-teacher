@@ -12,15 +12,15 @@ The Myra app is already a REST API. The robot integration is a new Python script
 
 There are two deployment options depending on how much you want to set up on the Pi:
 
-| | Option A | Option B |
-|--|---------|---------|
-| **Where Myra server runs** | GCP Cloud Run (already deployed) | On the Pi itself |
-| **Laptop needed?** | No | No |
-| **Internet needed?** | Yes (WiFi on robot) | Yes (gTTS needs Google) |
-| **Setup effort** | Low — only install robot SDK on Pi | Medium — full app install on Pi |
-| **Whisper runs on** | GCP (1 vCPU, fast) | Pi 5 CPU (~1–3s per word) |
-| **Works offline?** | No | No (gTTS still needs internet) |
-| **Best for** | Getting started quickly | Production / classroom use |
+| | Option A | Option B | Option C |
+|--|---------|---------|---------|
+| **Where Myra server runs** | GCP Cloud Run (already deployed) | On the Pi itself | Mac mini (LAN) |
+| **Laptop needed?** | No | No | Mac mini must be on |
+| **Internet needed?** | Yes (WiFi on robot) | Yes (gTTS needs Google) | Yes (gTTS only) |
+| **Setup effort** | Low — only install robot SDK on Pi | Medium — full app install on Pi | Low — clone + pip install on Mac mini |
+| **Whisper runs on** | GCP (1 vCPU, fast) | Pi 5 CPU (~200ms, single-pass) | Mac mini CPU/Neural Engine (full dual-pass) |
+| **Works offline?** | No | No (gTTS still needs internet) | No (gTTS still needs internet) |
+| **Best for** | Getting started quickly | Production / classroom use | **Best Assamese accuracy** (see [#1](https://github.com/theroadrunnershow/myra-language-teacher/issues/1)) |
 
 ---
 
@@ -238,6 +238,86 @@ sudo systemctl enable myra
 sudo systemctl start myra
 # Then run robot_teacher.py with --no-server flag
 ```
+
+---
+
+## Option C: Mac Mini (Best Whisper Quality)
+
+### How it works
+
+```
+┌─────────────────────────────┐   LAN    ┌──────────────────────────┐
+│     Reachy Mini (Pi 5)      │          │  Mac mini                │
+│                             │  HTTP    │  (same local network)    │
+│  robot_teacher.py  ─────────┼─────────►│                          │
+│  (lesson loop,              │          │  uvicorn main:app        │
+│   animations,               │          │  port 8765               │
+│   audio bridge)             │          │                          │
+│                             │          │  Whisper tiny            │
+│  4 mics  │  speaker         │          │  full dual-pass ✓        │
+└─────────────────────────────┘          └────────────┬─────────────┘
+                                                      │ gTTS
+                                                      ▼
+                                              Google TTS API
+```
+
+The Pi runs `robot_teacher.py` only. The Mac mini runs the full Myra FastAPI server
+with Whisper. Because `DISABLE_PASS1` is **not** set, both recognition passes run —
+native-script pass + English/romanized pass — giving the best accuracy for Assamese
+(see [#1](https://github.com/theroadrunnershow/myra-language-teacher/issues/1)).
+
+### Mac mini setup (one-time)
+
+```bash
+# Clone repo
+git clone <repo-url> myra-language-teacher
+cd myra-language-teacher
+
+# Install deps (brew install ffmpeg if needed)
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Find your Mac mini's local IP
+ipconfig getifaddr en0
+```
+
+### Mac mini: start the server
+
+```bash
+source venv/bin/activate
+# Bind to 0.0.0.0 so the Pi can reach it over LAN
+PYTHONPATH=src uvicorn main:app --host 0.0.0.0 --port 8765
+```
+
+Do **not** set `DISABLE_PASS1` — the Mac mini can handle full dual-pass.
+
+### Pi: run robot_teacher.py pointing at Mac mini
+
+```bash
+# Replace 192.168.1.x with your Mac mini's actual local IP
+python robot_teacher.py --server-url http://192.168.1.x:8765 \
+  --language assamese --categories animals,colors,food,numbers --words 10
+```
+
+The `--server-url` flag skips local server startup entirely — no subprocess is spawned on the Pi.
+
+### Pros
+- Full dual-pass Whisper → better Assamese and Telugu recognition accuracy
+- Mac mini CPU (or M-series Neural Engine) is dramatically faster than Pi
+- No GCP billing for robot sessions
+- Low latency: LAN round-trip is ~1–5ms vs internet round-trip
+
+### Cons
+- Mac mini must be powered on and running during the lesson
+- Still needs internet for gTTS
+
+### Implementation
+
+Added `--server-url` flag to `robot_teacher.py` (see `src/robot_teacher.py`):
+- `resolve_server_url(runtime_mode, server_url)` — custom URL takes priority over mode
+- `should_start_local_server(runtime_mode, no_server, server_url)` — returns `False` when URL provided
+- No changes to server code needed
 
 ---
 

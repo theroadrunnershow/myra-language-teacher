@@ -143,6 +143,20 @@ def test_should_start_local_server_only_in_reachy_local_mode():
     assert should_start_local_server("cloud", no_server=False) is False
 
 
+def test_resolve_server_url_with_custom_url():
+    """--server-url overrides both cloud and reachy_local modes."""
+    custom = "http://192.168.1.50:8765"
+    assert resolve_server_url("cloud", custom) == custom
+    assert resolve_server_url("reachy_local", custom) == custom
+
+
+def test_should_start_local_server_false_when_server_url_provided():
+    """No subprocess spawned when a custom --server-url is given."""
+    assert should_start_local_server(
+        "reachy_local", no_server=False, server_url="http://192.168.1.50:8765"
+    ) is False
+
+
 def test_listen_handles_motion_errors(caplog):
     mini = _FakeMini()
     controller = RobotController(mini)
