@@ -16,6 +16,7 @@ from starlette.responses import Response
 
 from speech_service import recognize_speech
 from dynamic_words_store import DynamicWordsStore
+from language_config import SUPPORTED_LESSON_LANGUAGES, VALID_LANGUAGES
 from translate_service import set_dynamic_words_store, translate_word
 from tts_service import generate_tts
 from words_db import ALL_CATEGORIES, WORD_DATABASE, get_random_word
@@ -28,7 +29,6 @@ MAX_AUDIO_BYTES = 10 * 1024 * 1024  # 10 MB — prevents OOM on Cloud Run
 MAX_TEXT_LEN = 200                   # characters — prevents gTTS quota abuse
 MAX_CONFIG_BODY = 4096               # 4 KB — prevents large JSON body abuse
 MAX_TRANSLATE_WORD_LEN = 50          # characters — prevents abuse of /api/translate
-VALID_LANGUAGES = {"telugu", "assamese", "english"}
 
 app = FastAPI(title="Myra Language Teacher")
 app.state.dynamic_words_store = None
@@ -123,7 +123,7 @@ templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
 
 # ── Configuration (client-side sessionStorage; these are defaults only) ────────
 DEFAULT_CONFIG = {
-    "languages": ["telugu", "assamese"],
+    "languages": list(SUPPORTED_LESSON_LANGUAGES),
     "categories": ALL_CATEGORIES,
     "child_name": "",
     "show_romanized": True,
@@ -302,7 +302,7 @@ async def api_get_word(
 # ── API: on-demand translation ────────────────────────────────────────────────
 @app.get("/api/translate")
 async def api_translate(word: str = "", language: str = "telugu"):
-    """Translate any English word to Telugu or Assamese on demand.
+    """Translate any English word to a supported lesson language on demand.
     Checks words_db first; falls back to Google Cloud Translate API."""
     word = word.strip()
     if not word:
@@ -312,10 +312,13 @@ async def api_translate(word: str = "", language: str = "telugu"):
             status_code=400,
             detail=f"word too long (max {MAX_TRANSLATE_WORD_LEN} characters)",
         )
-    if language not in {"telugu", "assamese"}:
+    if language not in SUPPORTED_LESSON_LANGUAGES:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid language '{language}'. Must be 'telugu' or 'assamese'.",
+            detail=(
+                f"Invalid language '{language}'. Must be one of "
+                f"{', '.join(SUPPORTED_LESSON_LANGUAGES)}."
+            ),
         )
     try:
         return await translate_word(word, language)

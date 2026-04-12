@@ -13,16 +13,12 @@ import logging
 import os
 from typing import Optional
 
+from language_config import ROMANIZATION_KEYS, TRANSLATE_LANGUAGE_CODES
+
 logger = logging.getLogger(__name__)
 
 # In-memory cache: (english_lower, language) -> word dict
 _translation_cache: dict = {}
-
-# Language codes for Cloud Translate
-_TRANSLATE_LANG_CODES = {
-    "telugu":   "te",
-    "assamese": "as",
-}
 
 # Lazy-initialized client (mirrors Whisper pattern in speech_service.py)
 _translate_client = None
@@ -47,7 +43,7 @@ def _lookup_in_db(english_word: str, language: str) -> Optional[dict]:
     """Case-insensitive lookup in WORD_DATABASE. Returns None if not found."""
     from words_db import WORD_DATABASE
     english_lower = english_word.lower().strip()
-    roman_key = "tel_roman" if language == "telugu" else "asm_roman"
+    roman_key = ROMANIZATION_KEYS[language]
     for category, words in WORD_DATABASE.items():
         for entry in words:
             if entry["english"].lower() == english_lower:
@@ -71,14 +67,20 @@ def _romanize_indic_fallback(text: str, lang_code: str) -> str:
     ordinary n/d when lowercased, giving simple phonetic strings that match Whisper's
     English-mode transcription (e.g. "తండ్రి" → "taMDri" → "tamdri").
 
-    Scoped to Telugu only: Assamese has unique characters (ৰ, ৱ) not in the BENGALI
-    scheme so fallback would produce incomplete romanizations there.
+    Scoped to scripts supported cleanly by indic_transliteration here: Telugu, Tamil,
+    and Malayalam. Assamese still relies on the upstream romanize_text API because its
+    unique characters do not map cleanly through the Bengali transliteration scheme.
     """
-    if lang_code != "te":
+    if lang_code not in {"te", "ta", "ml"}:
         return ""
     try:
         from indic_transliteration import sanscript  # type: ignore
-        roman = sanscript.transliterate(text, sanscript.TELUGU, sanscript.ITRANS)
+        source_scheme = {
+            "te": sanscript.TELUGU,
+            "ta": sanscript.TAMIL,
+            "ml": sanscript.MALAYALAM,
+        }[lang_code]
+        roman = sanscript.transliterate(text, source_scheme, sanscript.ITRANS)
         # Keep only ASCII letters and lowercase so "taMDri" → "tamdri"
         return "".join(c for c in roman if c.isascii() and c.isalpha()).lower()
     except Exception as exc:
@@ -90,7 +92,7 @@ def _translate_and_romanize_sync(english_word: str, language: str, project_id: s
     """Blocking Google Translate call — run via run_in_executor."""
     client = _get_translate_client()
     parent = f"projects/{project_id}/locations/global"
-    lang_code = _TRANSLATE_LANG_CODES[language]
+    lang_code = TRANSLATE_LANGUAGE_CODES[language]
 
     # Step 1: translate English → native script
     translate_resp = client.translate_text(

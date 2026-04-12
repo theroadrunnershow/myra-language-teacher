@@ -4,6 +4,12 @@
 ═══════════════════════════════════════════════════════ */
 
 const toProperCase = s => s ? s.charAt(0).toUpperCase() + s.slice(1).toLowerCase() : s;
+const LANGUAGE_BADGES = {
+  telugu: 'Telugu 🌟',
+  assamese: 'Assamese 🌿',
+  tamil: 'Tamil 🌺',
+  malayalam: 'Malayalam 🌴',
+};
 
 // ── State ─────────────────────────────────────────────
 const state = {
@@ -521,8 +527,7 @@ function displayWord(word) {
   els.wordTranslation.textContent = word.translation;
   els.wordRomanized.textContent  = (showRoman && word.romanized) ? `(${word.romanized})` : '';
 
-  const langLabel = word.language === 'telugu' ? 'Telugu 🌟' : 'Assamese 🌿';
-  els.langBadge.textContent = langLabel;
+  els.langBadge.textContent = LANGUAGE_BADGES[word.language] || toProperCase(word.language || 'language');
 }
 
 // ── TTS: play pronunciation ───────────────────────────

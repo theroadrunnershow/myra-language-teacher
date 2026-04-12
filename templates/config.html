@@ -76,6 +76,22 @@
               <span class="choice-subtitle">অসমীয়া</span>
             </span>
           </label>
+          <label class="checkbox-label choice-card">
+            <input type="radio" name="language" id="lang-tamil" value="tamil"
+                   {% if config.languages and config.languages[0] == 'tamil' %}checked{% endif %} />
+            <span class="choice-copy">
+              <span class="choice-title">Tamil</span>
+              <span class="choice-subtitle">தமிழ்</span>
+            </span>
+          </label>
+          <label class="checkbox-label choice-card">
+            <input type="radio" name="language" id="lang-malayalam" value="malayalam"
+                   {% if config.languages and config.languages[0] == 'malayalam' %}checked{% endif %} />
+            <span class="choice-copy">
+              <span class="choice-title">Malayalam</span>
+              <span class="choice-subtitle">മലയാളം</span>
+            </span>
+          </label>
         </div>
       </section>
 

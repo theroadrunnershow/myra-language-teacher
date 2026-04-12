@@ -7,11 +7,12 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
+from language_config import ROMANIZATION_KEYS, SUPPORTED_LESSON_LANGUAGES
 from words_db import WORD_DATABASE
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_LANGUAGES = ("telugu", "assamese")
+SUPPORTED_LANGUAGES = SUPPORTED_LESSON_LANGUAGES
 SYNC_POLICIES = {"never", "session_end", "shutdown"}
 
 
@@ -46,22 +47,15 @@ def _build_seed_words() -> dict[str, dict[str, dict]]:
             english_lower = english.lower()
             if not english_lower:
                 continue
-            seed["telugu"][english_lower] = {
-                "english": english,
-                "translation": word.get("telugu", english),
-                "romanized": word.get("tel_roman", ""),
-                "emoji": word.get("emoji", ""),
-                "language": "telugu",
-                "category": category,
-            }
-            seed["assamese"][english_lower] = {
-                "english": english,
-                "translation": word.get("assamese", english),
-                "romanized": word.get("asm_roman", ""),
-                "emoji": word.get("emoji", ""),
-                "language": "assamese",
-                "category": category,
-            }
+            for language in SUPPORTED_LANGUAGES:
+                seed[language][english_lower] = {
+                    "english": english,
+                    "translation": word.get(language, english),
+                    "romanized": word.get(ROMANIZATION_KEYS[language], ""),
+                    "emoji": word.get("emoji", ""),
+                    "language": language,
+                    "category": category,
+                }
     return seed
 
 

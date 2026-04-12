@@ -10,14 +10,9 @@ from pydub import AudioSegment
 from rapidfuzz import fuzz
 from scipy.signal import butter, sosfilt
 
-logger = logging.getLogger(__name__)
+from language_config import LANGUAGE_CODES
 
-# Whisper language codes
-LANGUAGE_CODES = {
-    "telugu": "te",
-    "assamese": "as",
-    "english": "en",
-}
+logger = logging.getLogger(__name__)
 
 # Map browser MIME types → file extensions pydub/ffmpeg understand
 MIME_TO_EXT = {
@@ -36,7 +31,7 @@ MIME_TO_EXT = {
 # Feature flag: enable spectral noise reduction on recorded audio
 NOISE_REDUCTION_ENABLED = False
 
-# Feature flag: use initial_prompt to guide Whisper toward expected word (helps Telugu/Assamese)
+# Feature flag: use initial_prompt to guide Whisper toward expected word (helps Indic languages)
 INITIAL_PROMPT_ENABLED = True
 
 # Feature flag: skip native-language pass1 entirely (set DISABLE_PASS1=true on GCP Cloud Run

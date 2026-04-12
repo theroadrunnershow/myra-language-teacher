@@ -1,6 +1,6 @@
 # 🦕 Myra Language Teacher
 
-A fun, toddler-friendly web app that teaches **Telugu** and **Assamese** to your 4-year-old through a cute animated pink dino mascot!
+A fun, toddler-friendly web app that teaches **Telugu**, **Assamese**, **Tamil**, and **Malayalam** to your 4-year-old through a cute animated pink dino mascot!
 
 ## ✨ Features
 
@@ -180,8 +180,8 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 ### Speech recognition details
 
 - Audio MIME type is detected from the browser (`audio/webm`, `audio/mp4`, etc.) and the correct extension is used when converting with ffmpeg.
-- Whisper is run with the target language forced (`te` for Telugu, `as` for Assamese). If the output is too short, it falls back to auto-detect.
-- Matching runs twice: once against the **native script** (Telugu/Assamese characters) and once against the **romanized pronunciation** (e.g. "pilli"). The higher of the two scores is used — this handles cases where Whisper outputs Latin transliteration instead of the native script.
+- Whisper is run with the target language forced (`te` for Telugu, `as` for Assamese, `ta` for Tamil, `ml` for Malayalam). If the output is too short, it falls back to auto-detect.
+- Matching runs twice: once against the **native script** and once against the **romanized pronunciation** (e.g. "pilli"). The higher of the two scores is used — this handles cases where Whisper outputs Latin transliteration instead of the native script.
 
 ---
 
@@ -193,7 +193,7 @@ Visit **[http://localhost:8000/settings](http://localhost:8000/settings)** to co
 | Setting           | Description                                                     |
 | ----------------- | --------------------------------------------------------------- |
 | Child's name      | Used in the spoken prompt ("Myra, repeat after me!") and header |
-| Languages         | Telugu, Assamese, or both (randomly alternated per word)        |
+| Languages         | Telugu, Assamese, Tamil, Malayalam, or a mixed lesson rotation  |
 | Categories        | Animals, Colors, Body Parts, Numbers, Food, Common Objects      |
 | Show romanized    | Show phonetic pronunciation guide below the translation         |
 | Accuracy required | Minimum fuzzy-match score to count as correct (30–90%)          |
@@ -221,7 +221,7 @@ Use this to quickly diagnose problems:
 | `⚠️ Error: … ffmpeg …`                  | ffmpeg not installed                                      | `brew install ffmpeg`                          |
 | `Whisper heard: ""`                     | Audio conversion failed or mic too quiet                  | Check ffmpeg; speak closer to mic              |
 | `Whisper heard: "pilli"` (Latin)        | Whisper output romanized text                             | Already handled via romanized fallback         |
-| `Match score: 0%` with non-empty heard  | Child said the English word, not the target language word | Encourage them to say the Telugu/Assamese word |
+| `Match score: 0%` with non-empty heard  | Child said the English word, not the target language word | Encourage them to say the Telugu/Assamese/Tamil/Malayalam word |
 | Low score despite correct pronunciation | Threshold too high                                        | Settings → lower "Accuracy required"           |
 
 
@@ -232,7 +232,7 @@ Use this to quickly diagnose problems:
 ```
 myra-language-teacher/
 ├── main.py              # FastAPI app & all API routes
-├── words_db.py          # Word database (Telugu + Assamese + romanized)
+├── words_db.py          # Word database (Telugu + Assamese + Tamil + Malayalam + romanized)
 ├── speech_service.py    # Whisper STT, MIME detection, romanized fallback
 ├── tts_service.py       # gTTS text-to-speech (async wrapper)
 ├── requirements.txt
@@ -337,4 +337,3 @@ myra-language-teacher/
     ├── budgets.tf       # $50 budget + automated kill action
     └── scheduler.tf     # Nightly scale-to-zero
 ```
-

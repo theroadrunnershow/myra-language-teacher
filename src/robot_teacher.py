@@ -9,7 +9,7 @@ speaker, and animations.
 Usage:
   python robot_teacher.py [options]
 
-  --language   telugu | assamese | both    (default: both)
+  --language   telugu | assamese | tamil | malayalam | both | all    (default: both)
   --categories animals,colors,food,...     (default: animals,colors,food,numbers)
   --words      10                          (default: 10 words per session)
   --threshold  50                          (default: 50 similarity threshold)
@@ -24,6 +24,8 @@ DISABLE_PASS1=true is set in the server subprocess to skip the slow
 native-language Whisper pass — cuts recognition from ~6s to ~200ms on Pi CPU.
 """
 
+from __future__ import annotations
+
 import argparse
 import atexit
 import io
@@ -37,6 +39,8 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+
+from language_config import SUPPORTED_LESSON_LANGUAGES
 
 import numpy as np
 import requests
@@ -77,7 +81,7 @@ SAMPLE_RATE = 16000      # robot mic/speaker rate (fixed by SDK hardware)
 DEFAULT_MAX_ATTEMPTS = 3
 DEFAULT_THRESHOLD = 50   # permissive for a 4-year-old
 
-DEFAULT_LANGUAGES = ["telugu", "assamese"]
+DEFAULT_LANGUAGES = list(SUPPORTED_LESSON_LANGUAGES)
 DEFAULT_CATEGORIES = ["animals", "colors", "food", "numbers"]
 REPLAY_WORD_BATCH = 5
 PLAY_AGAIN_RECORD_DURATION_SEC = 4.0
@@ -1496,7 +1500,7 @@ def main():
         "--language",
         default="both",
         metavar="LANG",
-        help="telugu | assamese | both",
+        help="telugu | assamese | tamil | malayalam | both | all",
     )
     parser.add_argument(
         "--categories",
@@ -1600,10 +1604,15 @@ def main():
     # Resolve languages
     if args.language == "both":
         languages = ["telugu", "assamese"]
-    elif args.language in ("telugu", "assamese"):
+    elif args.language == "all":
+        languages = list(SUPPORTED_LESSON_LANGUAGES)
+    elif args.language in SUPPORTED_LESSON_LANGUAGES:
         languages = [args.language]
     else:
-        parser.error(f"Unknown --language '{args.language}'. Use telugu, assamese, or both.")
+        parser.error(
+            f"Unknown --language '{args.language}'. "
+            "Use telugu, assamese, tamil, malayalam, both, or all."
+        )
 
     categories = [c.strip() for c in args.categories.split(",") if c.strip()]
     if not categories:

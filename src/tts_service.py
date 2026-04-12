@@ -2,16 +2,11 @@ import io
 import asyncio
 import logging
 import time
-from functools import lru_cache
 from gtts import gTTS
 
-logger = logging.getLogger(__name__)
+from language_config import LANGUAGE_CODES
 
-LANGUAGE_CODES = {
-    "telugu": "te",
-    "assamese": "as",
-    "english": "en",
-}
+logger = logging.getLogger(__name__)
 
 
 def _generate_tts_sync(text: str, lang_code: str, slow: bool = True) -> bytes:

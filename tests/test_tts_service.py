@@ -49,11 +49,17 @@ class TestLanguageCodes:
     def test_assamese_maps_to_as(self):
         assert LANGUAGE_CODES["assamese"] == "as"
 
+    def test_tamil_maps_to_ta(self):
+        assert LANGUAGE_CODES["tamil"] == "ta"
+
+    def test_malayalam_maps_to_ml(self):
+        assert LANGUAGE_CODES["malayalam"] == "ml"
+
     def test_english_maps_to_en(self):
         assert LANGUAGE_CODES["english"] == "en"
 
     def test_no_extra_unexpected_keys(self):
-        assert set(LANGUAGE_CODES.keys()) == {"telugu", "assamese", "english"}
+        assert set(LANGUAGE_CODES.keys()) == {"telugu", "assamese", "tamil", "malayalam", "english"}
 
 
 # ---------------------------------------------------------------------------
@@ -121,6 +127,16 @@ class TestGenerateTts:
         with patch("tts_service.gTTS", return_value=_make_gtts_mock()) as mock_cls:
             await generate_tts("মেকুৰী", "assamese")
         mock_cls.assert_called_once_with(text="মেকুৰী", lang="as", slow=True)
+
+    async def test_tamil_language_maps_to_ta(self):
+        with patch("tts_service.gTTS", return_value=_make_gtts_mock()) as mock_cls:
+            await generate_tts("பூனை", "tamil")
+        mock_cls.assert_called_once_with(text="பூனை", lang="ta", slow=True)
+
+    async def test_malayalam_language_maps_to_ml(self):
+        with patch("tts_service.gTTS", return_value=_make_gtts_mock()) as mock_cls:
+            await generate_tts("പൂച്ച", "malayalam")
+        mock_cls.assert_called_once_with(text="പൂച്ച", lang="ml", slow=True)
 
     async def test_english_language_maps_to_en(self):
         with patch("tts_service.gTTS", return_value=_make_gtts_mock()) as mock_cls:

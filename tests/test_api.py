@@ -143,13 +143,23 @@ class TestGetWord:
         assert resp.status_code == 200
         assert resp.json()["language"] == "assamese"
 
+    def test_tamil_word_returned(self, client):
+        resp = client.get("/api/word?languages=tamil&categories=colors")
+        assert resp.status_code == 200
+        assert resp.json()["language"] == "tamil"
+
+    def test_malayalam_word_returned(self, client):
+        resp = client.get("/api/word?languages=malayalam&categories=colors")
+        assert resp.status_code == 200
+        assert resp.json()["language"] == "malayalam"
+
     def test_multiple_languages_one_is_chosen(self, client):
         # Over 20 draws at least one of each language should appear
         seen = set()
         for _ in range(20):
-            data = client.get("/api/word?languages=telugu,assamese&categories=animals").json()
+            data = client.get("/api/word?languages=telugu,assamese,tamil,malayalam&categories=animals").json()
             seen.add(data["language"])
-        assert seen.issubset({"telugu", "assamese"})
+        assert seen.issubset({"telugu", "assamese", "tamil", "malayalam"})
         assert len(seen) >= 1  # trivially true, but documents intent
 
     def test_all_required_fields_present(self, client):
@@ -339,12 +349,14 @@ class TestAllWordsEndpoint:
         data = client.get("/api/words/all?languages=telugu&categories=animals").json()
         assert len(data["telugu"]) == len(WORD_DATABASE["animals"])
 
-    def test_multiple_languages_both_present(self, client):
+    def test_multiple_languages_all_present(self, client):
         data = client.get(
-            "/api/words/all?languages=telugu,assamese&categories=colors"
+            "/api/words/all?languages=telugu,assamese,tamil,malayalam&categories=colors"
         ).json()
         assert "telugu" in data
         assert "assamese" in data
+        assert "tamil" in data
+        assert "malayalam" in data
 
     def test_word_fields_present(self, client):
         data = client.get("/api/words/all?languages=telugu&categories=numbers").json()
@@ -433,6 +445,16 @@ class TestTranslateEndpoint:
         data = client.get("/api/translate?word=dog&language=assamese").json()
         for field in ("english", "translation", "romanized", "emoji", "language", "category"):
             assert field in data
+
+    def test_tamil_translation_lookup(self, client):
+        data = client.get("/api/translate?word=cat&language=tamil").json()
+        assert data["translation"] == "பூனை"
+        assert data["language"] == "tamil"
+
+    def test_malayalam_translation_lookup(self, client):
+        data = client.get("/api/translate?word=cat&language=malayalam").json()
+        assert data["translation"] == "പൂച്ച"
+        assert data["language"] == "malayalam"
 
     def test_language_field_in_response(self, client):
         data = client.get("/api/translate?word=cat&language=assamese").json()

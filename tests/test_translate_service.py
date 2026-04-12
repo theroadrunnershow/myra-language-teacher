@@ -54,6 +54,16 @@ class TestDbLookup:
         assert result is not None
         assert result["translation"] == "মেকুৰী"
 
+    def test_known_tamil_word(self):
+        result = translate_service._lookup_in_db("cat", "tamil")
+        assert result is not None
+        assert result["translation"] == "பூனை"
+
+    def test_known_malayalam_word(self):
+        result = translate_service._lookup_in_db("cat", "malayalam")
+        assert result is not None
+        assert result["translation"] == "പൂച്ച"
+
     def test_case_insensitive(self):
         assert translate_service._lookup_in_db("CAT", "telugu") is not None
         assert translate_service._lookup_in_db("Cat", "telugu") is not None
@@ -73,6 +83,14 @@ class TestDbLookup:
     def test_assamese_romanized(self):
         result = translate_service._lookup_in_db("dog", "assamese")
         assert result["romanized"] == "kukur"
+
+    def test_tamil_romanized(self):
+        result = translate_service._lookup_in_db("dog", "tamil")
+        assert result["romanized"] == "naai"
+
+    def test_malayalam_romanized(self):
+        result = translate_service._lookup_in_db("dog", "malayalam")
+        assert result["romanized"] == "naaya"
 
     def test_language_field(self):
         result = translate_service._lookup_in_db("cat", "assamese")

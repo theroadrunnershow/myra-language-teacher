@@ -198,7 +198,7 @@ class TestRecognizeInputValidation:
         assert "invalid language" in resp.json()["detail"].lower()
 
     def test_valid_languages_accepted(self, client):
-        for lang in ("telugu", "assamese"):
+        for lang in ("telugu", "assamese", "tamil", "malayalam"):
             with patch("main.recognize_speech", new_callable=AsyncMock) as mock_rec:
                 mock_rec.return_value = {**MOCK_RECOGNIZE_RESULT, "language": lang}
                 resp = self._post_audio(client, b"\x00" * 100, language=lang)
@@ -272,7 +272,7 @@ class TestSecurityConstants:
         assert MAX_TEXT_LEN == 200
 
     def test_valid_languages_set(self):
-        assert VALID_LANGUAGES == {"telugu", "assamese", "english"}
+        assert VALID_LANGUAGES == {"telugu", "assamese", "tamil", "malayalam", "english"}
 
     def test_max_config_body_is_4kb(self):
         assert MAX_CONFIG_BODY == 4096

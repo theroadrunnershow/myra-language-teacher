@@ -10,6 +10,7 @@ import pytest
 
 from words_db import (
     ALL_CATEGORIES,
+    SUPPORTED_LANGUAGES,
     WORD_DATABASE,
     get_all_words_for_language,
     get_random_word,
@@ -20,8 +21,12 @@ from words_db import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-SUPPORTED_LANGUAGES = ("telugu", "assamese")
-ROMAN_KEYS = {"telugu": "tel_roman", "assamese": "asm_roman"}
+ROMAN_KEYS = {
+    "telugu": "tel_roman",
+    "assamese": "asm_roman",
+    "tamil": "tam_roman",
+    "malayalam": "mal_roman",
+}
 
 
 def _normalize_english(text: str) -> str:
@@ -39,7 +44,18 @@ class TestDatabaseIntegrity:
         assert set(ALL_CATEGORIES) == expected
 
     def test_every_word_has_required_keys(self):
-        required = {"english", "telugu", "assamese", "emoji", "tel_roman", "asm_roman"}
+        required = {
+            "english",
+            "telugu",
+            "assamese",
+            "tamil",
+            "malayalam",
+            "emoji",
+            "tel_roman",
+            "asm_roman",
+            "tam_roman",
+            "mal_roman",
+        }
         for category, words in WORD_DATABASE.items():
             for word in words:
                 missing = required - word.keys()
@@ -51,7 +67,7 @@ class TestDatabaseIntegrity:
         """Romanized pronunciation guides must be Latin/ASCII."""
         for category, words in WORD_DATABASE.items():
             for word in words:
-                for key in ("tel_roman", "asm_roman"):
+                for key in ("tel_roman", "asm_roman", "tam_roman", "mal_roman"):
                     assert word[key].isascii(), (
                         f"'{key}' for '{word['english']}' in '{category}' is not ASCII: {word[key]!r}"
                     )
@@ -76,6 +92,8 @@ class TestDatabaseIntegrity:
         for phrase in WORD_DATABASE["phrases"]:
             assert phrase["tel_roman"].strip(), f"Empty Telugu romanization for '{phrase['english']}'"
             assert phrase["asm_roman"].strip(), f"Empty Assamese romanization for '{phrase['english']}'"
+            assert phrase["tam_roman"].strip(), f"Empty Tamil romanization for '{phrase['english']}'"
+            assert phrase["mal_roman"].strip(), f"Empty Malayalam romanization for '{phrase['english']}'"
 
     def test_phrases_have_no_html_entities(self):
         for phrase in WORD_DATABASE["phrases"]:
@@ -135,6 +153,20 @@ class TestGetRandomWord:
                 f"asm_roman should be ASCII, got: {word['romanized']!r}"
             )
 
+    def test_tamil_uses_tam_roman(self):
+        for _ in range(20):
+            word = get_random_word("animals", "tamil")
+            assert word["romanized"].isascii(), (
+                f"tam_roman should be ASCII, got: {word['romanized']!r}"
+            )
+
+    def test_malayalam_uses_mal_roman(self):
+        for _ in range(20):
+            word = get_random_word("animals", "malayalam")
+            assert word["romanized"].isascii(), (
+                f"mal_roman should be ASCII, got: {word['romanized']!r}"
+            )
+
     def test_invalid_category_falls_back_gracefully(self):
         """An unknown category must not raise; it must return a valid word."""
         word = get_random_word("nonexistent_category", "telugu")
@@ -161,6 +193,24 @@ class TestGetRandomWord:
                 break
         assert found_different, "All Assamese translations are identical to English strings"
 
+    def test_translation_differs_from_english_for_tamil(self):
+        found_different = False
+        for _ in range(30):
+            word = get_random_word("animals", "tamil")
+            if word["translation"] != word["english"]:
+                found_different = True
+                break
+        assert found_different, "All Tamil translations are identical to English strings"
+
+    def test_translation_differs_from_english_for_malayalam(self):
+        found_different = False
+        for _ in range(30):
+            word = get_random_word("animals", "malayalam")
+            if word["translation"] != word["english"]:
+                found_different = True
+                break
+        assert found_different, "All Malayalam translations are identical to English strings"
+
     def test_randomness_returns_more_than_one_word(self):
         """Over 50 draws, we should see at least 3 distinct English words."""
         random.seed(0)
@@ -185,6 +235,14 @@ class TestGetAllWordsForLanguage:
 
     def test_single_category_assamese_length(self):
         words = get_all_words_for_language("assamese", ["colors"])
+        assert len(words) == len(WORD_DATABASE["colors"])
+
+    def test_single_category_tamil_length(self):
+        words = get_all_words_for_language("tamil", ["colors"])
+        assert len(words) == len(WORD_DATABASE["colors"])
+
+    def test_single_category_malayalam_length(self):
+        words = get_all_words_for_language("malayalam", ["colors"])
         assert len(words) == len(WORD_DATABASE["colors"])
 
     def test_multiple_categories_length(self):
@@ -236,4 +294,18 @@ class TestGetAllWordsForLanguage:
         for w in words:
             assert w["romanized"].isascii(), (
                 f"asm_roman should be ASCII for '{w['english']}': {w['romanized']!r}"
+            )
+
+    def test_tamil_romanized_is_ascii(self):
+        words = get_all_words_for_language("tamil", ALL_CATEGORIES)
+        for w in words:
+            assert w["romanized"].isascii(), (
+                f"tam_roman should be ASCII for '{w['english']}': {w['romanized']!r}"
+            )
+
+    def test_malayalam_romanized_is_ascii(self):
+        words = get_all_words_for_language("malayalam", ALL_CATEGORIES)
+        for w in words:
+            assert w["romanized"].isascii(), (
+                f"mal_roman should be ASCII for '{w['english']}': {w['romanized']!r}"
             )

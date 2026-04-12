@@ -1,8 +1,39 @@
 import random
 import re
 
-# Word database with English words + Telugu and Assamese translations
-# tel_roman / asm_roman = approximate romanized pronunciation guide
+from language_config import ROMANIZATION_KEYS, SUPPORTED_LESSON_LANGUAGES
+from malayalam_data import (
+    MALAYALAM_CORE_PHRASES,
+    MALAYALAM_PHRASE_ACTIVITIES,
+    MALAYALAM_PHRASE_ANIMALS,
+    MALAYALAM_PHRASE_ANIMAL_ACTIONS,
+    MALAYALAM_PHRASE_BODY_PARTS,
+    MALAYALAM_PHRASE_COLORS,
+    MALAYALAM_PHRASE_COMMANDS,
+    MALAYALAM_PHRASE_FOODS,
+    MALAYALAM_PHRASE_OBJECTS,
+    MALAYALAM_PHRASE_PEOPLE,
+    MALAYALAM_PHRASE_PLACES,
+    MALAYALAM_WORDS,
+)
+from tamil_data import (
+    TAMIL_CORE_PHRASES,
+    TAMIL_PHRASE_ACTIVITIES,
+    TAMIL_PHRASE_ANIMALS,
+    TAMIL_PHRASE_ANIMAL_ACTIONS,
+    TAMIL_PHRASE_BODY_PARTS,
+    TAMIL_PHRASE_COLORS,
+    TAMIL_PHRASE_COMMANDS,
+    TAMIL_PHRASE_FOODS,
+    TAMIL_PHRASE_OBJECTS,
+    TAMIL_PHRASE_PEOPLE,
+    TAMIL_PHRASE_PLACES,
+    TAMIL_WORDS,
+)
+
+# Word database with English words + Telugu, Assamese, Tamil, and Malayalam translations.
+# *_roman fields are approximate romanized pronunciation guides.
+SUPPORTED_LANGUAGES = SUPPORTED_LESSON_LANGUAGES
 WORD_DATABASE = {
     "animals": [
         {"english": "cat",      "telugu": "పిల్లి",      "assamese": "মেকুৰী",    "emoji": "🐱", "tel_roman": "pilli",      "asm_roman": "mekuri"},
@@ -1014,21 +1045,71 @@ _CORE_PHRASES = (
 )
 
 
+def _apply_overlay(entries, overlay: dict, key_field: str, overlay_name: str) -> None:
+    for entry in entries:
+        key = entry[key_field]
+        if key not in overlay:
+            raise ValueError(f"Missing {overlay_name} overlay for '{key}'")
+        entry.update(overlay[key])
+
+
+def _apply_tamil_overlays() -> None:
+    for category, overlay in TAMIL_WORDS.items():
+        _apply_overlay(WORD_DATABASE[category], overlay, "english", "Tamil")
+
+    _apply_overlay(_PHRASE_COLORS, TAMIL_PHRASE_COLORS, "english", "Tamil")
+    _apply_overlay(_PHRASE_OBJECTS, TAMIL_PHRASE_OBJECTS, "english", "Tamil")
+    _apply_overlay(_PHRASE_ANIMALS, TAMIL_PHRASE_ANIMALS, "english", "Tamil")
+    _apply_overlay(_PHRASE_ANIMAL_ACTIONS, TAMIL_PHRASE_ANIMAL_ACTIONS, "english", "Tamil")
+    _apply_overlay(_PHRASE_FOODS, TAMIL_PHRASE_FOODS, "english_like", "Tamil")
+    _apply_overlay(_PHRASE_PEOPLE, TAMIL_PHRASE_PEOPLE, "english", "Tamil")
+    _apply_overlay(_PHRASE_BODY_PARTS, TAMIL_PHRASE_BODY_PARTS, "english", "Tamil")
+    _apply_overlay(_PHRASE_ACTIVITIES, TAMIL_PHRASE_ACTIVITIES, "english_time", "Tamil")
+    _apply_overlay(_PHRASE_COMMANDS, TAMIL_PHRASE_COMMANDS, "english", "Tamil")
+    _apply_overlay(_PHRASE_PLACES, TAMIL_PHRASE_PLACES, "english", "Tamil")
+    _apply_overlay(_CORE_PHRASES, TAMIL_CORE_PHRASES, "english", "Tamil")
+
+
+def _apply_malayalam_overlays() -> None:
+    for category, overlay in MALAYALAM_WORDS.items():
+        _apply_overlay(WORD_DATABASE[category], overlay, "english", "Malayalam")
+
+    _apply_overlay(_PHRASE_COLORS, MALAYALAM_PHRASE_COLORS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_OBJECTS, MALAYALAM_PHRASE_OBJECTS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_ANIMALS, MALAYALAM_PHRASE_ANIMALS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_ANIMAL_ACTIONS, MALAYALAM_PHRASE_ANIMAL_ACTIONS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_FOODS, MALAYALAM_PHRASE_FOODS, "english_like", "Malayalam")
+    _apply_overlay(_PHRASE_PEOPLE, MALAYALAM_PHRASE_PEOPLE, "english", "Malayalam")
+    _apply_overlay(_PHRASE_BODY_PARTS, MALAYALAM_PHRASE_BODY_PARTS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_ACTIVITIES, MALAYALAM_PHRASE_ACTIVITIES, "english_time", "Malayalam")
+    _apply_overlay(_PHRASE_COMMANDS, MALAYALAM_PHRASE_COMMANDS, "english", "Malayalam")
+    _apply_overlay(_PHRASE_PLACES, MALAYALAM_PHRASE_PLACES, "english", "Malayalam")
+    _apply_overlay(_CORE_PHRASES, MALAYALAM_CORE_PHRASES, "english", "Malayalam")
+
+
 def _phrase_entry(
     english: str,
     telugu: str,
     assamese: str,
+    tamil: str,
+    malayalam: str,
     tel_roman: str,
     asm_roman: str,
+    tam_roman: str,
+    mal_roman: str,
     emoji: str,
 ) -> dict:
     return {
         "english": english,
         "telugu": telugu,
         "assamese": assamese,
+        "tamil": tamil,
+        "malayalam": malayalam,
         "emoji": emoji,
         "tel_roman": tel_roman,
         "asm_roman": asm_roman,
+        "tam_roman": tam_roman,
+        "mal_roman": mal_roman,
     }
 
 
@@ -1048,13 +1129,19 @@ def _build_color_object_phrases() -> list[dict]:
             article = _indefinite_article(english_desc)
             tel_desc = f"{color['telugu']} {obj['telugu']}"
             asm_desc = f"{color['assamese']} {obj['assamese']}"
+            tam_desc = f"{color['tamil']} {obj['tamil']}"
+            mal_desc = f"{color['malayalam']} {obj['malayalam']}"
             phrases.append(
                 _phrase_entry(
                     f"I see {article} {english_desc}",
                     f"నాకు {tel_desc} కనిపిస్తోంది",
                     f"মই {asm_desc} দেখিছোঁ",
+                    f"எனக்கு {tam_desc} தெரிகிறது",
+                    f"എനിക്ക് {mal_desc} കാണാം",
                     f"naku {color['tel_roman']} {obj['tel_roman']} kanipistondi",
                     f"moi {color['asm_roman']} {obj['asm_roman']} dekhiso",
+                    f"enakku {color['tam_roman']} {obj['tam_roman']} therigiradhu",
+                    f"enikku {color['mal_roman']} {obj['mal_roman']} kaanaam",
                     obj["emoji"],
                 )
             )
@@ -1063,8 +1150,12 @@ def _build_color_object_phrases() -> list[dict]:
                     f"This is {article} {english_desc}",
                     f"ఇది {tel_desc}",
                     f"এইটো {asm_desc}",
+                    f"இது {tam_desc}",
+                    f"ഇത് {mal_desc}",
                     f"idi {color['tel_roman']} {obj['tel_roman']}",
                     f"eitu {color['asm_roman']} {obj['asm_roman']}",
+                    f"idhu {color['tam_roman']} {obj['tam_roman']}",
+                    f"ithu {color['mal_roman']} {obj['mal_roman']}",
                     obj["emoji"],
                 )
             )
@@ -1073,8 +1164,12 @@ def _build_color_object_phrases() -> list[dict]:
                     f"Find the {english_desc}",
                     f"{color['telugu']} {obj['telugu_obj']} వెతకండి",
                     f"{color['assamese']} {obj['assamese']} বিচাৰি উলিয়াওক",
+                    f"{color['tamil']} {obj['tamil_obj']} கண்டுபிடியுங்கள்",
+                    f"{color['malayalam']} {obj['malayalam_obj']} കണ്ടെത്തൂ",
                     f"{color['tel_roman']} {obj['tel_obj_roman']} vetakandi",
                     f"{color['asm_roman']} {obj['asm_roman']} bisari uliaok",
+                    f"{color['tam_roman']} {obj['tam_obj_roman']} kandupidiyungal",
+                    f"{color['mal_roman']} {obj['mal_obj_roman']} kandethoo",
                     obj["emoji"],
                 )
             )
@@ -1090,8 +1185,12 @@ def _build_animal_action_phrases() -> list[dict]:
                     f"The {animal['english']} is {action['english']}",
                     f"{animal['telugu']} {action['telugu']}",
                     f"{animal['assamese']} {action['assamese']}",
+                    f"{animal['tamil']} {action['tamil']}",
+                    f"{animal['malayalam']} {action['malayalam']}",
                     f"{animal['tel_roman']} {action['tel_roman']}",
                     f"{animal['asm_roman']} {action['asm_roman']}",
+                    f"{animal['tam_roman']} {action['tam_roman']}",
+                    f"{animal['mal_roman']} {action['mal_roman']}",
                     animal["emoji"],
                 )
             )
@@ -1106,8 +1205,12 @@ def _build_food_phrases() -> list[dict]:
                 f"I like {food['english_like']}",
                 food["tel_like"],
                 food["asm_like"],
+                food["tam_like"],
+                food["mal_like"],
                 food["tel_like_roman"],
                 food["asm_like_roman"],
+                food["tam_like_roman"],
+                food["mal_like_roman"],
                 food["emoji"],
             )
         )
@@ -1116,8 +1219,12 @@ def _build_food_phrases() -> list[dict]:
                 f"I want {food['english_want']}",
                 food["tel_want"],
                 food["asm_want"],
+                food["tam_want"],
+                food["mal_want"],
                 food["tel_want_roman"],
                 food["asm_want_roman"],
+                food["tam_want_roman"],
+                food["mal_want_roman"],
                 food["emoji"],
             )
         )
@@ -1126,8 +1233,12 @@ def _build_food_phrases() -> list[dict]:
                 f"Please give me {food['english_give']}",
                 food["tel_give"],
                 food["asm_give"],
+                food["tam_give"],
+                food["mal_give"],
                 food["tel_give_roman"],
                 food["asm_give_roman"],
+                food["tam_give_roman"],
+                food["mal_give_roman"],
                 food["emoji"],
             )
         )
@@ -1143,8 +1254,12 @@ def _build_people_phrases() -> list[dict]:
                 f"Where is {title}?",
                 person["where_tel"],
                 person["where_asm"],
+                person["where_tam"],
+                person["where_mal"],
                 person["where_tel_roman"],
                 person["where_asm_roman"],
+                person["where_tam_roman"],
+                person["where_mal_roman"],
                 person["emoji"],
             )
         )
@@ -1153,8 +1268,12 @@ def _build_people_phrases() -> list[dict]:
                 f"{title.capitalize()} is here",
                 person["here_tel"],
                 person["here_asm"],
+                person["here_tam"],
+                person["here_mal"],
                 person["here_tel_roman"],
                 person["here_asm_roman"],
+                person["here_tam_roman"],
+                person["here_mal_roman"],
                 person["emoji"],
             )
         )
@@ -1169,8 +1288,12 @@ def _build_body_part_phrases() -> list[dict]:
                 part.get("wash_english", f"Wash your {part['english']}"),
                 part["wash_tel"],
                 part["wash_asm"],
+                part["wash_tam"],
+                part["wash_mal"],
                 part["wash_tel_roman"],
                 part["wash_asm_roman"],
+                part["wash_tam_roman"],
+                part["wash_mal_roman"],
                 part["emoji"],
             )
         )
@@ -1179,8 +1302,12 @@ def _build_body_part_phrases() -> list[dict]:
                 part.get("touch_english", f"Touch your {part['english']}"),
                 part["touch_tel"],
                 part["touch_asm"],
+                part["touch_tam"],
+                part["touch_mal"],
                 part["touch_tel_roman"],
                 part["touch_asm_roman"],
+                part["touch_tam_roman"],
+                part["touch_mal_roman"],
                 part["emoji"],
             )
         )
@@ -1195,8 +1322,12 @@ def _build_activity_phrases() -> list[dict]:
                 activity["english_time"],
                 activity["tel_time"],
                 activity["asm_time"],
+                activity["tam_time"],
+                activity["mal_time"],
                 activity["tel_time_roman"],
                 activity["asm_time_roman"],
+                activity["tam_time_roman"],
+                activity["mal_time_roman"],
                 activity["emoji"],
             )
         )
@@ -1205,8 +1336,12 @@ def _build_activity_phrases() -> list[dict]:
                 activity["english_lets"],
                 activity["tel_lets"],
                 activity["asm_lets"],
+                activity["tam_lets"],
+                activity["mal_lets"],
                 activity["tel_lets_roman"],
                 activity["asm_lets_roman"],
+                activity["tam_lets_roman"],
+                activity["mal_lets_roman"],
                 activity["emoji"],
             )
         )
@@ -1222,8 +1357,12 @@ def _build_command_phrases() -> list[dict]:
                 f"Please {title}",
                 command["please_tel"],
                 command["please_asm"],
+                command["please_tam"],
+                command["please_mal"],
                 command["please_tel_roman"],
                 command["please_asm_roman"],
+                command["please_tam_roman"],
+                command["please_mal_roman"],
                 command["emoji"],
             )
         )
@@ -1232,8 +1371,12 @@ def _build_command_phrases() -> list[dict]:
                 f"Can you {title}?",
                 command["can_tel"],
                 command["can_asm"],
+                command["can_tam"],
+                command["can_mal"],
                 command["can_tel_roman"],
                 command["can_asm_roman"],
+                command["can_tam_roman"],
+                command["can_mal_roman"],
                 command["emoji"],
             )
         )
@@ -1248,8 +1391,12 @@ def _build_place_phrases() -> list[dict]:
                 place.get("english_go", f"Go to the {place['english']}"),
                 place["go_tel"],
                 place["go_asm"],
+                place["go_tam"],
+                place["go_mal"],
                 place["go_tel_roman"],
                 place["go_asm_roman"],
+                place["go_tam_roman"],
+                place["go_mal_roman"],
                 place["emoji"],
             )
         )
@@ -1258,8 +1405,12 @@ def _build_place_phrases() -> list[dict]:
                 f"Look at the {place['english']}",
                 place["look_tel"],
                 place["look_asm"],
+                place["look_tam"],
+                place["look_mal"],
                 place["look_tel_roman"],
                 place["look_asm_roman"],
+                place["look_tam_roman"],
+                place["look_mal_roman"],
                 place["emoji"],
             )
         )
@@ -1272,8 +1423,12 @@ def _build_core_phrases() -> list[dict]:
             phrase["english"],
             phrase["telugu"],
             phrase["assamese"],
+            phrase["tamil"],
+            phrase["malayalam"],
             phrase["tel_roman"],
             phrase["asm_roman"],
+            phrase["tam_roman"],
+            phrase["mal_roman"],
             phrase["emoji"],
         )
         for phrase in _CORE_PHRASES
@@ -1283,12 +1438,23 @@ def _build_core_phrases() -> list[dict]:
 def _validate_phrases(phrases: list[dict]) -> None:
     normalized = set()
     for phrase in phrases:
-        for key in ("english", "telugu", "assamese", "emoji", "tel_roman", "asm_roman"):
+        for key in (
+            "english",
+            "telugu",
+            "assamese",
+            "tamil",
+            "malayalam",
+            "emoji",
+            "tel_roman",
+            "asm_roman",
+            "tam_roman",
+            "mal_roman",
+        ):
             if not phrase[key]:
                 raise ValueError(f"Phrase '{phrase.get('english')}' missing non-empty field '{key}'")
-        if "&#" in phrase["assamese"] or "&amp;" in phrase["assamese"]:
+        if any(token in phrase["assamese"] for token in ("&#", "&amp;")):
             raise ValueError(f"Phrase '{phrase['english']}' contains HTML entities")
-        if not phrase["tel_roman"].isascii() or not phrase["asm_roman"].isascii():
+        if any(not phrase[key].isascii() for key in ("tel_roman", "asm_roman", "tam_roman", "mal_roman")):
             raise ValueError(f"Phrase '{phrase['english']}' has non-ASCII romanization")
         if " a orange " in f" {phrase['english'].lower()} ":
             raise ValueError(f"Phrase '{phrase['english']}' uses the wrong article for orange")
@@ -1315,6 +1481,8 @@ def _build_phrases() -> list[dict]:
     return phrases
 
 
+_apply_tamil_overlays()
+_apply_malayalam_overlays()
 WORD_DATABASE["phrases"] = _build_phrases()
 
 ALL_CATEGORIES = list(WORD_DATABASE.keys())
@@ -1328,7 +1496,7 @@ def get_random_word(category: str, language: str) -> dict:
     words = WORD_DATABASE[category]
     word = random.choice(words)
 
-    roman_key = "tel_roman" if language == "telugu" else "asm_roman"
+    roman_key = ROMANIZATION_KEYS.get(language, "")
 
     return {
         "english": word["english"],
@@ -1346,7 +1514,7 @@ def get_all_words_for_language(language: str, categories: list) -> list:
     for cat in categories:
         if cat in WORD_DATABASE:
             for word in WORD_DATABASE[cat]:
-                roman_key = "tel_roman" if language == "telugu" else "asm_roman"
+                roman_key = ROMANIZATION_KEYS.get(language, "")
                 result.append({
                     "english": word["english"],
                     "translation": word.get(language, word["english"]),
