@@ -88,12 +88,17 @@ pip install -r requirements.txt -r requirements-robot.txt
 | `tests/test_bridge.py`   | Verifies audio bridge (mic → WAV → API) and TTS without the robot attached. Run with the server already running on port 8765.                   |
 
 
-Port **8765** is used to avoid conflict with the Reachy Mini daemon (port 8000). `robot_teacher.py` now supports:
+Port **8765** is used to avoid conflict with the Reachy Mini daemon (port 8000). `robot_teacher.py` supports three modes:
 
-- `--runtime-mode cloud` to keep using the hosted Myra server
-- `--runtime-mode reachy_local` to run the FastAPI server and Whisper locally on the Reachy Pi
-- `--no-server` only with `reachy_local`, when a local Myra server is already running
-- `--words-sync-to-gcs never|session_end|shutdown` to control when locally-cached custom words are uploaded back to GCS
+| Mode | How to invoke | Whisper runs on |
+|------|--------------|-----------------|
+| Cloud | `--runtime-mode cloud` | GCP Cloud Run |
+| Pi local | `--runtime-mode reachy_local` | Pi CPU (~200ms, single-pass) |
+| Mac mini / MacBook | `--server-url http://<ip>:8765` | Mac CPU / Neural Engine (full dual-pass) |
+
+Other flags:
+- `--no-server` — only with `reachy_local`, when a local Myra server is already running
+- `--words-sync-to-gcs never|session_end|shutdown` — control when locally-cached custom words are uploaded to GCS
 
 ### SSH into the robot
 
@@ -160,6 +165,30 @@ python src/robot_teacher.py \
   --words 10 \
   --child-name Myra
 ```
+
+Run Myra on a **Mac mini or MacBook** over LAN or Tailscale (best Whisper quality — full dual-pass, no `DISABLE_PASS1`):
+
+```bash
+# On Mac mini / MacBook — start the server (do this once per session)
+source venv/bin/activate
+PYTHONPATH=src uvicorn main:app --host 0.0.0.0 --port 8765
+
+# Find your Mac's IP:
+ipconfig getifaddr en0          # LAN IP (e.g. 192.168.1.x)
+# or use your Tailscale IP:     # tailscale ip -4  (e.g. 100.x.x.x)
+```
+
+```bash
+# On the Pi — point the robot at the Mac (LAN or Tailscale IP both work)
+python src/robot_teacher.py \
+  --server-url http://192.168.1.x:8765 \   # or http://100.x.x.x:8765 for Tailscale
+  --language assamese \
+  --categories animals,colors,food,numbers \
+  --words 10 \
+  --child-name Myra
+```
+
+> **Why Mac mini?** Running Whisper on the Mac enables the full dual-pass recognition strategy (native script + romanised), which significantly improves Assamese accuracy. The Pi's single-pass mode is a CPU-saving shortcut that trades accuracy for speed.
 
 If `--child-name` is omitted, the script prompts for it interactively. See `REACHY_PI_SETUP.md` for the full Pi setup, env vars, and systemd service examples.
 

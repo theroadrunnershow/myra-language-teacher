@@ -1532,8 +1532,9 @@ def main():
         "--server-url",
         default="",
         metavar="URL",
-        help="Override server URL (e.g. http://192.168.1.x:8765). "
-             "Skips local server startup. Use for Mac mini or any LAN host.",
+        help="Override server URL. Accepts LAN IPs (e.g. http://192.168.1.x:8765) "
+             "or Tailscale IPs (e.g. http://100.x.x.x:8765). "
+             "Skips local server startup. Use for Mac mini or MacBook over LAN or Tailscale.",
     )
     parser.add_argument(
         "--no-server",
