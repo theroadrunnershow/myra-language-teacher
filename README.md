@@ -216,6 +216,78 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 
 ---
 
+## 📝 Dynamic Word Expansion
+
+The built-in database ships **600+ words**. Whenever an English word is looked up that isn't in that list, the app translates it on demand via Google Cloud Translate and **permanently adds it to the word pool** — so the vocabulary grows automatically as Myra uses the app.
+
+### Lookup order
+
+Every call to `GET /api/translate` walks this chain and stops at the first hit:
+
+1. **In-memory cache** — instant; lives for the lifetime of the server process
+2. **Dynamic word store** — words accumulated during previous sessions (loaded from disk or GCS at startup)
+3. **Built-in database** (`words_db.py`) — the 600+ shipped words
+4. **Google Cloud Translate API** — translates to the native script, then romanizes; result is saved to the dynamic store so the API is never called twice for the same word
+
+### Word format
+
+Custom words are stored in the same shape as built-in words:
+
+```json
+{
+  "english":     "butterfly",
+  "translation": "సీతాకోకచిలుక",
+  "romanized":   "sitakokachiluka",
+  "emoji":       "✏️",
+  "language":    "telugu",
+  "category":    "custom"
+}
+```
+
+Romanization uses Google's `romanize_text` API, with an `indic_transliteration` fallback for complex Telugu, Tamil, and Malayalam consonant clusters that the API returns empty for.
+
+### Local persistence
+
+Translated words are saved to `data/custom_words.runtime.v1.json`. The file is written:
+
+- **Periodically** — after 50 new words accumulate, or every 6 hours (whichever comes first)
+- **On shutdown** — always flushed when the server exits cleanly
+
+On the next startup the server reloads this file, so no translations are lost between restarts.
+
+### GCS sync (multi-device sharing)
+
+When running a Raspberry Pi alongside a Cloud Run deployment, both caches can stay in sync via a shared GCS bucket:
+
+| `WORDS_SYNC_TO_GCS` | Behaviour |
+| ------------------- | --------- |
+| `never` (default)   | Words stay local only |
+| `session_end`       | Uploaded to GCS when the robot lesson session ends |
+| `shutdown`          | Uploaded to GCS when the server process shuts down |
+
+On startup the server downloads the GCS snapshot and merges it with the local file, so a fresh Cloud Run instance automatically inherits words translated on the Pi, and vice-versa.
+
+**Force an immediate GCS upload** (localhost-only endpoint):
+
+```bash
+curl -X POST http://localhost:8000/api/internal/words/sync
+```
+
+### Environment variables
+
+| Variable                     | Default                             | Purpose |
+| ---------------------------- | ----------------------------------- | ------- |
+| `WORDS_STORE_ENABLED`        | `true`                              | Set `false` to disable dynamic words entirely |
+| `WORDS_LOCAL_PATH`           | `data/custom_words.runtime.v1.json` | Local snapshot file path |
+| `WORDS_OBJECT_BUCKET`        | _(empty)_                           | GCS bucket name for cross-device sync |
+| `WORDS_OBJECT_KEY`           | `words/custom_words.v1.json`        | Object path inside the bucket |
+| `WORDS_SYNC_TO_GCS`          | `never`                             | Sync policy: `never`, `session_end`, or `shutdown` |
+| `WORDS_FLUSH_INTERVAL_SEC`   | `21600` (6 h)                       | Max time between local disk flushes |
+| `WORDS_FLUSH_MAX_NEW_WORDS`  | `50`                                | Flush early when this many words accumulate |
+| `WORDS_REFRESH_INTERVAL_SEC` | `3600` (1 h)                        | How often to re-read the GCS object |
+
+---
+
 ## ⚙️ Settings
 
 Visit **[http://localhost:8000/settings](http://localhost:8000/settings)** to configure:
