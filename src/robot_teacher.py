@@ -279,7 +279,9 @@ def _make_session() -> requests.Session:
 _session = _make_session()
 
 
-def resolve_server_url(runtime_mode: str) -> str:
+def resolve_server_url(runtime_mode: str, server_url: str = "") -> str:
+    if server_url:
+        return server_url
     if runtime_mode == "cloud":
         return CLOUD_SERVER_URL
     if runtime_mode == "reachy_local":
@@ -287,14 +289,14 @@ def resolve_server_url(runtime_mode: str) -> str:
     raise ValueError(f"Unknown runtime_mode '{runtime_mode}'")
 
 
-def configure_server_url(runtime_mode: str) -> str:
+def configure_server_url(runtime_mode: str, server_url: str = "") -> str:
     global SERVER_URL
-    SERVER_URL = resolve_server_url(runtime_mode)
+    SERVER_URL = resolve_server_url(runtime_mode, server_url)
     return SERVER_URL
 
 
-def should_start_local_server(runtime_mode: str, no_server: bool) -> bool:
-    return runtime_mode == "reachy_local" and not no_server
+def should_start_local_server(runtime_mode: str, no_server: bool, server_url: str = "") -> bool:
+    return runtime_mode == "reachy_local" and not no_server and not server_url
 
 
 # ── HTTP client wrappers ───────────────────────────────────────────────────────
@@ -1523,6 +1525,13 @@ def main():
         help="Recording attempts per word before revealing the answer",
     )
     parser.add_argument(
+        "--server-url",
+        default="",
+        metavar="URL",
+        help="Override server URL (e.g. http://192.168.1.x:8765). "
+             "Skips local server startup. Use for Mac mini or any LAN host.",
+    )
+    parser.add_argument(
         "--no-server",
         action="store_true",
         help="Only for reachy_local: use an already-running local Myra server instead of auto-starting one",
@@ -1600,11 +1609,11 @@ def main():
     if not categories:
         parser.error("--categories produced an empty list. Check the value.")
 
-    configure_server_url(runtime_mode)
+    configure_server_url(runtime_mode, args.server_url)
 
     # ── Server subprocess ──────────────────────────────────────────────────────
     server_proc = None
-    if should_start_local_server(runtime_mode, args.no_server):
+    if should_start_local_server(runtime_mode, args.no_server, args.server_url):
         server_proc = start_myra_server(
             app_dir=args.server_dir,
             words_sync_to_gcs=words_sync_to_gcs,
