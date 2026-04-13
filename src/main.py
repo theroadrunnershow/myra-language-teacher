@@ -4,6 +4,7 @@ import logging
 import os
 import random
 import time
+from contextlib import asynccontextmanager
 from collections import defaultdict
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -30,7 +31,42 @@ MAX_TEXT_LEN = 200                   # characters — prevents gTTS quota abuse
 MAX_CONFIG_BODY = 4096               # 4 KB — prevents large JSON body abuse
 MAX_TRANSLATE_WORD_LEN = 50          # characters — prevents abuse of /api/translate
 
-app = FastAPI(title="Myra Language Teacher")
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    enabled = _env_bool("WORDS_STORE_ENABLED", True)
+    store = DynamicWordsStore(
+        enabled=enabled,
+        local_path=os.environ.get("WORDS_LOCAL_PATH", DEFAULT_WORDS_LOCAL_PATH).strip(),
+        bucket_name=os.environ.get("WORDS_OBJECT_BUCKET", "").strip(),
+        object_key=os.environ.get("WORDS_OBJECT_KEY", DEFAULT_WORDS_OBJECT_KEY).strip(),
+        sync_to_gcs_policy=_env_choice("WORDS_SYNC_TO_GCS", "never", {"never", "session_end", "shutdown"}),
+        flush_interval_sec=_env_int("WORDS_FLUSH_INTERVAL_SEC", 21600),
+        flush_max_new_words=_env_int("WORDS_FLUSH_MAX_NEW_WORDS", 50),
+        refresh_interval_sec=_env_int("WORDS_REFRESH_INTERVAL_SEC", 3600),
+    )
+    store.load_snapshot()
+    app.state.dynamic_words_store = store
+    set_dynamic_words_store(store)
+    app.state.words_flush_task = asyncio.create_task(_flush_words_loop())
+
+    yield
+
+    flush_task = getattr(app.state, "words_flush_task", None)
+    if flush_task is not None:
+        flush_task.cancel()
+        try:
+            await flush_task
+        except asyncio.CancelledError:
+            pass
+
+    store = getattr(app.state, "dynamic_words_store", None)
+    if store is not None:
+        store.flush_if_needed(force=True)
+        if store.should_sync_on_shutdown:
+            store.sync_to_object_store(force=True)
+
+
+app = FastAPI(title="Myra Language Teacher", lifespan=_lifespan)
 app.state.dynamic_words_store = None
 
 
@@ -175,42 +211,6 @@ async def _flush_words_loop() -> None:
                 store.flush_if_needed(force=False)
     except asyncio.CancelledError:
         return
-
-
-@app.on_event("startup")
-async def startup_words_store() -> None:
-    enabled = _env_bool("WORDS_STORE_ENABLED", True)
-    store = DynamicWordsStore(
-        enabled=enabled,
-        local_path=os.environ.get("WORDS_LOCAL_PATH", DEFAULT_WORDS_LOCAL_PATH).strip(),
-        bucket_name=os.environ.get("WORDS_OBJECT_BUCKET", "").strip(),
-        object_key=os.environ.get("WORDS_OBJECT_KEY", DEFAULT_WORDS_OBJECT_KEY).strip(),
-        sync_to_gcs_policy=_env_choice("WORDS_SYNC_TO_GCS", "never", {"never", "session_end", "shutdown"}),
-        flush_interval_sec=_env_int("WORDS_FLUSH_INTERVAL_SEC", 21600),
-        flush_max_new_words=_env_int("WORDS_FLUSH_MAX_NEW_WORDS", 50),
-        refresh_interval_sec=_env_int("WORDS_REFRESH_INTERVAL_SEC", 3600),
-    )
-    store.load_snapshot()
-    app.state.dynamic_words_store = store
-    set_dynamic_words_store(store)
-    app.state.words_flush_task = asyncio.create_task(_flush_words_loop())
-
-
-@app.on_event("shutdown")
-async def shutdown_words_store() -> None:
-    flush_task = getattr(app.state, "words_flush_task", None)
-    if flush_task is not None:
-        flush_task.cancel()
-        try:
-            await flush_task
-        except asyncio.CancelledError:
-            pass
-
-    store = getattr(app.state, "dynamic_words_store", None)
-    if store is not None:
-        store.flush_if_needed(force=True)
-        if store.should_sync_on_shutdown:
-            store.sync_to_object_store(force=True)
 
 
 # ── Health check ──────────────────────────────────────────────────────────────
