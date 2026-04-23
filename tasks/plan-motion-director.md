@@ -14,11 +14,20 @@ news anchor. Today the robot has a three-state body language loop —
 This is correct but lifeless: the body never reacts to *what* is being said,
 *how* it is being said, or *who* is saying it.
 
-The Motion Director adds an intelligent layer that:
+This plan replaces that with a **three-layer motion stack**, modeled on
+`pollen-robotics/reachy_mini_conversation_app` (see §12), where most
+"aliveness" comes from cheap procedural layers and the LLM only fires
+discrete, intentional gestures:
 
-1. Reads the live conversation (assistant + child transcript and affect),
-2. Selects from a curated vocabulary of pre-choreographed moves, and
-3. Hands those moves to the existing `KidsTeacherRobotHooks` for execution.
+1. **Idle breathing** — the robot is never frozen.
+2. **Audio-reactive wobble** — the head subtly moves with speech.
+3. **LLM-chosen gestures** — dances, emotes, points: chosen by the
+   Realtime model itself via tool calls and dispatched in the
+   background so audio never stalls.
+
+The "Motion Director" name now refers to the whole stack. A model-only
+director (the originally-proposed Option C) is preserved as an optional
+Phase 3 enhancement.
 
 ### Non-goals (V1)
 
@@ -58,10 +67,17 @@ keeps the speaker chunked without re-triggering animation per chunk.
 Expose a `move_robot(name)` tool to the OpenAI Realtime session. The voice
 model decides when to gesture as it speaks.
 
-- **Pros:** zero extra infra; gestures perfectly intent-aligned with words.
-- **Cons:** tool calls add latency and can stall the audio stream;
-  Realtime models are uneven at "do this *while* speaking"; failure mode
-  is a beat-late wave or a stuttered sentence. Kids notice.
+- **Pros:** zero extra infra; gestures perfectly intent-aligned with
+  words. **Proven in production by `pollen-robotics/reachy_mini_conversation_app`** —
+  see §12 for details.
+- **Cons:** naive implementations stall audio when a tool runs. Pollen
+  fixes this with a `BackgroundToolManager` so tool calls execute on a
+  separate task while the audio stream continues. With that mitigation
+  the latency objection largely disappears.
+- **Caveat that remains:** the LLM only fires discrete gestures at
+  decision points; the body still goes still between them. Pollen
+  compensates with a non-LLM audio-reactive layer + idle breathing
+  (see "Layered architecture" below).
 
 ### Option B — Inline annotation tags in the assistant text
 
@@ -94,55 +110,98 @@ Hand-coded rules: keyword spotting + sentiment classifier → gestures.
 - **Cons:** brittle, joyless, doesn't generalize to topics we didn't
   anticipate. Defeats the point.
 
-**Decision:** Build Option C. Keep a small rules layer underneath as a
-fallback so the robot never goes fully silent if the director is
-unavailable.
+### Revised recommendation — layered, not single-source
+
+After reviewing Pollen's working implementation, the right answer is
+**not "pick one option"** — it's a **three-layer composition** where
+each layer handles what it's best at:
+
+| Layer | Driver | Cadence | Purpose |
+|---|---|---|---|
+| **L1 — Idle breathing** | Procedural | 60 Hz | Robot never looks frozen between turns |
+| **L2 — Audio-reactive wobble** | Audio amplitude / VAD | 50 ms hops | Continuous, speech-locked secondary motion |
+| **L3 — Discrete gestures** | LLM-chosen (Option A) and/or director (Option C) | Per gesture event | Intentional reactions: dance, emote, point |
+
+Pollen uses Option A for L3. We start there too — it's proven, the
+infra cost is low, and it composes cleanly with the existing realtime
+session. We keep the **parallel director (Option C)** as a Phase-3
+enhancement *only if* tool-call gesture selection misses content-aware
+nuance we can't unlock by improving the prompt.
+
+This means our V1 is closer to Pollen's pattern than to the original
+parallel-director sketch — a good thing: less novel infra, more proven
+behavior.
 
 ---
 
 ## 4. Architecture
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
-│                       Reachy Mini (Pi)                           │
-│                                                                  │
-│   ┌────────────────────┐     transcript stream                   │
-│   │  Realtime session  │────────────┐                            │
-│   │ (KidsTeacher       │            ▼                            │
-│   │  RealtimeHandler)  │     ┌─────────────────┐                 │
-│   │                    │     │ Motion Director │                 │
-│   │  audio in/out      │     │ (small LLM,     │                 │
-│   │  status events     │────▶│  ~1s tick)      │                 │
-│   └────────┬───────────┘     └────────┬────────┘                 │
-│            │                          │  GestureIntent           │
-│            │ speak/listen/idle        ▼                          │
-│            │                 ┌─────────────────┐                 │
-│            └────────────────▶│ GestureScheduler │                │
-│                              │  (debounce,      │                │
-│                              │   priority,      │                │
-│                              │   barge-in)      │                │
-│                              └────────┬─────────┘                │
-│                                       ▼                          │
-│                              ┌─────────────────┐                 │
-│                              │ChoreographyLib  │                 │
-│                              │ (named moves)   │                 │
-│                              └────────┬─────────┘                │
-│                                       ▼                          │
-│                              ┌─────────────────┐                 │
-│                              │ RobotController │                 │
-│                              └─────────────────┘                 │
-└──────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                         Reachy Mini (Pi)                           │
+│                                                                    │
+│   ┌────────────────────┐                                           │
+│   │  Realtime session  │                                           │
+│   │ (KidsTeacher       │                                           │
+│   │  RealtimeHandler)  │                                           │
+│   │                    │                                           │
+│   │  ──audio out──┬────┼──► AudioWobbler ──┐ (L2: secondary,       │
+│   │              │     │   (amp/VAD →      │  additive offsets)    │
+│   │              │     │    sinusoids)     │                       │
+│   │              │     │                   │                       │
+│   │  ──tool────────────┼──► BackgroundTool │                       │
+│   │    calls           │    Manager        │                       │
+│   │                    │      │            │                       │
+│   │  ──status events───┼──┐   ▼            │                       │
+│   │                    │  │  GestureIntent │                       │
+│   └────────────────────┘  │   (L3: discrete│                       │
+│                           │    LLM-chosen) │                       │
+│                           ▼   ▼            │                       │
+│                       ┌──────────────────┐ │                       │
+│                       │GestureScheduler  │◄┘                       │
+│                       │ (priority,       │                         │
+│                       │  debounce,       │                         │
+│                       │  barge-in flush) │                         │
+│                       └────────┬─────────┘                         │
+│                                ▼                                   │
+│                       ┌──────────────────┐                         │
+│                       │ ChoreographyLib  │   ┌──────────────────┐  │
+│                       │ (named clips +   │◄──│ BreathingLoop    │  │
+│                       │  procedural)     │   │ (L1: 60Hz idle)  │  │
+│                       └────────┬─────────┘   └────────┬─────────┘  │
+│                                │ primary pose         │ baseline   │
+│                                ▼                      ▼            │
+│                       ┌────────────────────────────────────────┐   │
+│                       │ MovementComposer                       │   │
+│                       │  pose = baseline + primary + L2 offset │   │
+│                       └────────┬───────────────────────────────┘   │
+│                                ▼                                   │
+│                       ┌──────────────────┐                         │
+│                       │ RobotController  │                         │
+│                       └──────────────────┘                         │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
-Three new components, all owned by the kids_teacher module:
+Five new components, all owned by the kids_teacher module:
 
 1. **ChoreographyLibrary** — the gesture vocabulary (§5).
-2. **MotionDirector** — the model-driven gesture selector (§6).
-3. **GestureScheduler** — concurrency, priority, debounce (§7).
+2. **GestureScheduler** — concurrency, priority, debounce (§7).
+3. **AudioWobbler** — L2 audio-reactive secondary motion (§6.1). No LLM.
+4. **BreathingLoop** — L1 idle baseline. No LLM, no inputs.
+5. **MovementComposer** — combines L1 + L2 + L3 each control tick into
+   a single pose handed to `RobotController`.
+
+The LLM-driven L3 is wired into the existing realtime session as
+**function tools** (Option A). Tool dispatch goes through a
+`BackgroundToolManager` so audio is never blocked by gesture decisions.
 
 The existing `KidsTeacherRobotHooks` becomes the integration seam: it
-forwards transcript and status events into the director and exposes a
-`play_gesture(name)` method to the scheduler.
+owns the lifecycle of L1/L2/L3 components, forwards realtime events into
+them, and exposes the gesture tools to the model.
+
+A future `MotionDirector` (Option C) can plug into the scheduler as a
+*second* L3 source if Phase 3 needs content-aware moves the LLM tool
+call doesn't surface.
 
 ---
 
@@ -189,17 +248,65 @@ sprints with telemetry on which fire most.
 
 ---
 
-## 6. Motion Director model
+## 6. Layer details
 
-### Inputs (per tick, ~1s cadence)
+### 6.1 L1 — Idle breathing
+
+A 60 Hz procedural loop that applies a small z-axis sway (~5 mm) and a
+slow antenna oscillation (~15°) whenever the gesture queue is empty.
+Pure math, no inputs. Mirrors Pollen's `BreathingMove` in
+`moves.py:96-181`.
+
+### 6.2 L2 — Audio-reactive wobble
+
+A speech-locked secondary layer that adds small additive offsets to
+head pitch/yaw/roll and body x/y/z based on the assistant's outgoing
+audio amplitude.
+
+- **Input:** PCM chunks from the realtime audio-out stream (already
+  pumped through `KidsTeacherRobotHooks.start_assistant_playback`).
+- **Pipeline:** dB-VAD on the chunk → loudness envelope → ~6 sinusoidal
+  oscillators at slightly detuned frequencies → additive offset matrix
+  applied each control tick.
+- **Cadence:** ~50 ms hops, but the *result* is sampled at the 60 Hz
+  composer tick.
+- **No LLM, no gesture allow-list.** This layer cannot pick a "wrong"
+  move because it can't pick at all — it only modulates.
+
+This is what makes the robot look alive *during* speech without paying
+LLM round-trips. Pollen's `audio/speech_tapper.py:SwayRollRT` is the
+working reference.
+
+### 6.3 L3a — LLM tool-call gestures (V1 primary)
+
+Discrete, LLM-chosen gestures exposed as Realtime tools:
+
+- `play_gesture(name)` — fire a named clip from the library
+- `dance(name)` — long-form celebration clip
+- `move_head(direction)` — coarse pointing (left/right/up/down/front)
+- `stop_motion()` — flush primary queue (model can self-cancel)
+
+Tool specs are auto-generated from Python signatures + docstrings.
+Tool dispatch runs in a `BackgroundToolManager`-equivalent so the audio
+stream is never blocked. The system prompt describes what each gesture
+*means* (semantics) but does **not** prescribe when to use them — that
+discretion stays with the LLM, exactly like Pollen's
+`prompts/default_prompt.txt` pattern.
+
+### 6.4 L3b — Optional Motion Director (Phase 3)
+
+If telemetry shows the LLM under-gesturing or missing topical cues, add
+a parallel director that emits gestures from the same allow-list on a
+~1s tick. Spec preserved below for reference.
+
+#### Inputs (per tick)
 - Last 5–10 seconds of assistant transcript
 - Last 5 seconds of child transcript (if available)
-- Current `SessionStatus` (LISTENING / SPEAKING / THINKING / IDLE)
-- Last gesture played + how long ago (avoid repeats)
-- Topic hint if the prompt template provided one (e.g. "we're on
-  animals today")
+- Current `SessionStatus`
+- Last gesture played + how long ago
+- Topic hint if the prompt template provided one
 
-### Output (strict JSON)
+#### Output (strict JSON)
 ```json
 {
   "gesture": "mini_dance_excited",
@@ -209,45 +316,38 @@ sprints with telemetry on which fire most.
 }
 ```
 
-`gesture: null` is valid and common — most ticks should produce no
-movement. The director must learn to under-act.
+`gesture: null` is valid and common.
 
-### Prompt shape
-A compact system prompt that:
-1. Describes the robot's expressive vocabulary (the names + 1-line
-   semantics from §5),
-2. Gives 5–10 few-shot examples mapping transcript snippets to gestures,
-3. Hard-rules: no movement during `THINKING`, max one celebration per
-   30s, prefer null over noise.
-
-### Model choice
-- **V1:** Claude Haiku 4.5 via the Anthropic SDK. Latency ~300ms, cheap,
-  follows JSON schemas reliably. Runs as a background async task on the
-  Pi; failures are silent and non-blocking.
-- **V2 candidate:** on-device classifier (DistilBERT-class, ONNX) for
-  the affect dimension; LLM only for novelty/topic-aware moves.
-
-### Cost ceiling
-Cap director calls at 1/sec with rolling-window dedup. Worst case ~3,600
-small calls/hour ≈ pennies. Hard kill-switch via env flag.
+#### Model choice
+- **Phase 3 candidate:** Claude Haiku 4.5. Latency ~300ms, cheap, JSON-
+  reliable. Background async task; failures silent and non-blocking.
+- **Phase 4 candidate:** on-device classifier (DistilBERT-class, ONNX)
+  for affect; LLM only for novelty/topic-aware moves.
 
 ---
 
 ## 7. Concurrency, priority, debouncing
 
-`GestureScheduler` rules:
+`GestureScheduler` and `MovementComposer` rules:
 
-1. **State precedence** — anything from `KidsTeacherRobotHooks` (the
-   speak/listen/idle base state machine) wins. The director only fills
-   gaps.
-2. **Barge-in cancels mid-gesture** — `stop_assistant_playback` flushes
-   the gesture queue and forces `listening_attentive`.
-3. **Debounce** — same gesture can't repeat within 8s. Total moves
-   capped at 1 every 4s.
-4. **Priority lanes** — `safety` > `system` > `celebration` > `affect` >
+1. **Layer composition** — every 60 Hz tick:
+   `pose = baseline (L1) + primary clip (L3) + additive offsets (L2)`.
+   L1 and L2 always run; L3 is sparse.
+2. **State precedence (L3)** — anything from `KidsTeacherRobotHooks`
+   base state (speak/listen/idle) wins over LLM tool gestures. The LLM
+   never overrides barge-in posture.
+3. **Barge-in cancels mid-gesture** — `stop_assistant_playback` flushes
+   the L3 queue, resets the wobbler envelope, and snaps to
+   `listening_attentive`. Mirrors Pollen's wobbler reset on
+   `input.speech_started`.
+4. **Debounce** — same gesture can't repeat within 8s. Total L3 moves
+   capped at 1 every 4s. Long clips (`dance`) get their own lane and
+   pre-empt shorter affect clips.
+5. **Priority lanes** — `safety` > `system` > `celebration` > `affect` >
    `idle_filler`. Lower lanes drop when a higher one fires.
-5. **Blend, don't snap** — every clip starts and ends at the neutral
-   pose so transitions don't look jerky.
+6. **Blend, don't snap** — every clip starts and ends at the neutral
+   pose so L3 transitions are smooth even though L1+L2 keep moving
+   underneath.
 
 ---
 
@@ -256,16 +356,25 @@ small calls/hour ≈ pennies. Hard kill-switch via env flag.
 Minimal, surgical changes:
 
 - `kids_teacher_robot_bridge.py`
-  - Add `play_gesture(name, args)` that delegates to `GestureScheduler`.
-  - In `start_assistant_playback`, also publish the assistant transcript
-    chunk to the director's input queue.
-  - In `_on_speech_started`, flush director queue (barge-in).
+  - Add `play_gesture(name, args)` that enqueues to `GestureScheduler`.
+  - In `start_assistant_playback`, fork audio chunks to `AudioWobbler`
+    in addition to the existing speaker pipeline.
+  - In `_on_speech_started`, flush L3 queue and reset the wobbler.
+  - Start/stop `BreathingLoop` with the session lifecycle.
 - `kids_teacher_realtime.py`
-  - Forward `response.audio_transcript.delta` events to the bridge so
-    the director can see assistant text before audio finishes.
+  - Register the new gesture tools (`play_gesture`, `dance`, `move_head`,
+    `stop_motion`) on session creation, alongside existing tools.
+  - Dispatch `response.function_call_arguments.done` events to the
+    background tool manager so audio is never blocked.
+  - Forward `response.audio_transcript.delta` to the bridge (only used
+    if the optional Phase 3 director is enabled).
+- `kids_teacher_profile.py`
+  - Extend the system prompt with the gesture vocabulary semantics block
+    (names + 1-line meaning, no usage rules).
 - `robot_kids_teacher.py` (CLI entry)
-  - Construct `MotionDirector` + `GestureScheduler` and inject into the
-    bridge. Fully optional via `--motion-director` flag.
+  - Construct and inject the new components. Two flags:
+    `--motion-layers={none,baseline,wobble,full}` for opt-in rollout,
+    `--motion-director` for the Phase 3 parallel director.
 
 No changes to FastAPI routes. The browser status page never touches
 gestures.
@@ -274,71 +383,133 @@ gestures.
 
 ## 9. Safety & failure modes
 
-- Director output validated against the `ChoreographyLibrary` allow-list.
-  Unknown gesture names are dropped with a log line, not executed.
+- Tool-call gesture names validated against the `ChoreographyLibrary`
+  allow-list. Unknown names dropped with a log line, not executed.
 - `RobotController` already enforces joint limits; new clips inherit
-  this for free.
-- Director failure (timeout, network, parse error) → no gesture, log
-  event. Base speak/listen/idle keeps running.
-- Hard kill: `KIDS_TEACHER_MOTION_DIRECTOR=off` env flag falls back to
-  current 3-state behavior. Default off in V1; opt-in per session.
-- Telemetry: every gesture decision (chosen + reason for skip) logged
-  to the existing `KidsReviewStore` so we can tune offline.
+  this for free. L2 wobble is bounded by hard offset caps (e.g. ±5°
+  pitch, ±3 mm body) so bad audio can't violently shake the head.
+- L3 failure (tool dispatch error, library miss) → no gesture, log
+  event. L1 + L2 keep the robot alive; base speak/listen/idle keeps
+  running.
+- Hard kill: `KIDS_TEACHER_MOTION_LAYERS=none` env flag falls back to
+  current 3-state behavior. Per-layer flags also supported
+  (`...=baseline,wobble` to disable LLM gestures only).
+- Telemetry: every gesture decision (tool call args + accepted/dropped +
+  reason) logged to the existing `KidsReviewStore` so we can tune
+  offline.
 
 ---
 
 ## 10. Phased rollout
 
-**Phase 0 — Choreography library only**
+**Phase 0 — Choreography library + composer**
 - Land `ChoreographyLibrary` with 6–8 named clips and unit tests against
-  a `FakeRobotController`. No model, no scheduler. Wire one clip into a
-  manual celebration trigger to validate the path.
+  a `FakeRobotController`.
+- Land `MovementComposer` (60 Hz tick, additive blending) and
+  `BreathingLoop` (L1). At end of Phase 0 the robot is alive in idle
+  even with the LLM disabled.
 
-**Phase 1 — Scheduler + rules**
-- Add `GestureScheduler` with priority/debounce.
-- Add a simple keyword/sentiment rules layer that fires gestures from
-  the library. No LLM yet. Feature-flagged.
+**Phase 1 — Audio wobble (L2)**
+- Add `AudioWobbler` fed from `start_assistant_playback`. Tune offset
+  caps with parent on the couch.
+- After Phase 1 the robot looks alive *during* speech with no LLM
+  changes at all.
 
-**Phase 2 — Motion Director (LLM)**
-- Add `MotionDirector` calling Haiku 4.5. Run side-by-side with rules;
-  director outputs override rules when present.
-- Telemetry comparing rules vs director firing rates and child
-  reactions (subjective for now).
+**Phase 2 — LLM tool gestures (L3a)**
+- Add gesture tools to the realtime session + background dispatcher.
+- Extend system prompt with vocabulary semantics. Feature-flagged.
+- Telemetry on which gestures the model picks unprompted.
 
-**Phase 3 — Pedagogical extensions**
-- `count_bob`, `mimicry`, `point_with_gaze` — gestures that need
-  *content* awareness, not just affect. These benefit most from the LLM
-  director.
+**Phase 3 — Pedagogical + parallel director (L3b, optional)**
+- Add content-aware gestures (`count_bob`, `mimicry`, `point_with_gaze`).
+- If telemetry shows the LLM under-gesturing, layer in the parallel
+  Motion Director (Option C, §6.4) as a second L3 source.
 
-Each phase is independently mergeable and reversible.
+Each phase is independently mergeable and reversible. Phases 0–1 are
+pure-procedural and ship value with no model risk.
 
 ---
 
 ## 11. Open questions
 
-1. **Director model location** — Anthropic API (network) or on-device?
-   Network is simpler; on-device is robust to flaky WiFi but constrains
-   model choice.
-2. **Transcript fidelity** — The Realtime audio_transcript is partial
-   and lags audio. Is the lag tolerable for gesture timing, or do we
-   need to peek at the model's text channel earlier?
-3. **Gesture authoring tool** — should choreography be Python only, or
-   do we want a small JSON/YAML keyframe format so non-engineers can
-   contribute moves?
-4. **Multi-language tone cues** — the director sees transcripts in
-   English, Telugu, Assamese. Does Haiku handle affect equally across
-   them, or do we need per-language prompts/examples?
-5. **Evaluation** — how do we measure "more fun"? Likely
-   parent-in-the-loop A/B + simple metrics (session length, return
-   rate). Out of scope for V1 but worth flagging early.
+1. **Reuse vs. reimplement Pollen primitives** — `BreathingMove`,
+   `SwayRollRT`, `MovementManager`, and `BackgroundToolManager` are all
+   directly applicable. Do we vendor (license-permitting), depend on
+   the package, or rewrite to fit our `RobotController` shape? Vendoring
+   small files is probably right.
+2. **Clip storage** — Pollen loads dance/emotion clips from HuggingFace
+   datasets at runtime. Do we follow that pattern (good for non-eng
+   contribution, costs first-run download) or keep clips in-repo as
+   Python (simple, easy to test)?
+3. **Tool-call quality** — does `gpt-realtime-mini` actually fire
+   gestures at the right moments without prompt prescription, or does
+   it under-call? If the latter, do we need few-shot examples in the
+   prompt or jump to the parallel director sooner?
+4. **Multi-language tone cues** — the LLM and any director see
+   transcripts in English, Telugu, Assamese. Affect detection quality
+   across all three needs a small eval before we trust gestures.
+5. **Evaluation** — how do we measure "more fun"? Parent-in-the-loop
+   A/B + simple metrics (session length, return rate). Out of scope for
+   V1 but worth flagging early.
 
 ---
 
 ## 12. Prior art
 
-- `pollen-robotics/reachy_mini_conversation_app` — TBD: pending review;
-  this section will be filled in with what we learn from how their
-  conversation app sequences movement against speech.
-- The current Myra `robot_teacher.py` celebration animations — narrow
-  but a good source of pre-choreographed primitives we can lift into
-  the library.
+### `pollen-robotics/reachy_mini_conversation_app`
+
+The reference implementation. Pluggable cloud realtime backend
+(`gpt-realtime` default, Gemini Live alt). Three-layer composition that
+this plan deliberately mirrors:
+
+- **L1 — `BreathingMove`** (`moves.py:96-181`) auto-runs when the move
+  queue is empty. ~5 mm z-sway + ~15° antenna oscillation. Pure
+  procedural.
+- **L2 — `SwayRollRT`** (`audio/speech_tapper.py`, called via
+  `audio/head_wobbler.py`) consumes outgoing PCM at ~50 ms hops, runs
+  dB-VAD + loudness tracking, drives **6 sinusoidal oscillators** to
+  produce additive pitch/yaw/roll + x/y/z offsets. No LLM. Reset on
+  child speech-start.
+- **L3 — LLM tool calls.** Tools registered with `tool_choice="auto"`
+  (`openai_realtime.py:659-662`). Vocabulary: `dance`, `play_emotion`,
+  `move_head`, `stop_dance`, `stop_emotion`, `head_tracking`,
+  `do_nothing`. Tool args arrive as
+  `response.function_call_arguments.done` events
+  (`openai_realtime.py:~810`) and dispatch through a
+  **`BackgroundToolManager`** (`tools/background_tool_manager.py`,
+  registered at line 681) so the audio stream is never blocked.
+- **Composition** in `MovementManager` (`moves.py:285-824`) at 60 Hz
+  (`CONTROL_LOOP_FREQUENCY_HZ = 60.0`). `_compose_full_body_pose` blends
+  primary queue + speech_offsets + face_tracking_offsets every tick.
+  Cross-thread `_command_queue` + per-channel locks
+  (`_speech_offsets_lock`, `_face_offsets_lock`).
+
+Gesture **clips themselves** are not in code — they're loaded at
+runtime from HuggingFace datasets:
+`pollen-robotics/reachy-mini-dances-library` and
+`reachy-mini-emotions-library`. `RecordedMoves.list_moves()` enumerates
+them dynamically.
+
+The system prompt (`prompts/default_prompt.txt`) is **terse**: it
+describes head directions and head-tracking semantics but does **not**
+prescribe when to dance/emote. The LLM decides timing on its own.
+
+DoFs touched: head 6-DoF (x/y/z + roll/pitch/yaw), 2 antennae, 1 body
+yaw — same as our Reachy Mini.
+
+**What we take wholesale:** the L1+L2+L3 split, the
+`BackgroundToolManager` pattern, the additive-offset composition at
+60 Hz, the terse-prompt-with-tool-discretion approach, the
+wobbler-reset-on-barge-in pattern.
+
+**What we add:** kid-specific gesture vocabulary (counting, mimicry,
+encouragement after misses), tighter integration with our existing
+`KidsTeacherRobotHooks` state machine, and the optional Phase 3
+parallel director for content-aware moves the LLM might miss.
+
+### Existing Myra `robot_teacher.py`
+
+The legacy language-teacher CLI has a narrow set of celebration and
+listening animations directly on `RobotController`. Worth lifting the
+specific motion primitives (e.g. antenna wiggle for correct answer)
+into the new `ChoreographyLibrary` rather than reimplementing.
