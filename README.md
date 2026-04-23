@@ -295,7 +295,7 @@ Backend model:
 | Variable                       | Default            | Purpose |
 | ------------------------------ | ------------------ | ------- |
 | `OPENAI_API_KEY`               | _(required)_       | OpenAI credentials for the realtime session |
-| `KIDS_TEACHER_REALTIME_MODEL`  | `gpt-realtime-mini`| Model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
+| `KIDS_TEACHER_REALTIME_MODEL`  | `gpt-realtime`     | Model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
 
 Review storage (both default **OFF**; enable explicitly per deployment):
 
