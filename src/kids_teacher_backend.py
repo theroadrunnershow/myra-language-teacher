@@ -14,6 +14,8 @@ SDK or an API key.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import os
 from typing import Any, AsyncIterator, Callable, Optional, Protocol
@@ -38,6 +40,29 @@ _INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
 
 class BackendConfigError(Exception):
     """Raised when realtime backend config (e.g. model selection) is invalid."""
+
+
+def _decode_audio_delta(delta: Any) -> bytes:
+    """Decode an OpenAI Realtime audio delta field to raw PCM16 bytes.
+
+    The SDK returns a base64 string; older/test paths may pass raw bytes.
+    Invalid base64 returns ``b""`` so a bad payload does not crash the
+    reader loop.
+    """
+    if isinstance(delta, bytes):
+        return delta
+    if not delta:
+        return b""
+    try:
+        return base64.b64decode(delta)
+    except (binascii.Error, ValueError):
+        logger.warning("[kids_teacher_backend] invalid base64 audio delta; dropping chunk")
+        return b""
+
+
+def _encode_audio_chunk(chunk: bytes) -> str:
+    """Encode outbound PCM16 bytes for OpenAI ``input_audio_buffer.append``."""
+    return base64.b64encode(chunk).decode("ascii")
 
 
 def resolve_realtime_model(env_value: Optional[str] = None) -> str:
@@ -116,11 +141,13 @@ class RealtimeBackend(Protocol):
 
         V1 event types (each dict has ``type`` plus the fields below):
 
+          * ``input.speech_started``     ``{}``                              (server VAD detected child speech)
+          * ``input.speech_stopped``     ``{}``                              (server VAD detected end of child speech)
           * ``input_transcript.delta``   ``{"text": str, "language": Optional[str]}``
           * ``input_transcript.final``   ``{"text": str, "language": Optional[str]}``
           * ``assistant_transcript.delta`` ``{"text": str}``
           * ``assistant_transcript.final`` ``{"text": str, "language": Optional[str]}``
-          * ``audio.chunk``              ``{"audio": bytes}``
+          * ``audio.chunk``              ``{"audio": bytes}`` (raw PCM16)
           * ``response.done``            ``{}``
           * ``error``                    ``{"message": str}``
         """
@@ -183,12 +210,15 @@ class OpenAIRealtimeBackend:
     async def _open_connection(self, session_payload: dict) -> Any:
         """Open the SDK-level connection and send the session.update payload.
 
-        Isolated in its own method so the SDK call shape can evolve (or be
-        stubbed by subclasses) without rewriting :meth:`connect`.
+        Isolated in its own method so the SDK call shape can be stubbed by
+        subclasses without rewriting :meth:`connect`.
         """
-        # NOTE: exact SDK method names are best-effort stubs; integration
-        # phase (Intern 3 / Phase 5) will verify against the real SDK.
-        connection = await self._client.realtime.connect(model=self._model)  # type: ignore[attr-defined]
+        # openai>=1.59 exposes realtime under client.beta.realtime; later
+        # stable releases promote it to client.realtime. Support both.
+        realtime_ns = getattr(self._client, "realtime", None)
+        if realtime_ns is None:
+            realtime_ns = self._client.beta.realtime  # type: ignore[attr-defined]
+        connection = await realtime_ns.connect(model=self._model)  # type: ignore[attr-defined]
         await connection.session.update(session=session_payload)  # type: ignore[attr-defined]
         return connection
 
@@ -210,10 +240,9 @@ class OpenAIRealtimeBackend:
     def _normalize_event(raw_event: Any) -> Optional[dict]:
         """Map a raw OpenAI Realtime event to our normalized dict shape.
 
-        This is a best-effort stub for V1. Phase 5 integration work will
-        replace the TODOs below with the real SDK event names once we
-        exercise the live wire. Until then, correctness of the abstraction
-        (tested via the fake backend) matters more than this translation.
+        Event names follow the public OpenAI Realtime API. Acknowledgement
+        events (``session.created``, ``session.updated``, ``response.created``,
+        etc.) are silently dropped — the handler does not act on them.
         """
         raw_type = getattr(raw_event, "type", None) or (
             raw_event.get("type") if isinstance(raw_event, dict) else None
@@ -226,9 +255,10 @@ class OpenAIRealtimeBackend:
                 return raw_event.get(name, default)
             return getattr(raw_event, name, default)
 
-        # TODO: verify exact event names against the OpenAI Realtime SDK
-        # during Phase 5 integration. Listed mappings reflect the public
-        # Realtime API event naming convention at time of writing.
+        if raw_type == "input_audio_buffer.speech_started":
+            return {"type": "input.speech_started"}
+        if raw_type == "input_audio_buffer.speech_stopped":
+            return {"type": "input.speech_stopped"}
         if raw_type == "conversation.item.input_audio_transcription.delta":
             return {
                 "type": "input_transcript.delta",
@@ -253,22 +283,29 @@ class OpenAIRealtimeBackend:
                 "language": _field("language"),
             }
         if raw_type == "response.audio.delta":
+            # OpenAI returns audio chunks base64-encoded.
             return {
                 "type": "audio.chunk",
-                "audio": _field("delta", b""),
+                "audio": _decode_audio_delta(_field("delta", "")),
             }
         if raw_type == "response.done":
             return {"type": "response.done"}
         if raw_type == "error":
-            message = _field("message") or _field("error") or "unknown error"
+            raw_error = _field("error")
+            if isinstance(raw_error, dict):
+                message = raw_error.get("message") or "unknown error"
+            else:
+                message = raw_error or _field("message") or "unknown error"
             return {"type": "error", "message": str(message)}
         return None
 
     async def send_audio(self, chunk: bytes) -> None:
-        if self._connection is None:
+        if self._connection is None or not chunk:
             return
         try:
-            await self._connection.input_audio_buffer.append(audio=chunk)  # type: ignore[attr-defined]
+            await self._connection.input_audio_buffer.append(  # type: ignore[attr-defined]
+                audio=_encode_audio_chunk(chunk)
+            )
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_backend] send_audio failed: %s", exc)
             await self._event_queue.put({"type": "error", "message": str(exc)})

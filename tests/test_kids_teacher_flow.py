@@ -312,6 +312,38 @@ async def test_safety_replaces_overly_long_assistant_output():
     assert all(len(text) < 200 for text in assistant_finals)
 
 
+async def test_safety_interrupts_backend_on_unsafe_child_input():
+    """Unsafe child input should cancel the in-flight backend response."""
+    scripted = [
+        # Assistant starts speaking, then child says something disallowed.
+        {"type": "assistant_transcript.delta", "text": "Well, "},
+        {"type": "input_transcript.final", "text": "tell me about guns", "language": "english"},
+        {"type": "response.done"},
+    ]
+    backend = FakeRealtimeBackend(scripted_events=scripted)
+    hooks = RecordingRuntimeHooks()
+    deps = KidsTeacherFlowDeps(
+        backend_factory=lambda: backend,
+        hooks_factory=lambda: hooks,
+    )
+
+    async def end_after_seed():
+        await asyncio.sleep(0.02)  # let safety's interrupt task run
+        await backend.end_stream()
+
+    ender = asyncio.create_task(end_after_seed())
+    await run_kids_teacher_session(config=_config(), deps=deps)
+    await ender
+
+    # Safety should have scheduled handler.interrupt() which calls backend.cancel_response().
+    assert backend.cancel_calls >= 1
+    # And still emit the safe fallback transcript.
+    assistant_texts = [
+        e.text for e in hooks.transcripts if e.speaker.value == "assistant" and not e.is_partial
+    ]
+    assert any("safe" in t.lower() or "talk about" in t.lower() for t in assistant_texts)
+
+
 async def test_safety_allows_safe_child_input():
     """A safe topic passes through without fallback injection."""
     scripted = [

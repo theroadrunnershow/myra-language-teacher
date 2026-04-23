@@ -13,7 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from typing import Any, Callable, List, Optional, Tuple
 
 from kids_review_store import KidsReviewStore
 from kids_safety import (
@@ -99,14 +99,30 @@ class RecordingRuntimeHooks:
 
 
 def build_robot_hooks_stub(robot_controller: object) -> KidsTeacherRuntimeHooks:
-    """Placeholder for the real robot audio bridge (Phase 5).
+    """Deprecated shim. Use :func:`build_robot_hooks` instead.
 
-    Returning a concrete implementation is deliberately out of scope for V1.
+    Retained so the original stub contract (raises ``NotImplementedError``)
+    is preserved for any test or caller that still imports this name. New
+    code should call :func:`build_robot_hooks`, which returns a real
+    :class:`KidsTeacherRobotHooks` instance.
     """
     raise NotImplementedError(
-        "Real robot audio bridge is wired in a separate Phase 5 change. "
-        "For V1 tests, inject RecordingRuntimeHooks or NullRuntimeHooks."
+        "build_robot_hooks_stub is deprecated; call build_robot_hooks() "
+        "to get a real KidsTeacherRobotHooks for the Reachy Mini bridge."
     )
+
+
+def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
+    """Build the real robot audio bridge hooks for a running session.
+
+    Imports :mod:`kids_teacher_robot_bridge` lazily so this module stays
+    importable when the robot SDK (or its optional audio deps) is missing.
+    Callers are responsible for ``.start()``/``.stop()`` on the returned
+    hooks — the flow wires that lifecycle around ``run_kids_teacher_session``.
+    """
+    from kids_teacher_robot_bridge import KidsTeacherRobotHooks
+
+    return KidsTeacherRobotHooks(robot_controller=robot_controller)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +187,8 @@ async def run_kids_teacher_session(
     effective_hooks = _wrap_hooks_with_review(hooks, review_store, config)
     # Safety wrapper sits outermost: it sees every transcript event before
     # review persistence and can replace unsafe assistant output.
-    effective_hooks = _SafetyHooks(effective_hooks, config)
+    safety_hooks = _SafetyHooks(effective_hooks, config)
+    effective_hooks = safety_hooks
 
     handler = KidsTeacherRealtimeHandler(
         config=config,
@@ -179,6 +196,10 @@ async def run_kids_teacher_session(
         hooks=effective_hooks,
         clock=deps.clock,
     )
+    # Let the safety layer stop an in-flight assistant response when it
+    # detects unsafe child input. Done after handler construction to avoid
+    # the hooks <-> handler circular dependency.
+    safety_hooks.set_interrupt(handler.interrupt)
 
     try:
         await handler.start()
@@ -322,6 +343,15 @@ class _SafetyHooks:
     ) -> None:
         self._inner = inner
         self._config = config
+        self._interrupt: Optional[Callable[[], Any]] = None
+
+    def set_interrupt(self, interrupt_coro: Callable[[], Any]) -> None:
+        """Register an async callable invoked on unsafe child input.
+
+        Expected to be ``handler.interrupt`` — flushes queued assistant audio
+        and cancels the in-flight backend response.
+        """
+        self._interrupt = interrupt_coro
 
     def start_assistant_playback(self, audio_chunk: bytes) -> None:
         self._inner.start_assistant_playback(audio_chunk)
@@ -395,6 +425,18 @@ class _SafetyHooks:
             classification.decision.value,
             classification.category,
         )
+        # Stop any in-flight assistant response the backend has already
+        # started based on the child's audio, before we emit the safe line.
+        if self._interrupt is not None:
+            try:
+                coro = self._interrupt()
+                if asyncio.iscoroutine(coro):
+                    asyncio.get_running_loop().create_task(coro)
+            except RuntimeError:
+                # No running loop — can't schedule. Falls back to transcript-only.
+                logger.warning("[kids_teacher_flow] no event loop for safety interrupt")
+            except Exception as exc:  # pragma: no cover - defensive
+                logger.warning("[kids_teacher_flow] safety interrupt failed: %s", exc)
         safe_event = KidsTranscriptEvent(
             speaker=Speaker.ASSISTANT,
             text=safe_text,

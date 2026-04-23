@@ -233,6 +233,53 @@ async def test_recent_turn_memory_mixes_child_and_assistant() -> None:
 # ---------------------------------------------------------------------------
 
 
+async def test_speech_started_triggers_barge_in() -> None:
+    """VAD speech_started event cancels an in-flight assistant response."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Assistant starts speaking.
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "The sky..."}
+    )
+    await asyncio.sleep(0.01)
+
+    # Server VAD detects the child is speaking — earliest possible barge-in.
+    await backend.push_event({"type": "input.speech_started"})
+    await asyncio.sleep(0.01)
+
+    assert backend.cancel_calls == 1
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_speech_stopped_does_not_cancel() -> None:
+    """VAD speech_stopped is an informational marker — no barge-in."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "Hi"}
+    )
+    await asyncio.sleep(0.01)
+    await backend.push_event({"type": "input.speech_stopped"})
+    await asyncio.sleep(0.01)
+
+    assert backend.cancel_calls == 0
+
+    await backend.end_stream()
+    await run_task
+
+
 async def test_child_interrupts_assistant_triggers_cancel_and_stop_playback() -> None:
     backend = FakeRealtimeBackend()
     hooks = FakeHooks()

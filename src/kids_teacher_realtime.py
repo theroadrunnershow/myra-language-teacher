@@ -154,7 +154,13 @@ class KidsTeacherRealtimeHandler:
 
     async def _dispatch(self, event: dict) -> None:
         event_type = event.get("type", "")
-        if event_type == "input_transcript.delta":
+        if event_type == "input.speech_started":
+            await self._on_speech_started()
+        elif event_type == "input.speech_stopped":
+            # VAD end-of-speech signal — no action needed; the final
+            # transcript event drives downstream behavior.
+            pass
+        elif event_type == "input_transcript.delta":
             await self._on_input_delta(event)
         elif event_type == "input_transcript.final":
             self._on_input_final(event)
@@ -170,6 +176,11 @@ class KidsTeacherRealtimeHandler:
             self._on_error(event)
         else:
             logger.debug("[kids_teacher_realtime] ignoring event type=%s", event_type)
+
+    async def _on_speech_started(self) -> None:
+        """Earliest barge-in signal from server-side VAD."""
+        if self._assistant_active:
+            await self._cancel_active_response()
 
     async def _on_input_delta(self, event: dict) -> None:
         text = event.get("text", "") or ""

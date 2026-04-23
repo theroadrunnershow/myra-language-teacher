@@ -169,3 +169,127 @@ def test_openai_backend_uses_injected_client_factory_model_default(
     assert backend.model == DEFAULT_REALTIME_MODEL
     # Constructing does NOT call the factory yet — only connect() does.
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# _normalize_event — translation of raw OpenAI Realtime events
+# ---------------------------------------------------------------------------
+
+
+import base64  # noqa: E402
+
+
+def test_normalize_speech_started() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "input_audio_buffer.speech_started"}
+    )
+    assert event == {"type": "input.speech_started"}
+
+
+def test_normalize_speech_stopped() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "input_audio_buffer.speech_stopped"}
+    )
+    assert event == {"type": "input.speech_stopped"}
+
+
+def test_normalize_input_transcript_delta() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {
+            "type": "conversation.item.input_audio_transcription.delta",
+            "delta": "why is",
+        }
+    )
+    assert event == {"type": "input_transcript.delta", "text": "why is", "language": None}
+
+
+def test_normalize_input_transcript_completed() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {
+            "type": "conversation.item.input_audio_transcription.completed",
+            "transcript": "why is the sky blue",
+        }
+    )
+    assert event == {
+        "type": "input_transcript.final",
+        "text": "why is the sky blue",
+        "language": None,
+    }
+
+
+def test_normalize_assistant_transcript_done() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {
+            "type": "response.audio_transcript.done",
+            "transcript": "The sky is blue.",
+        }
+    )
+    assert event == {
+        "type": "assistant_transcript.final",
+        "text": "The sky is blue.",
+        "language": None,
+    }
+
+
+def test_normalize_audio_delta_decodes_base64() -> None:
+    payload = b"\x00\x01\x02\x03"
+    b64 = base64.b64encode(payload).decode("ascii")
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "response.audio.delta", "delta": b64}
+    )
+    assert event == {"type": "audio.chunk", "audio": payload}
+
+
+def test_normalize_audio_delta_invalid_base64_drops_chunk() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "response.audio.delta", "delta": "!!!not-base64!!!"}
+    )
+    assert event == {"type": "audio.chunk", "audio": b""}
+
+
+def test_normalize_audio_delta_accepts_raw_bytes() -> None:
+    # Back-compat / scripted-fake path: if the event already has bytes, pass through.
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "response.audio.delta", "delta": b"\x10\x20"}
+    )
+    assert event == {"type": "audio.chunk", "audio": b"\x10\x20"}
+
+
+def test_normalize_error_with_dict_payload() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "error", "error": {"message": "rate limited", "code": "429"}}
+    )
+    assert event == {"type": "error", "message": "rate limited"}
+
+
+def test_normalize_response_done() -> None:
+    assert OpenAIRealtimeBackend._normalize_event({"type": "response.done"}) == {
+        "type": "response.done"
+    }
+
+
+def test_normalize_unknown_event_returns_none() -> None:
+    # Acknowledgements and other unhandled events are silently dropped.
+    assert OpenAIRealtimeBackend._normalize_event({"type": "session.created"}) is None
+    assert OpenAIRealtimeBackend._normalize_event({"type": "session.updated"}) is None
+    assert OpenAIRealtimeBackend._normalize_event({"type": "response.created"}) is None
+
+
+def test_normalize_event_without_type_returns_none() -> None:
+    assert OpenAIRealtimeBackend._normalize_event({}) is None
+    assert OpenAIRealtimeBackend._normalize_event(object()) is None
+
+
+# ---------------------------------------------------------------------------
+# Audio encoding (outbound)
+# ---------------------------------------------------------------------------
+
+
+def test_encode_audio_chunk_round_trip() -> None:
+    from kids_teacher_backend import _encode_audio_chunk, _decode_audio_delta
+
+    payload = b"\x01\x02\x03\x04\x05"
+    encoded = _encode_audio_chunk(payload)
+    # Encoded value is a base64 ASCII string.
+    assert isinstance(encoded, str)
+    assert _decode_audio_delta(encoded) == payload
