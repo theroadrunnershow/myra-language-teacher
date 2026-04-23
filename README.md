@@ -1,8 +1,15 @@
 # 🦕 Myra Language Teacher
 
-A fun, toddler-friendly web app that teaches **Telugu**, **Assamese**, **Tamil**, and **Malayalam** to your 4-year-old through a cute animated pink dino mascot!
+A toddler-friendly platform with **two modes**:
+
+- **Language Lesson** — scripted pronunciation practice for **Telugu**, **Assamese**, **Tamil**, and **Malayalam** with an animated mascot.
+- **Kids Teacher** — open-ended preschool conversation for 4–5 year olds over OpenAI Realtime voice, with a locked safety profile and no scripted answers.
+
+Both modes share the same FastAPI app and, on the Reachy Mini robot, the same audio hardware. The current language-lesson behavior is untouched; kids-teacher is an additive sibling flow.
 
 ## ✨ Features
+
+### Language Lesson (the original mode)
 
 - 🦕 Animated **pink dino** mascot with expressions (celebrate, shake, talk, idle bounce)
 - 🔊 **Hear It!** – plays just the target-language word via TTS
@@ -14,18 +21,29 @@ A fun, toddler-friendly web app that teaches **Telugu**, **Assamese**, **Tamil**
 - 🐛 **Debug panel** – shows exactly what Whisper heard and the match score (useful while tuning)
 - ⚙️ **Settings page** – configure child's name, languages, categories, and difficulty
 
+### Kids Teacher (new)
+
+- 🧸 Open-ended voice conversation for 4–5 year olds via **OpenAI Realtime**
+- 🔒 **Locked preschool profile** with disallowed-topic refusals, restricted-topic family-safe answers, and clarification behavior
+- 🌐 Multilingual — English, Telugu, Assamese, Tamil, Malayalam with confidence-based language selection and default fallback
+- ✋ Natural **barge-in** — the child can interrupt the assistant at any time (server-VAD triggered)
+- 👪 **Admin policy precedence** — admins can add restrictions; the system safety floor can never be weakened
+- 📼 Optional **review storage** — transcript and raw-audio retention are separate opt-ins, default OFF, local-first with optional GCS sync
+
 ## 🛠 Tech Stack
 
 
-| Layer            | Technology                                                  |
-| ---------------- | ----------------------------------------------------------- |
-| Backend          | Python 3.11 / FastAPI                                       |
-| Speech-to-Text   | faster-whisper (`tiny` model, CTranslate2, offline, no API key needed) |
-| Text-to-Speech   | gTTS (Google TTS, requires internet)                        |
-| Audio conversion | pydub + ffmpeg (WebM / MP4 / OGG → WAV)                     |
-| Fuzzy matching   | rapidfuzz (`token_sort_ratio`, 0–100 scale)                 |
-| Translation      | Google Cloud Translate (on-demand, cached to GCS)           |
-| Frontend         | Vanilla HTML / CSS / JS + Jinja2 templates                  |
+| Layer               | Technology                                                  | Used by |
+| ------------------- | ----------------------------------------------------------- | ------- |
+| Backend             | Python 3.11 / FastAPI                                       | both |
+| Speech-to-Text      | faster-whisper (`tiny` model, CTranslate2, offline, no API key) | language lesson |
+| Text-to-Speech      | gTTS (Google TTS, requires internet)                        | language lesson |
+| Audio conversion    | pydub + ffmpeg (WebM / MP4 / OGG → WAV)                     | language lesson |
+| Fuzzy matching      | rapidfuzz (`token_sort_ratio`, 0–100 scale)                 | language lesson |
+| Translation         | Google Cloud Translate (on-demand, cached to GCS)           | language lesson |
+| Realtime voice      | OpenAI Realtime (`gpt-realtime` or `gpt-realtime-mini`) with server-side VAD | kids teacher |
+| Input transcription | `gpt-4o-mini-transcribe`                                    | kids teacher |
+| Frontend            | Vanilla HTML / CSS / JS + Jinja2 templates                  | both |
 
 
 ---
@@ -216,6 +234,162 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 
 ---
 
+## 🧸 Kids Teacher Mode
+
+An open-ended preschool conversation mode for 4–5 year olds. Unlike the language-lesson flow (which scores pronunciation of a known target word), kids teacher is a streaming voice conversation with a locked safety profile. It runs on top of OpenAI Realtime and reuses the robot's audio hardware.
+
+### Architecture at a glance
+
+```
+Child speech ─▶ mic pump ─▶ RealtimeBackend (OpenAI) ─▶ Handler ─▶ Safety wrapper ─▶ Review store ─▶ Hooks ─▶ Robot speaker
+                                    ▲                              │
+                                    └────── interrupt() ───────────┘   (on unsafe input)
+```
+
+- `src/kids_teacher_realtime.py` — session handler (partial/final transcripts, recent-turn memory, barge-in, fallback)
+- `src/kids_teacher_backend.py` — OpenAI Realtime adapter (the only place `import openai` lives)
+- `src/kids_safety.py` — topic classifier, refusal/redirect/family-safe helpers, admin-policy precedence
+- `src/kids_review_store.py` — local-first transcript + raw-audio retention, optional GCS sync
+- `src/kids_teacher_flow.py` — orchestrator; wires safety + review + hooks around the handler
+- `src/kids_teacher_robot_bridge.py` — robot audio bridge (playback thread + mic pump)
+- `profiles/kids_teacher/{instructions,tools,voice}.txt` — the locked persona content
+
+### Prerequisites
+
+In addition to the base setup:
+
+```bash
+# OpenAI API key is required for realtime voice
+export OPENAI_API_KEY=sk-...
+
+# openai>=1.59.0 is already in requirements.txt; re-run if upgrading
+pip install -r requirements.txt
+```
+
+### Run a kids-teacher session
+
+**Web (status-only page):** the FastAPI app exposes a minimal dashboard. Start the server as usual, then visit:
+
+```
+http://localhost:8000/kids-teacher
+```
+
+This page shows the current model, enabled languages, default language, voice, and (when review is enabled) recent sessions. It does **not** run a live conversation in the browser — the realtime session runs on the robot.
+
+**Headless / robot:**
+
+```bash
+# On the Reachy Mini (or any host with OPENAI_API_KEY set and the openai SDK installed)
+export OPENAI_API_KEY=sk-...
+PYTHONPATH=src python src/robot_kids_teacher.py \
+  --session-id session-2026-04-23-a \
+  --max-seconds 900
+```
+
+If `openai` is not importable, the entry script exits cleanly with code `2` rather than crashing. The realtime session uses the robot's microphone and speaker via `kids_teacher_robot_bridge.py`.
+
+### Configuration (env vars)
+
+Backend model:
+
+| Variable                       | Default            | Purpose |
+| ------------------------------ | ------------------ | ------- |
+| `OPENAI_API_KEY`               | _(required)_       | OpenAI credentials for the realtime session |
+| `KIDS_TEACHER_REALTIME_MODEL`  | `gpt-realtime-mini`| Model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
+
+Review storage (both default **OFF**; enable explicitly per deployment):
+
+| Variable                       | Default                               | Purpose |
+| ------------------------------ | ------------------------------------- | ------- |
+| `KIDS_REVIEW_TRANSCRIPTS_ENABLED` | `false`                            | Persist transcript text to `session.json` after each session |
+| `KIDS_REVIEW_AUDIO_ENABLED`       | `false`                            | Persist raw child audio chunks under `<session_id>/audio/` |
+| `KIDS_REVIEW_RETENTION_DAYS`      | `30`                               | Days to keep persisted sessions before `prune_expired` removes them (`0` disables pruning) |
+| `KIDS_REVIEW_LOCAL_DIR`           | `data/kids_review.runtime.v1`      | Local directory for session JSON + audio files |
+| `KIDS_REVIEW_OBJECT_BUCKET`       | _(empty)_                          | GCS bucket name — leave blank for local-only |
+| `KIDS_REVIEW_OBJECT_PREFIX`       | `kids_review/v1`                   | Object-key prefix inside the bucket |
+| `KIDS_REVIEW_SYNC_TO_GCS`         | `never`                            | `never`, `session_end`, or `shutdown` |
+
+When both review toggles are false, **no transcript text or raw audio is retained after the live session** — live transcript events are still published to hooks for real-time UI, but nothing is written to disk.
+
+### The kids-teacher profile (`profiles/kids_teacher/`)
+
+Three plain-text files drive the locked persona. Edit them without touching code:
+
+| File              | Purpose |
+| ----------------- | ------- |
+| `instructions.txt`| The full system prompt. Preschool tone, safe/disallowed/restricted topic lists, multilingual guidance, clarification behavior, output constraints. Missing or empty = startup error |
+| `tools.txt`       | One tool name per line; `#` comments and blank lines are skipped. V1 ships with this **empty** (no tool calls from the model) |
+| `voice.txt`       | Single line: OpenAI Realtime voice name. V1 default is `alloy`. Options include `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar` |
+
+The profile is treated as **locked by default** (`KidsTeacherProfile.locked=True`). Change requires a code edit and review, not a runtime flag.
+
+### Safety controls
+
+Policy is layered. Admin can add restrictions; admin **cannot** weaken the system floor:
+
+1. System hard safety rules (baked in via `kids_safety.py` keyword tables and the locked profile)
+2. Admin-added restrictions (`KidsTeacherAdminPolicy.avoid_topics`, `redirect_to`, `extra_rules`)
+3. Admin profile defaults (teaching style, preferred topics)
+4. Session overrides (per-session preferences)
+
+Topic outcomes per `classify_topic()`:
+
+| Decision                | When                                             | Behavior |
+| ----------------------- | ------------------------------------------------ | -------- |
+| `ALLOW`                 | Safe preschool topic                             | Assistant answers normally |
+| `FAMILY_SAFE_ANSWER`    | Approved restricted category (reproduction, sickness, death, simple body questions) | Short safe answer + suggest asking a grown-up |
+| `REDIRECT`              | Scary events, conflict, admin-avoid match        | Short refusal + redirect to a safe adjacent topic |
+| `REFUSE`                | Disallowed (weapons, drugs, sexual content, gore, self-harm, criminal how-to, etc.) | Short refusal with no engagement on the unsafe content |
+
+When safety trips on child input, two things happen:
+1. The assistant's in-flight response is **cancelled** via `handler.interrupt()` → `backend.cancel_response()` so the unsafe audio never plays.
+2. A synthetic safe assistant transcript is emitted so the UI/review log shows what was said instead.
+
+The original unsafe child transcript is still preserved in the review log — so admins can audit what was asked.
+
+### Review data model
+
+When review persistence is enabled, each session produces a directory:
+
+```
+<KIDS_REVIEW_LOCAL_DIR>/<session_id>/
+  session.json        # metadata + transcripts[] (or [] when transcripts disabled)
+  audio/              # present only when audio retention is enabled
+    <timestamp_ms>-child.webm
+    <timestamp_ms>-child.webm
+```
+
+Admin-only routes (localhost only, `403` from non-local clients):
+
+| Route                                       | Behavior |
+| ------------------------------------------- | -------- |
+| `GET /api/kids-teacher/status`              | Non-sensitive snapshot (model, languages, profile name, review toggle states) |
+| `GET /api/kids-teacher/review/sessions`     | List persisted sessions — `404` when review is disabled |
+| `GET /api/kids-teacher/review/sessions/{id}`| Session detail — transcripts stripped when `KIDS_REVIEW_TRANSCRIPTS_ENABLED=false` |
+
+GCS sync follows `KIDS_REVIEW_SYNC_TO_GCS` automatically — V1 does not expose a manual force-sync endpoint for kids-teacher review. Set the policy to `session_end` or `shutdown` to upload at those boundaries.
+
+### Testing
+
+All kids-teacher code is unit-testable without a robot, an OpenAI key, or network. Run:
+
+```bash
+pytest tests/test_kids_teacher_*.py tests/test_kids_safety.py \
+       tests/test_kids_review_store.py tests/test_api_kids_teacher.py -v
+```
+
+The fake realtime backend (`src/kids_teacher_fakes.py::FakeRealtimeBackend`) lets you script scenarios deterministically — see `tests/test_kids_teacher_flow.py` for end-to-end examples (safe topic, disallowed topic, overlong output, barge-in).
+
+### What requires hardware + API key
+
+Code below this line is structurally complete but has not been smoke-tested on live hardware:
+
+- Live wire-format of OpenAI Realtime events (names match the documented API; a first-run on real endpoints may need minor tweaks)
+- Robot microphone capture feeding `pump_microphone_to_backend` (uses the same audio helpers as `robot_teacher.py`)
+- End-to-end latency tuning (target: assistant audio starts <1.5s after child finishes; <3s acceptable)
+
+---
+
 ## 📝 Dynamic Word Expansion
 
 The built-in database ships **600+ words**. Whenever an English word is looked up that isn't in that list, the app translates it on demand via Google Cloud Translate and **permanently adds it to the word pool** — so the vocabulary grows automatically as Myra uses the app.
@@ -337,35 +511,63 @@ Use this to quickly diagnose problems:
 ```
 myra-language-teacher/
 ├── src/
-│   ├── main.py                  # FastAPI app & all API routes
-│   ├── words_db.py              # Word database (600+ words across 4 languages)
-│   ├── speech_service.py        # faster-whisper STT, dual-pass, MIME detection
-│   ├── tts_service.py           # gTTS text-to-speech (async wrapper)
-│   ├── translate_service.py     # Google Cloud Translate (on-demand, cached)
-│   ├── dynamic_words_store.py   # GCS-backed dynamic word cache
-│   └── robot_teacher.py         # Reachy Mini lesson driver (runs on Pi)
-├── requirements.txt
-├── requirements-dev.txt         # Test dependencies (pytest, httpx, anyio)
-├── requirements-robot.txt       # Robot mode deps (Reachy Mini, soundfile, requests)
-├── Dockerfile                   # GCP Cloud Run image (Python 3.11-slim + ffmpeg + pre-cached Whisper model)
+│   ├── main.py                      # FastAPI app & all API routes
+│   ├── words_db.py                  # Word database (600+ words across 4 languages)
+│   ├── speech_service.py            # faster-whisper STT, dual-pass, MIME detection
+│   ├── tts_service.py               # gTTS text-to-speech (async wrapper)
+│   ├── translate_service.py         # Google Cloud Translate (on-demand, cached)
+│   ├── dynamic_words_store.py       # GCS-backed dynamic word cache
+│   ├── robot_teacher.py             # Reachy Mini language-lesson driver (runs on Pi)
+│   ├── kids_teacher_types.py        # Shared contract (events, session config, hooks)
+│   ├── kids_teacher_profile.py      # File-based profile loader
+│   ├── kids_teacher_backend.py      # OpenAI Realtime adapter (only place that imports openai)
+│   ├── kids_teacher_realtime.py     # Session handler: transcripts, memory, barge-in, fallback
+│   ├── kids_teacher_fakes.py        # FakeRealtimeBackend for tests
+│   ├── kids_safety.py               # Topic classifier + response helpers + policy merge
+│   ├── kids_safety_keywords.py      # Keyword tables and response copy
+│   ├── kids_review_store.py         # Local-first review store (transcript/audio toggles)
+│   ├── kids_teacher_flow.py         # Orchestrator; wires safety + review around the handler
+│   ├── kids_teacher_routes.py       # FastAPI router for kids-teacher status + review endpoints
+│   ├── kids_teacher_robot_bridge.py # Robot audio bridge (playback thread + mic pump)
+│   └── robot_kids_teacher.py        # Kids-teacher CLI entry (headless runtime)
+├── profiles/
+│   └── kids_teacher/
+│       ├── instructions.txt         # Locked preschool persona (required)
+│       ├── tools.txt                # Tool allowlist (empty in V1)
+│       └── voice.txt                # OpenAI Realtime voice name
+├── requirements.txt                 # Includes openai>=1.59.0 for kids-teacher
+├── requirements-dev.txt             # Test dependencies (pytest, httpx, anyio)
+├── requirements-robot.txt           # Robot mode deps (Reachy Mini, soundfile, requests)
+├── Dockerfile                       # GCP Cloud Run image (Python 3.11-slim + ffmpeg + pre-cached Whisper model)
 ├── pytest.ini
 ├── templates/
-│   ├── index.html               # Main learning page (pink dino SVG + lesson UI)
-│   └── config.html              # Settings page
+│   ├── index.html                   # Language-lesson page (pink dino SVG + lesson UI)
+│   ├── config.html                  # Settings page
+│   └── kids_teacher.html            # Kids-teacher status dashboard
 ├── static/
-│   ├── css/style.css            # All styles + animations
-│   └── js/app.js                # Recording, TTS playback, confetti, dino expressions
+│   ├── css/style.css                # All styles + animations
+│   ├── js/app.js                    # Language-lesson JS (recording, TTS, confetti)
+│   └── js/kids_teacher.js           # Kids-teacher status page JS
 ├── tests/
-│   ├── conftest.py              # Stubs faster-whisper / noisereduce at import time
-│   ├── test_api.py              # FastAPI route tests
-│   ├── test_words_db.py         # Database integrity tests
-│   ├── test_speech_service.py   # STT pipeline tests
-│   ├── test_tts_service.py      # TTS service tests
-│   ├── test_robot_teacher.py    # Reachy Mini integration tests
+│   ├── conftest.py                  # Stubs faster-whisper / noisereduce at import time
+│   ├── test_api.py                  # FastAPI route tests
+│   ├── test_words_db.py             # Database integrity tests
+│   ├── test_speech_service.py       # STT pipeline tests
+│   ├── test_tts_service.py          # TTS service tests
+│   ├── test_robot_teacher.py        # Reachy Mini integration tests
 │   ├── test_translate_service.py
 │   ├── test_dynamic_words_store.py
-│   ├── test_security.py         # Security / rate-limit tests
-│   └── test_bridge.py           # Audio bridge integration (requires live server on :8765)
+│   ├── test_security.py             # Security / rate-limit tests
+│   ├── test_bridge.py               # Audio bridge integration (requires live server on :8765)
+│   ├── test_kids_teacher_profile.py
+│   ├── test_kids_teacher_backend.py
+│   ├── test_kids_teacher_realtime.py
+│   ├── test_kids_teacher_robot_bridge.py
+│   ├── test_kids_safety.py
+│   ├── test_kids_review_store.py
+│   ├── test_kids_teacher_flow.py
+│   ├── test_api_kids_teacher.py
+│   └── test_robot_kids_teacher.py
 ├── infra/                       # Terraform — GCP Cloud Run infrastructure
 │   ├── providers.tf
 │   ├── cloud_run.tf
