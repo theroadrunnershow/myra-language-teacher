@@ -60,7 +60,7 @@ def _get_model() -> str:
         logger.warning("[kids_teacher_routes] resolve_realtime_model failed: %s", exc)
         # Fall back to the documented default so /status does not 500 when
         # the env value is temporarily invalid.
-        return "gpt-realtime-mini"
+        return "gpt-realtime"
 
 
 def _default_enabled_languages() -> list[str]:

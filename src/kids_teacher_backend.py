@@ -28,7 +28,7 @@ from kids_teacher_types import (
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_REALTIME_MODEL = "gpt-realtime-mini"
+DEFAULT_REALTIME_MODEL = "gpt-realtime"
 REALTIME_MODEL_ENV_VAR = "KIDS_TEACHER_REALTIME_MODEL"
 
 # Transcription model used by OpenAI Realtime for input transcripts.
@@ -66,7 +66,7 @@ def _encode_audio_chunk(chunk: bytes) -> str:
 
 
 def resolve_realtime_model(env_value: Optional[str] = None) -> str:
-    """Return the realtime model from env, defaulting to gpt-realtime-mini.
+    """Return the realtime model from env, defaulting to gpt-realtime.
 
     - ``env_value=None`` reads :data:`REALTIME_MODEL_ENV_VAR` from the
       process environment.
