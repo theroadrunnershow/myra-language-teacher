@@ -17,6 +17,8 @@ from starlette.responses import Response
 
 from speech_service import recognize_speech
 from dynamic_words_store import DynamicWordsStore
+from kids_review_store import KidsReviewStore
+from kids_teacher_routes import router as kids_teacher_router
 from language_config import SUPPORTED_LESSON_LANGUAGES, VALID_LANGUAGES
 from translate_service import set_dynamic_words_store, translate_word
 from tts_service import generate_tts
@@ -49,6 +51,24 @@ async def _lifespan(app: FastAPI):
     set_dynamic_words_store(store)
     app.state.words_flush_task = asyncio.create_task(_flush_words_loop())
 
+    review_store = KidsReviewStore(
+        transcripts_enabled=_env_bool("KIDS_REVIEW_TRANSCRIPTS_ENABLED", False),
+        audio_enabled=_env_bool("KIDS_REVIEW_AUDIO_ENABLED", False),
+        retention_days=_env_int("KIDS_REVIEW_RETENTION_DAYS", 30),
+        local_dir=os.environ.get(
+            "KIDS_REVIEW_LOCAL_DIR",
+            os.path.join(BASE_DIR, "data", "kids_review.runtime.v1"),
+        ).strip(),
+        bucket_name=os.environ.get("KIDS_REVIEW_OBJECT_BUCKET", "").strip(),
+        object_prefix=os.environ.get(
+            "KIDS_REVIEW_OBJECT_PREFIX", "kids_review/v1"
+        ).strip(),
+        sync_to_gcs_policy=_env_choice(
+            "KIDS_REVIEW_SYNC_TO_GCS", "never", {"never", "session_end", "shutdown"}
+        ),
+    )
+    app.state.kids_review_store = review_store
+
     yield
 
     flush_task = getattr(app.state, "words_flush_task", None)
@@ -65,9 +85,17 @@ async def _lifespan(app: FastAPI):
         if store.should_sync_on_shutdown:
             store.sync_to_object_store(force=True)
 
+    review_store = getattr(app.state, "kids_review_store", None)
+    if review_store is not None and review_store.is_enabled:
+        review_store.flush_if_needed(force=True)
+        if review_store.should_sync_on_shutdown:
+            review_store.sync_to_object_store(force=True)
+
 
 app = FastAPI(title="Myra Language Teacher", lifespan=_lifespan)
 app.state.dynamic_words_store = None
+app.state.kids_review_store = None
+app.include_router(kids_teacher_router)
 
 
 class RateLimitMiddleware(BaseHTTPMiddleware):

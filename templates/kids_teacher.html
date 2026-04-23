@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Kids Teacher (V1) — Myra</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body class="kids-teacher-page">
+  <header class="home-header">
+    <div class="header-inner">
+      <div class="brand-lockup">
+        <span class="brand-icon" aria-hidden="true">🦕</span>
+        <div class="brand-copy">
+          <p class="brand-kicker">Myra</p>
+          <h1>Kids Teacher (V1)</h1>
+        </div>
+      </div>
+      <a href="/" class="settings-btn" title="Back to lessons">↩</a>
+    </div>
+  </header>
+
+  <main class="home-main">
+    <section class="hero-panel">
+      <h2>Headless preschool teacher</h2>
+      <p>
+        Kids Teacher is headless for V1; the realtime session runs on the robot.
+        This page shows the current configuration and, when review persistence
+        is enabled, a list of recent sessions recorded on this machine.
+      </p>
+
+      <h3>Current configuration</h3>
+      <div id="kt-status-block">Loading…</div>
+
+      <div id="kt-sessions-wrap" hidden>
+        <h3>Recent sessions</h3>
+        <ul id="kt-sessions-list"></ul>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/js/kids_teacher.js"></script>
+</body>
+</html>

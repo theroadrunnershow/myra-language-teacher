@@ -1,0 +1,3 @@
+# One tool name per line. Blank lines and lines starting with '#' are ignored.
+# V1: no tools are allowlisted. Add tool names here only after the safety
+# layer and tool layer have explicitly approved them.

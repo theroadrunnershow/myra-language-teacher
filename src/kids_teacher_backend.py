@@ -1,0 +1,317 @@
+"""OpenAI Realtime backend adapter for kids-teacher mode.
+
+This module is the ONLY place in the codebase that touches the OpenAI SDK
+directly. Nothing above this layer should ``import openai``; the realtime
+handler talks to a :class:`RealtimeBackend` protocol instead. Model
+selection is driven by the ``KIDS_TEACHER_REALTIME_MODEL`` env var and
+constrained to :data:`ALLOWED_REALTIME_MODELS`.
+
+The concrete :class:`OpenAIRealtimeBackend` lazy-imports ``openai`` inside
+``connect()`` so tests (and lightweight CI images) never require the real
+SDK or an API key.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+from typing import Any, AsyncIterator, Callable, Optional, Protocol
+
+from kids_teacher_types import (
+    ALLOWED_REALTIME_MODELS,
+    KidsTeacherSessionConfig,
+)
+
+logger = logging.getLogger(__name__)
+
+
+DEFAULT_REALTIME_MODEL = "gpt-realtime-mini"
+REALTIME_MODEL_ENV_VAR = "KIDS_TEACHER_REALTIME_MODEL"
+
+# Transcription model used by OpenAI Realtime for input transcripts.
+# Kept as a module-level constant so it is easy to update or override in
+# one place; not currently env-driven because the transcript model is not
+# user-facing.
+_INPUT_TRANSCRIPTION_MODEL = "gpt-4o-mini-transcribe"
+
+
+class BackendConfigError(Exception):
+    """Raised when realtime backend config (e.g. model selection) is invalid."""
+
+
+def resolve_realtime_model(env_value: Optional[str] = None) -> str:
+    """Return the realtime model from env, defaulting to gpt-realtime-mini.
+
+    - ``env_value=None`` reads :data:`REALTIME_MODEL_ENV_VAR` from the
+      process environment.
+    - Blank/unset values fall back to :data:`DEFAULT_REALTIME_MODEL`.
+    - Values outside :data:`ALLOWED_REALTIME_MODELS` raise
+      :class:`BackendConfigError`.
+    """
+    raw = env_value if env_value is not None else os.environ.get(REALTIME_MODEL_ENV_VAR)
+    if raw is None:
+        return DEFAULT_REALTIME_MODEL
+    candidate = raw.strip()
+    if not candidate:
+        return DEFAULT_REALTIME_MODEL
+    if candidate not in ALLOWED_REALTIME_MODELS:
+        raise BackendConfigError(
+            f"Invalid realtime model {candidate!r}. Must be one of "
+            f"{sorted(ALLOWED_REALTIME_MODELS)}."
+        )
+    return candidate
+
+
+def build_session_payload(
+    config: KidsTeacherSessionConfig,
+    *,
+    modalities: tuple[str, ...] = ("audio", "text"),
+) -> dict:
+    """Build the JSON-serializable ``session.update`` payload.
+
+    Pulls instructions, voice, and the tool allowlist out of
+    ``config.profile``. V1 uses server-side VAD and OpenAI's
+    ``gpt-4o-mini-transcribe`` for input transcripts.
+    """
+    profile = config.profile
+    tools = [
+        # Tool-spec lookup is deliberately NOT part of V1 — this is a
+        # minimal stub so the backend can wire up allowlisted names.
+        # Intern 2 / integration phase will replace this with real tool
+        # specs when any tool is actually enabled.
+        {"type": "function", "name": name}
+        for name in profile.allowed_tools
+    ]
+    return {
+        "instructions": profile.instructions,
+        "voice": profile.voice,
+        "modalities": list(modalities),
+        "input_audio_transcription": {"model": _INPUT_TRANSCRIPTION_MODEL},
+        "turn_detection": {"type": "server_vad"},
+        "tools": tools,
+        "tool_choice": "auto",
+    }
+
+
+class RealtimeBackend(Protocol):
+    """Abstract async backend that the realtime handler talks to.
+
+    The real OpenAI implementation and the test fake both implement this
+    shape. The handler depends only on this protocol.
+    """
+
+    async def connect(self, session_payload: dict) -> None: ...
+
+    async def send_audio(self, chunk: bytes) -> None: ...
+
+    async def send_text(self, text: str) -> None: ...
+
+    async def cancel_response(self) -> None: ...
+
+    async def close(self) -> None: ...
+
+    def events(self) -> AsyncIterator[dict]:
+        """Yield backend events as normalized dicts.
+
+        V1 event types (each dict has ``type`` plus the fields below):
+
+          * ``input_transcript.delta``   ``{"text": str, "language": Optional[str]}``
+          * ``input_transcript.final``   ``{"text": str, "language": Optional[str]}``
+          * ``assistant_transcript.delta`` ``{"text": str}``
+          * ``assistant_transcript.final`` ``{"text": str, "language": Optional[str]}``
+          * ``audio.chunk``              ``{"audio": bytes}``
+          * ``response.done``            ``{}``
+          * ``error``                    ``{"message": str}``
+        """
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Concrete OpenAI backend
+# ---------------------------------------------------------------------------
+
+
+class OpenAIRealtimeBackend:
+    """Concrete :class:`RealtimeBackend` that wraps OpenAI Realtime.
+
+    ``openai`` is imported lazily inside :meth:`connect` so the module can
+    be imported without the SDK installed. ``client_factory`` may be
+    injected to override the default ``openai.AsyncOpenAI()`` construction
+    in tests.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: Optional[str] = None,
+        client_factory: Optional[Callable[[], Any]] = None,
+    ) -> None:
+        self._model = model or resolve_realtime_model()
+        self._client_factory = client_factory
+        self._client: Any = None
+        self._connection: Any = None
+        self._closed = False
+        self._event_queue: asyncio.Queue[dict] = asyncio.Queue()
+        self._reader_task: Optional[asyncio.Task] = None
+
+    @property
+    def model(self) -> str:
+        return self._model
+
+    async def connect(self, session_payload: dict) -> None:
+        """Open the realtime connection and start pumping raw SDK events."""
+        try:
+            client_factory = self._client_factory
+            if client_factory is None:
+                # Lazy import: never touch the SDK at module load time.
+                import openai  # type: ignore
+
+                client_factory = openai.AsyncOpenAI  # type: ignore[attr-defined]
+
+            self._client = client_factory()
+            # Real OpenAI SDK surface: async context manager on
+            # ``client.realtime.connect(model=...)``. We keep the exact
+            # call shape here but tests exercise the fake backend, so we
+            # do not require the SDK at test time.
+            self._connection = await self._open_connection(session_payload)
+            self._reader_task = asyncio.create_task(self._reader_loop())
+        except Exception as exc:  # pragma: no cover - hit only in integration
+            logger.warning("[kids_teacher_backend] connect failed: %s", exc)
+            await self._event_queue.put({"type": "error", "message": str(exc)})
+
+    async def _open_connection(self, session_payload: dict) -> Any:
+        """Open the SDK-level connection and send the session.update payload.
+
+        Isolated in its own method so the SDK call shape can evolve (or be
+        stubbed by subclasses) without rewriting :meth:`connect`.
+        """
+        # NOTE: exact SDK method names are best-effort stubs; integration
+        # phase (Intern 3 / Phase 5) will verify against the real SDK.
+        connection = await self._client.realtime.connect(model=self._model)  # type: ignore[attr-defined]
+        await connection.session.update(session=session_payload)  # type: ignore[attr-defined]
+        return connection
+
+    async def _reader_loop(self) -> None:
+        """Translate raw SDK events into the normalized dict shape."""
+        assert self._connection is not None
+        try:
+            async for raw_event in self._connection:  # type: ignore[attr-defined]
+                normalized = self._normalize_event(raw_event)
+                if normalized is not None:
+                    await self._event_queue.put(normalized)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.warning("[kids_teacher_backend] reader loop error: %s", exc)
+            await self._event_queue.put({"type": "error", "message": str(exc)})
+
+    @staticmethod
+    def _normalize_event(raw_event: Any) -> Optional[dict]:
+        """Map a raw OpenAI Realtime event to our normalized dict shape.
+
+        This is a best-effort stub for V1. Phase 5 integration work will
+        replace the TODOs below with the real SDK event names once we
+        exercise the live wire. Until then, correctness of the abstraction
+        (tested via the fake backend) matters more than this translation.
+        """
+        raw_type = getattr(raw_event, "type", None) or (
+            raw_event.get("type") if isinstance(raw_event, dict) else None
+        )
+        if raw_type is None:
+            return None
+
+        def _field(name: str, default: Any = None) -> Any:
+            if isinstance(raw_event, dict):
+                return raw_event.get(name, default)
+            return getattr(raw_event, name, default)
+
+        # TODO: verify exact event names against the OpenAI Realtime SDK
+        # during Phase 5 integration. Listed mappings reflect the public
+        # Realtime API event naming convention at time of writing.
+        if raw_type == "conversation.item.input_audio_transcription.delta":
+            return {
+                "type": "input_transcript.delta",
+                "text": _field("delta", ""),
+                "language": _field("language"),
+            }
+        if raw_type == "conversation.item.input_audio_transcription.completed":
+            return {
+                "type": "input_transcript.final",
+                "text": _field("transcript", ""),
+                "language": _field("language"),
+            }
+        if raw_type == "response.audio_transcript.delta":
+            return {
+                "type": "assistant_transcript.delta",
+                "text": _field("delta", ""),
+            }
+        if raw_type == "response.audio_transcript.done":
+            return {
+                "type": "assistant_transcript.final",
+                "text": _field("transcript", ""),
+                "language": _field("language"),
+            }
+        if raw_type == "response.audio.delta":
+            return {
+                "type": "audio.chunk",
+                "audio": _field("delta", b""),
+            }
+        if raw_type == "response.done":
+            return {"type": "response.done"}
+        if raw_type == "error":
+            message = _field("message") or _field("error") or "unknown error"
+            return {"type": "error", "message": str(message)}
+        return None
+
+    async def send_audio(self, chunk: bytes) -> None:
+        if self._connection is None:
+            return
+        try:
+            await self._connection.input_audio_buffer.append(audio=chunk)  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.warning("[kids_teacher_backend] send_audio failed: %s", exc)
+            await self._event_queue.put({"type": "error", "message": str(exc)})
+
+    async def send_text(self, text: str) -> None:
+        if self._connection is None:
+            return
+        try:
+            await self._connection.conversation.item.create(  # type: ignore[attr-defined]
+                item={"type": "message", "role": "user", "content": [{"type": "input_text", "text": text}]}
+            )
+            await self._connection.response.create()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.warning("[kids_teacher_backend] send_text failed: %s", exc)
+            await self._event_queue.put({"type": "error", "message": str(exc)})
+
+    async def cancel_response(self) -> None:
+        if self._connection is None:
+            return
+        try:
+            await self._connection.response.cancel()  # type: ignore[attr-defined]
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.warning("[kids_teacher_backend] cancel_response failed: %s", exc)
+
+    async def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._reader_task is not None:
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        if self._connection is not None:
+            try:
+                await self._connection.close()  # type: ignore[attr-defined]
+            except Exception as exc:  # pragma: no cover - integration path
+                logger.warning("[kids_teacher_backend] close failed: %s", exc)
+
+    async def events(self) -> AsyncIterator[dict]:
+        while True:
+            event = await self._event_queue.get()
+            yield event
+            if event.get("type") == "response.done" and self._closed:
+                return
