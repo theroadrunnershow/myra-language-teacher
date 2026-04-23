@@ -1208,6 +1208,397 @@ Retain and run the current robot teacher tests so the new flow does not break:
 
 ---
 
+## Tech Work Breakdown for 3 Interns
+
+This section turns the architecture above into a concrete 3-intern implementation split.
+
+### Shared implementation rules
+
+All 3 interns should follow the same structural patterns used in `pollen-robotics/reachy_mini_conversation_app`:
+
+- keep one shared realtime conversation core, similar to the reference app's `openai_realtime.py`
+- keep profile content in files, not scattered across route handlers
+- keep web and robot/headless entry paths separate, but make them share the same realtime core
+- keep tool access allowlisted through `tools.txt`
+- keep queue flush and barge-in handling explicit, similar to the reference app's `console.py`
+- keep profile locking and env-based model selection explicit, similar to the reference app's `config.py` and `prompts.py`
+
+Critical guardrails for this project:
+
+- do **not** build the main kids-teacher experience as `POST /transcribe -> POST /respond -> GET /tts`
+- do **not** mix kids-teacher logic into the current lesson-word state machine
+- do **not** store transcript text or raw child audio unless the env toggles explicitly allow it
+- do **not** let prompt text or tool permissions spread across `src/main.py` and random helper files
+
+### File ownership to reduce merge conflicts
+
+Use this ownership split unless there is a strong reason to change it:
+
+- Intern 1 owns:
+  - `src/kids_teacher_types.py`
+  - `src/kids_teacher_backend.py`
+  - `src/kids_teacher_realtime.py`
+  - `tests/test_kids_teacher_realtime.py`
+- Intern 2 owns:
+  - `profiles/kids_teacher/instructions.txt`
+  - `profiles/kids_teacher/tools.txt`
+  - `profiles/kids_teacher/voice.txt`
+  - `src/kids_teacher_profile.py`
+  - `src/kids_safety.py`
+  - `tests/test_kids_safety.py`
+  - `tests/test_kids_teacher_profile.py`
+- Intern 3 owns:
+  - `src/kids_review_store.py`
+  - `src/kids_teacher_flow.py`
+  - `src/kids_teacher_routes.py` if created
+  - `tests/test_kids_review_store.py`
+  - `tests/test_kids_teacher_flow.py`
+  - `tests/test_api_kids_teacher.py`
+
+Shared files should be touched carefully:
+
+- `src/main.py`
+  - primarily Intern 3 for route wiring
+- `src/robot_teacher.py`
+  - only for thin mode-selection or shared helper reuse
+- `README.md` and deployment docs
+  - update only after the feature shape stabilizes
+
+### Shared contract PR that should land first
+
+Before the interns go deep on separate workstreams, land one small contract PR with:
+
+- `src/kids_teacher_types.py`
+  - `KidsTranscriptEvent`
+  - `KidsTeacherSessionConfig`
+  - `KidsTeacherProfile`
+  - `KidsTeacherRuntimeHooks`
+- event field agreement:
+  - `speaker`
+  - `text`
+  - `is_partial`
+  - `timestamp_ms`
+  - `language`
+  - `session_id`
+- runtime hook agreement:
+  - start assistant playback
+  - stop assistant playback
+  - publish transcript event
+  - publish status change
+  - persist session artifacts
+
+That contract should be reviewed by all 3 interns before the next PRs branch off.
+
+### Definition of done for every deliverable
+
+Every deliverable below is only complete when:
+
+- code is implemented in the owned files
+- tests are added or updated
+- tests do not require a real robot or real network calls
+- existing lesson-mode tests still pass
+- new behavior is behind explicit kids-teacher wiring, not hidden inside existing lesson endpoints
+
+### Intern 1: Realtime Core and OpenAI Backend
+
+Goal: build the shared streaming engine that mirrors the reference app's realtime handler shape.
+
+#### `KT-I1-01` Session and event types
+
+- Create `src/kids_teacher_types.py`
+- Add typed models or dataclasses for:
+  - transcript events
+  - status events
+  - session config
+  - runtime hooks
+- Done when:
+  - other modules can import these types without circular dependencies
+  - event serialization is stable enough for tests and UI code
+- Tests:
+  - `tests/test_kids_teacher_realtime.py`
+  - cover default values, required fields, and serialization
+
+#### `KT-I1-02` OpenAI realtime backend adapter
+
+- Create `src/kids_teacher_backend.py`
+- Mirror the reference repo's backend isolation:
+  - keep OpenAI client setup here
+  - read `KIDS_TEACHER_REALTIME_MODEL`
+  - allow only `gpt-realtime` and `gpt-realtime-mini`
+  - build session config from loaded instructions, voice, and tool list
+- Done when:
+  - the realtime model is selected entirely by config
+  - no route or robot code imports the OpenAI SDK directly
+- Tests:
+  - mocked OpenAI client startup
+  - invalid model config rejection
+  - correct session payload assembly
+
+#### `KT-I1-03` Shared realtime conversation handler
+
+- Create `src/kids_teacher_realtime.py`
+- This module should own:
+  - session lifecycle
+  - audio in and audio out queues
+  - partial and final user transcript events
+  - assistant transcript events
+  - recent-turn in-memory context for short follow-ups
+- Done when:
+  - one mocked child turn produces transcript events and assistant output events
+  - the handler can run without any web or robot layer attached
+- Tests:
+  - happy-path session start
+  - transcript event ordering
+  - 3-5 turn memory behavior
+
+#### `KT-I1-04` Barge-in, queue flush, and response ordering
+
+- Add interruption handling that mirrors the reference app behavior:
+  - user speech during assistant playback triggers playback stop
+  - queued assistant audio is flushed
+  - the session stays alive
+  - only one active response is allowed at a time
+- Done when:
+  - barge-in works with a fake playback hook
+  - overlapping events do not corrupt ordering
+- Tests:
+  - assistant speaking then child interrupts then queue flushes
+  - rapid consecutive turns
+  - multiple partial transcripts before final transcript
+
+#### `KT-I1-05` Failure handling and integration harness
+
+- Add safe fallback behavior for:
+  - websocket disconnect
+  - backend timeout
+  - empty response
+- Expose a fake backend or test helper that Intern 3 can reuse for robot and API integration tests
+- Done when:
+  - the handler emits a short safe failure event instead of hanging
+  - other interns can write tests against a fake realtime backend
+- Tests:
+  - reconnect or fallback behavior
+  - no-hang timeout scenario
+  - fake backend fixture coverage
+
+### Intern 2: Safety, Profile, and Policy Layer
+
+Goal: build the locked preschool-safe profile system that mirrors the reference app's `profiles/`, `config.py`, and `prompts.py` patterns.
+
+#### `KT-I2-01` Kids-teacher profile files
+
+- Create:
+  - `profiles/kids_teacher/instructions.txt`
+  - `profiles/kids_teacher/tools.txt`
+  - `profiles/kids_teacher/voice.txt`
+- Keep the first tool list very small and explicitly safe
+- Put the full preschool behavior, topic boundaries, and multilingual guidance in `instructions.txt`
+- Done when:
+  - the profile can be loaded without hardcoded fallback prompt text
+  - missing files fail clearly during validation
+- Tests:
+  - profile file existence checks
+  - non-empty file validation
+
+#### `KT-I2-02` Profile loader and locked-mode behavior
+
+- Create `src/kids_teacher_profile.py`
+- Mirror the reference repo's prompt and voice loading behavior:
+  - load instructions from file
+  - load voice from file
+  - load tools from file
+  - support a locked production kids-teacher profile
+- Done when:
+  - the app can treat `kids_teacher` as a locked profile in production
+  - invalid tool names are rejected before runtime
+- Tests:
+  - locked profile enforcement
+  - missing `voice.txt` fallback behavior
+  - invalid tool name rejection
+
+#### `KT-I2-03` Safety policy engine
+
+- Create `src/kids_safety.py`
+- Implement pure functions for:
+  - allowed-topic pass-through
+  - restricted-topic short safe answer
+  - refusal plus redirection
+  - clarification when speech is unclear
+- Done when:
+  - safe topics, restricted topics, and unsafe topics map predictably
+  - no network or model call is needed to test the policy logic
+- Tests:
+  - unsafe-topic refusal
+  - restricted-topic family-safe answer
+  - redirect wording
+  - unclear transcript clarification
+
+#### `KT-I2-04` Policy precedence and admin restrictions
+
+- Add structured policy merge logic for:
+  - system hard safety rules
+  - admin-added restrictions
+  - admin profile defaults
+  - session overrides
+- Keep this logic separate from the transport layer
+- Done when:
+  - admin settings can only make the system stricter, not weaker
+  - precedence is deterministic and unit-testable
+- Tests:
+  - precedence ordering
+  - stricter admin rules taking effect
+  - attempts to weaken system rules being ignored
+
+#### `KT-I2-05` Multilingual and output guard helpers
+
+- Add helpers for:
+  - selecting the reply language from detected language plus defaults
+  - validating that assistant output remains short, preschool-safe, and on-policy
+- Done when:
+  - low-confidence detection falls back to configured default explanation language
+  - overly long or off-policy outputs are replaced with a safe fallback
+- Tests:
+  - high-confidence detected-language reply choice
+  - low-confidence fallback behavior
+  - too-long output replacement
+
+### Intern 3: Review Storage, Routes, and Robot/Web Integration
+
+Goal: plug the shared kids-teacher core into the Myra app and robot runtime while preserving the existing lesson flow.
+
+#### `KT-I3-01` Local-first review store
+
+- Create `src/kids_review_store.py`
+- Follow the same local-first pattern already used by `DynamicWordsStore`
+- Support:
+  - transcript persistence toggle
+  - raw-audio persistence toggle
+  - retention days
+  - optional GCS sync policy
+- Done when:
+  - transcript text is never stored when transcript persistence is off
+  - raw audio is never stored when audio retention is off
+  - local-only mode works without GCS
+- Tests:
+  - transcript-only retention
+  - audio-only retention
+  - local-only mode
+  - GCS sync stub behavior
+
+#### `KT-I3-02` Kids-teacher routes and config wiring
+
+- Add kids-teacher route wiring in `src/main.py`
+- If route logic gets large, create `src/kids_teacher_routes.py`
+- Only add helper and admin-oriented surfaces such as:
+  - mode and config status
+  - diagnostics
+  - persisted review inspection behind env gates
+- Done when:
+  - kids-teacher mode can be enabled without changing existing lesson endpoints
+  - review data is not exposed when disabled by config
+- Tests:
+  - mode and status endpoints
+  - review gating by env flags
+  - no regressions to existing endpoints
+
+#### `KT-I3-03` Robot/headless kids-teacher flow
+
+- Create `src/kids_teacher_flow.py`
+- Reuse from `src/robot_teacher.py` where possible:
+  - audio bridge helpers
+  - `RobotController`
+  - playback and listening state transitions
+- Plug those hooks into `src/kids_teacher_realtime.py`
+- Done when:
+  - a fake robot session can greet, listen, answer, interrupt, and end cleanly
+  - the existing language-teacher robot flow is still intact
+- Tests:
+  - fake robot start and stop flow
+  - assistant playback stop on child interruption
+  - regression checks for current robot teacher tests
+
+#### `KT-I3-04` Minimal web transcript and status surface
+
+- Add a minimal kids-teacher browser view using the same realtime core
+- Show at least:
+  - listening state
+  - speaking state
+  - child transcript
+  - assistant transcript
+- Done when:
+  - the browser and robot/headless flow consume the same event contract
+  - UI does not fork the conversation logic
+- Tests:
+  - route renders successfully
+  - transcript and status payload contract is stable
+
+#### `KT-I3-05` Final mode selection and integration pass
+
+- Wire explicit mode selection:
+  - existing `language_lesson`
+  - new `kids_teacher`
+- Keep changes to old lesson code as thin as possible
+- Done when:
+  - kids-teacher can be started without rewriting the old lesson flow
+  - old tests still pass
+  - the repo has one clear place where mode selection happens
+- Tests:
+  - mode-selection coverage
+  - existing `tests/test_robot_teacher.py`
+  - existing API regression suite
+
+### Recommended dependency order
+
+This is the safest way to parallelize the work:
+
+1. Intern 1 lands `KT-I1-01`
+2. Intern 2 lands `KT-I2-01` and `KT-I2-02`
+3. Intern 3 lands `KT-I3-01`
+4. Intern 1 lands `KT-I1-02` through `KT-I1-04`
+5. Intern 2 lands `KT-I2-03` through `KT-I2-05`
+6. Intern 3 lands `KT-I3-02` through `KT-I3-04`
+7. Intern 3 finishes `KT-I3-05` after the shared core is stable
+
+### Cross-intern checkpoints
+
+Use these checkpoints to track progress cleanly:
+
+#### Checkpoint A: contracts are frozen
+
+- `src/kids_teacher_types.py` exists
+- profile files exist
+- review store interface exists
+- all 3 interns agree on event fields and hook names
+
+#### Checkpoint B: mocked end-to-end flow works
+
+- a fake child turn can go through:
+  - profile load
+  - backend session bootstrap
+  - transcript events
+  - safety policy
+  - assistant response
+- no real robot and no real network calls are required for this test
+
+#### Checkpoint C: integrated demo is ready
+
+- kids-teacher mode runs in a browser or headless test path
+- robot/headless playback can be interrupted
+- transcript review and audio review toggles behave correctly
+- existing lesson mode is still stable
+
+### What not to assign to interns in V1
+
+To keep the project tractable, do not split these into separate intern projects yet:
+
+- custom tool development beyond a tiny safe allowlist
+- open web search or internet research tools
+- complex parent-facing dashboards
+- multi-provider backend support
+- retrofitting free-form chat into the current word-scoring loop
+
+---
+
 ## Open Product Decisions
 
 These decisions should be confirmed before implementation starts in earnest:
