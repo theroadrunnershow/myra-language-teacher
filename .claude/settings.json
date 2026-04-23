@@ -16,7 +16,9 @@
       "Bash(mkdir *)",
       "Bash(cp *)",
       "Bash(mv *)",
-      "Bash(rm *)"
+      "Bash(rm *)",
+      "Bash(pytest)",
+      "Bash(pytest *)"
     ],
     "deny": [
       "Bash(curl * | bash)",
