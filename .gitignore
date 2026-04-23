@@ -10,6 +10,23 @@ config.json
 
 # Environment variables (secrets)
 .env
+.env.*
+!.env.example
+!.env.template
+
+# Generic secret / credential material
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+*.der
+secrets/
+secret*/
+*.tfvars
+*.tfstate
+*.tfstate.*
 
 # Python bytecode
 __pycache__/

@@ -8,6 +8,9 @@ import json
 import base64
 import functions_framework
 from google.cloud import run_v2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @functions_framework.cloud_event

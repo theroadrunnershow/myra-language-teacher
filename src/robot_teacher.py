@@ -40,6 +40,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+from env_loader import load_project_dotenv
 from language_config import SUPPORTED_LESSON_LANGUAGES
 
 import numpy as np
@@ -47,6 +48,8 @@ import requests
 import scipy.signal
 import scipy.io.wavfile as wavfile
 from pydub import AudioSegment
+
+load_project_dotenv()
 
 # Deferred robot SDK import — allows audio bridge and HTTP functions to be
 # tested without the robot attached (Tests 1–3 in the plan).

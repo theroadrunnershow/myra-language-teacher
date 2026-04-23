@@ -1,3 +1,7 @@
+from env_loader import load_project_dotenv
+
+load_project_dotenv()
+
 import asyncio
 import io
 import logging

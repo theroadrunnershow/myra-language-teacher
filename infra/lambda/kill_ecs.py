@@ -14,6 +14,9 @@ import logging
 import os
 
 import boto3
+from dotenv import load_dotenv
+
+load_dotenv()
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

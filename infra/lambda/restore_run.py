@@ -6,6 +6,9 @@ Restores Cloud Run max instances so the service is available at the start of eac
 import os
 import functions_framework
 from google.cloud import run_v2
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 @functions_framework.cloud_event

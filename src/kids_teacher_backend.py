@@ -20,10 +20,13 @@ import logging
 import os
 from typing import Any, AsyncIterator, Callable, Optional, Protocol
 
+from env_loader import load_project_dotenv
 from kids_teacher_types import (
     ALLOWED_REALTIME_MODELS,
     KidsTeacherSessionConfig,
 )
+
+load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 

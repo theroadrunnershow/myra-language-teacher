@@ -13,7 +13,10 @@ import logging
 import os
 from typing import Optional
 
+from env_loader import load_project_dotenv
 from language_config import ROMANIZATION_KEYS, TRANSLATE_LANGUAGE_CODES
+
+load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 

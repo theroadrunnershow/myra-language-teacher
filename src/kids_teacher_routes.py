@@ -19,10 +19,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
+from env_loader import load_project_dotenv
 from kids_review_store import KidsReviewStore
 from kids_teacher_backend import resolve_realtime_model
 from kids_teacher_profile import DEFAULT_PROFILE_DIR, DEFAULT_VOICE, PROFILE_NAME, load_profile
 from kids_teacher_types import KIDS_SUPPORTED_LANGUAGES
+
+load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 

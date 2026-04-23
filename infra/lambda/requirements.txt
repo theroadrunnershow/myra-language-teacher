@@ -1,2 +1,3 @@
 functions-framework==3.8.2
 google-cloud-run==0.10.14
+python-dotenv==1.0.1

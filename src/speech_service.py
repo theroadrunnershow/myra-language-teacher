@@ -10,7 +10,10 @@ from pydub import AudioSegment
 from rapidfuzz import fuzz
 from scipy.signal import butter, sosfilt
 
+from env_loader import load_project_dotenv
 from language_config import LANGUAGE_CODES
+
+load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 

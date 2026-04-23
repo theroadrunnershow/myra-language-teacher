@@ -16,10 +16,13 @@ import sys
 import uuid
 from typing import Optional
 
+from env_loader import load_project_dotenv
 from kids_teacher_backend import resolve_realtime_model
 from kids_teacher_flow import KidsTeacherFlowDeps, NullRuntimeHooks, run_kids_teacher_session
 from kids_teacher_profile import load_profile
 from kids_teacher_types import KidsTeacherSessionConfig
+
+load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 
