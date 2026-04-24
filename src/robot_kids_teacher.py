@@ -1,12 +1,17 @@
 """Robot entry point for the kids-teacher realtime session.
 
 Opens a :class:`ReachyMini` media context, builds a :class:`RobotController`
-plus the robot hook bridge, converts mic frames to PCM16 mono for OpenAI
-Realtime, and feeds them into the backend via ``pump_microphone_to_backend``.
+plus the robot hook bridge, converts mic frames to PCM16 mono for the
+active realtime backend, and feeds them into the backend via
+``pump_microphone_to_backend``.
+
+The active backend is chosen by the ``KIDS_TEACHER_REALTIME_PROVIDER``
+env var (``openai`` | ``gemini``). Input sample rate and the required SDK
+presence check both follow the provider selection.
 
 Every robot + ML dependency is lazy-imported inside ``main()`` so the module
-itself stays cheap to import (tests rely on this to verify the ``openai``
-SDK is never pulled in transitively).
+itself stays cheap to import (tests rely on this to verify neither the
+``openai`` nor the ``google.genai`` SDK is pulled in transitively).
 """
 
 from __future__ import annotations
@@ -20,7 +25,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Optional
 
 from env_loader import load_project_dotenv
-from kids_teacher_backend import resolve_realtime_model
+from kids_teacher_backend import resolve_realtime_model, resolve_realtime_provider
 from kids_teacher_flow import KidsTeacherFlowDeps, run_kids_teacher_session
 from kids_teacher_profile import load_profile
 from kids_teacher_types import KidsTeacherSessionConfig
@@ -29,9 +34,17 @@ load_project_dotenv()
 
 logger = logging.getLogger(__name__)
 
-# OpenAI Realtime expects mono PCM16 at 24 kHz on input. The robot mic is
-# typically 16 kHz but we always resample to this rate before forwarding.
-_TARGET_MIC_SAMPLE_RATE = 24000
+# Per-provider mic target sample rates. OpenAI Realtime expects PCM16 at
+# 24 kHz; Gemini Live expects PCM16 at 16 kHz. Picked at session build
+# time based on the resolved provider.
+_OPENAI_TARGET_MIC_SAMPLE_RATE = 24000
+_GEMINI_TARGET_MIC_SAMPLE_RATE = 16000
+
+
+def _target_mic_sample_rate_for(provider: str) -> int:
+    if provider == "gemini":
+        return _GEMINI_TARGET_MIC_SAMPLE_RATE
+    return _OPENAI_TARGET_MIC_SAMPLE_RATE
 
 
 def _build_config(session_id: str, max_seconds: Optional[int]) -> KidsTeacherSessionConfig:
@@ -41,9 +54,16 @@ def _build_config(session_id: str, max_seconds: Optional[int]) -> KidsTeacherSes
     default_lang = os.environ.get("KIDS_DEFAULT_EXPLANATION_LANGUAGE", "").strip()
     if not default_lang or default_lang not in enabled:
         default_lang = enabled[0]
+    provider = resolve_realtime_provider()
+    if provider == "gemini":
+        from kids_teacher_gemini_backend import resolve_gemini_model
+
+        model = resolve_gemini_model()
+    else:
+        model = resolve_realtime_model()
     return KidsTeacherSessionConfig(
         session_id=session_id,
-        model=resolve_realtime_model(),
+        model=model,
         profile=profile,
         enabled_languages=enabled,
         default_explanation_language=default_lang,
@@ -71,7 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _build_mic_reader(
-    mini: Any, mic_rate: int
+    mini: Any, mic_rate: int, target_rate: int
 ) -> Callable[[], Optional[bytes]]:
     """Return a sync callable that pulls one PCM16 mono frame from the robot.
 
@@ -79,6 +99,10 @@ def _build_mic_reader(
     buffered yet; the pump treats ``None`` as "poll again" so we pass that
     through. Conversion errors are logged and also return ``None`` so a
     single bad frame never ends the session.
+
+    ``target_rate`` is provider-dependent: 24 kHz for OpenAI Realtime,
+    16 kHz for Gemini Live. Passed in rather than read from a module
+    global so the mic reader stays a pure function of its inputs.
     """
     # Lazy — numpy + scipy live in the robot requirement set only.
     import numpy as np
@@ -98,7 +122,7 @@ def _build_mic_reader(
             return None
         try:
             mono = _to_float32_audio(_extract_first_channel(sample))
-            mono = _resample_audio(mono, mic_rate, _TARGET_MIC_SAMPLE_RATE)
+            mono = _resample_audio(mono, mic_rate, target_rate)
             mono = np.clip(mono, -1.0, 1.0)
             pcm16 = np.round(mono * 32767).astype(np.int16)
         except Exception as exc:
@@ -128,17 +152,33 @@ async def _run_session_async(
     config: KidsTeacherSessionConfig,
     robot_controller: Any,
     mic_reader: Callable[[], Optional[bytes]],
+    provider: str,
 ) -> None:
-    from kids_teacher_backend import OpenAIRealtimeBackend
     from kids_teacher_flow import build_robot_hooks
 
     hooks = build_robot_hooks(robot_controller)
+    backend_factory = _build_backend_factory(provider)
     deps = KidsTeacherFlowDeps(
-        backend_factory=lambda: OpenAIRealtimeBackend(),
+        backend_factory=backend_factory,
         hooks_factory=lambda: hooks,
         mic_pump_factory=_make_mic_pump_factory(mic_reader),
     )
     await run_kids_teacher_session(config=config, deps=deps)
+
+
+def _build_backend_factory(provider: str) -> Callable[[], Any]:
+    """Return a zero-arg factory for the active realtime backend.
+
+    Isolated so tests can assert which provider was selected without
+    running a real session. Lazy-imports the provider-specific module.
+    """
+    if provider == "gemini":
+        from kids_teacher_gemini_backend import GeminiRealtimeBackend
+
+        return lambda: GeminiRealtimeBackend()
+    from kids_teacher_backend import OpenAIRealtimeBackend
+
+    return lambda: OpenAIRealtimeBackend()
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -148,17 +188,37 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     session_id = args.session_id or str(uuid.uuid4())
 
+    # Resolve provider FIRST so the SDK presence check targets the right
+    # package. A bad provider env var should fail before we open any
+    # event loop or robot media context.
+    try:
+        provider = resolve_realtime_provider()
+    except Exception as exc:
+        print(f"error: invalid {exc}", file=sys.stderr)
+        return 2
+
     # Verify SDKs are present BEFORE opening an event loop or the robot
     # media context. Keeps --help and dry-run paths free of heavy imports.
-    try:
-        import openai  # type: ignore  # noqa: F401
-    except ImportError:
-        print(
-            "error: the `openai` package is not installed. Install it to run the "
-            "kids-teacher realtime session on the robot.",
-            file=sys.stderr,
-        )
-        return 2
+    if provider == "gemini":
+        try:
+            import google.genai  # type: ignore  # noqa: F401
+        except ImportError:
+            print(
+                "error: the `google-genai` package is not installed. Install it to run "
+                "the kids-teacher realtime session with provider=gemini.",
+                file=sys.stderr,
+            )
+            return 2
+    else:
+        try:
+            import openai  # type: ignore  # noqa: F401
+        except ImportError:
+            print(
+                "error: the `openai` package is not installed. Install it to run the "
+                "kids-teacher realtime session on the robot.",
+                file=sys.stderr,
+            )
+            return 2
 
     try:
         from reachy_mini import ReachyMini  # type: ignore
@@ -175,18 +235,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     from robot_teacher import RobotController, SAMPLE_RATE
 
     config = _build_config(session_id=session_id, max_seconds=args.max_seconds)
+    target_rate = _target_mic_sample_rate_for(provider)
 
     try:
         with ReachyMini(media_backend="default") as mini:
             mic_rate = mini.media.get_input_audio_samplerate() or SAMPLE_RATE
-            logger.info("[robot_kids_teacher] mic_rate=%dHz", mic_rate)
+            logger.info(
+                "[robot_kids_teacher] provider=%s mic_rate=%dHz target_rate=%dHz",
+                provider,
+                mic_rate,
+                target_rate,
+            )
             mini.media.start_playing()
             mini.media.start_recording()
             try:
                 robot_controller = RobotController(mini)
-                mic_reader = _build_mic_reader(mini, mic_rate)
+                mic_reader = _build_mic_reader(mini, mic_rate, target_rate)
                 asyncio.run(
-                    _run_session_async(config, robot_controller, mic_reader)
+                    _run_session_async(config, robot_controller, mic_reader, provider)
                 )
             finally:
                 try:

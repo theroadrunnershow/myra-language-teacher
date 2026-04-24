@@ -13,18 +13,25 @@ from enum import Enum
 from typing import Optional, Protocol, runtime_checkable
 
 
-# V1 allowlist: only these realtime models may be selected via
+# V1 allowlist: only these OpenAI realtime models may be selected via
 # KIDS_TEACHER_REALTIME_MODEL. Rejecting anything else keeps the backend
 # swap-proof and prevents accidental use of a non-realtime chat model.
 ALLOWED_REALTIME_MODELS: frozenset[str] = frozenset({"gpt-realtime", "gpt-realtime-mini"})
 
-# V1 multilingual set: the four lesson languages + English. The child can
-# speak any of these and the assistant must reply in the detected language
-# when confidence is high enough, otherwise fall back to the configured
-# default_explanation_language.
-KIDS_SUPPORTED_LANGUAGES: frozenset[str] = frozenset(
-    {"english", "telugu", "assamese", "tamil", "malayalam"}
-)
+# V1.1 Gemini Live allowlist. Only the GA native-audio Live model is
+# approved; preview variants are intentionally excluded.
+ALLOWED_GEMINI_MODELS: frozenset[str] = frozenset({"gemini-live-2.5-flash-native-audio"})
+
+# Union of every model id acceptable on KidsTeacherSessionConfig.
+ALLOWED_ALL_MODELS: frozenset[str] = ALLOWED_REALTIME_MODELS | ALLOWED_GEMINI_MODELS
+
+# V1.1 multilingual set for kids-teacher. Narrowed from five languages to
+# {english, telugu} per the 2026-04-23 Gemini migration amendment:
+# Assamese is removed entirely (the standalone language-lesson flow still
+# supports it via gTTS); Tamil/Malayalam never shipped on the realtime
+# path. English is the quality bar; Telugu is kept pending a listening
+# check on Gemini's Telugu voice.
+KIDS_SUPPORTED_LANGUAGES: frozenset[str] = frozenset({"english", "telugu"})
 
 
 class Speaker(str, Enum):
@@ -118,10 +125,10 @@ class KidsTeacherSessionConfig:
     idle_timeout_seconds: Optional[int] = None
 
     def __post_init__(self) -> None:
-        if self.model not in ALLOWED_REALTIME_MODELS:
+        if self.model not in ALLOWED_ALL_MODELS:
             raise ValueError(
                 f"Invalid model {self.model!r}. Must be one of "
-                f"{sorted(ALLOWED_REALTIME_MODELS)}."
+                f"{sorted(ALLOWED_ALL_MODELS)}."
             )
         if not self.enabled_languages:
             raise ValueError("enabled_languages must not be empty")

@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_REALTIME_MODEL = "gpt-realtime"
 REALTIME_MODEL_ENV_VAR = "KIDS_TEACHER_REALTIME_MODEL"
 
+REALTIME_PROVIDER_ENV_VAR = "KIDS_TEACHER_REALTIME_PROVIDER"
+DEFAULT_REALTIME_PROVIDER = "openai"
+ALLOWED_REALTIME_PROVIDERS: frozenset[str] = frozenset({"openai", "gemini"})
+
 # Transcription model used by OpenAI Realtime for input transcripts.
 # Kept as a module-level constant so it is easy to update or override in
 # one place; not currently env-driven because the transcript model is not
@@ -67,6 +71,29 @@ def _decode_audio_delta(delta: Any) -> bytes:
 def _encode_audio_chunk(chunk: bytes) -> str:
     """Encode outbound PCM16 bytes for OpenAI ``input_audio_buffer.append``."""
     return base64.b64encode(chunk).decode("ascii")
+
+
+def resolve_realtime_provider(env_value: Optional[str] = None) -> str:
+    """Return ``"openai"`` or ``"gemini"`` from the provider env var.
+
+    - ``env_value=None`` reads :data:`REALTIME_PROVIDER_ENV_VAR` from the
+      process environment.
+    - Blank/unset values fall back to :data:`DEFAULT_REALTIME_PROVIDER`.
+    - Values outside :data:`ALLOWED_REALTIME_PROVIDERS` raise
+      :class:`BackendConfigError`.
+    """
+    raw = env_value if env_value is not None else os.environ.get(REALTIME_PROVIDER_ENV_VAR)
+    if raw is None:
+        return DEFAULT_REALTIME_PROVIDER
+    candidate = raw.strip().lower()
+    if not candidate:
+        return DEFAULT_REALTIME_PROVIDER
+    if candidate not in ALLOWED_REALTIME_PROVIDERS:
+        raise BackendConfigError(
+            f"Invalid realtime provider {candidate!r}. Must be one of "
+            f"{sorted(ALLOWED_REALTIME_PROVIDERS)}."
+        )
+    return candidate
 
 
 def resolve_realtime_model(env_value: Optional[str] = None) -> str:

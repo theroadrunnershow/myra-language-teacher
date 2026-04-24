@@ -69,7 +69,7 @@ def _get_model() -> str:
 def _default_enabled_languages() -> list[str]:
     raw = os.environ.get("KIDS_ENABLED_LANGUAGES", "").strip()
     if not raw:
-        return ["english", "telugu", "assamese"]
+        return ["english", "telugu"]
     parts = [p.strip() for p in raw.split(",") if p.strip()]
     # Filter to supported set; preserve order.
     return [p for p in parts if p in KIDS_SUPPORTED_LANGUAGES] or ["english"]
