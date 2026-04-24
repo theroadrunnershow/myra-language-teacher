@@ -27,12 +27,12 @@ The follow-up implementation task lifts these patterns as-is. Any deviation requ
 
 ### Files to lift or adapt
 
-- `src/kids_teacher_camera.py` (new) — `CameraWorker` and `encode_bgr_frame_as_jpeg()` adapted with minimal changes from Pollen's equivalents. Keep the worker **hardware-agnostic** (no Gemini coupling) so future features (face recognition per `tasks/face-recognition-design.md`, motion director per `tasks/plan-motion-director.md`) can share the same instance.
+- `src/kids_teacher_camera.py` (new) — `CameraWorker` and `encode_bgr_frame_as_jpeg()` adapted with minimal changes from Pollen's equivalents. Keep the worker **hardware-agnostic** (no Gemini coupling) so concurrent consumers — Gemini's video sender (§1), the face-recognition pipeline (§2.6), the motion director (`tasks/plan-motion-director.md`) — can share the same instance.
 - `src/kids_teacher_gemini_backend.py` — add `send_video(chunk)` that mirrors the existing `send_audio()` kwarg convention (`audio=Blob(...)` → `video=Blob(...)`).
 - `src/kids_teacher_realtime.py` — add `push_video(jpeg_bytes)` that forwards to `backend.send_video()` iff the session is active.
 - `src/robot_kids_teacher.py` — start `CameraWorker` before the Gemini connect; schedule the per-session `video_sender_loop` inside the session context; cancel and await in `finally`.
 
-**No new dependency installs.** PyAV (`av`) is already a transitive dependency of the `reachy_mini` SDK.
+**Pollen-side dependencies are already in place.** PyAV (`av`) is a transitive dependency of the `reachy_mini` SDK. The face-recognition layer (§2.6) adds two new deps — `face_recognition` (dlib) and `numpy` — pinned in `requirements-robot.txt`. dlib builds from source on the Pi 5 (~10 min one-time); subsequent installs are cached.
 
 ---
 
@@ -63,16 +63,16 @@ All seven are enforced via prompt engineering in `profiles/kids_teacher/instruct
 
 Pollen has no safety layer. Kids-teacher already has one (`kids_safety.py::classify_topic`) that scans **assistant transcripts** for disallowed topics and routes to REDIRECT. Extending it for vision requires no new pipeline — the model's verbal description of what it sees is the choke point.
 
-- **SR-KID-1** Prompt-level face blindness: instructions forbid describing the child's body, face, clothes, hair, or identifying anyone in the room. (No face-recognition API is called. Future local face-rec stays separate per `tasks/face-recognition-design.md`.)
+- **SR-KID-1** Prompt-level appearance blindness: instructions forbid describing the child's body, clothes, or hair, and forbid prose descriptions of any person's face features. *Identifying* enrolled people by name is allowed (see §2.6); the model only ever speaks names, never features ("Hi Aunt Priya!" — not "I see your aunt with the glasses").
 - **SR-KID-2** Prompt-level object blocklist: model is instructed to refuse naming/describing medicine, lighters, matches, real or toy guns, alcohol, pills, knives, or anything sharp, and to redirect calmly: *"That one is for grown-ups. Can you show me a toy or a book instead?"*
 - **SR-KID-3** Classifier backstop: add a `VISUAL_REDIRECT_KEYWORDS` set to `kids_safety_keywords.py` (medication, alcohol, weapon, gun, knife, lighter, matches, pills). Wire it into `classify_topic()` so if the model slips and names one of these, the existing REDIRECT path fires.
-- **SR-KID-4** No face analysis. No frame-level ML. The model is our entire computer vision system; the transcript is our entire safety filter.
+- **SR-KID-4** Frame-level ML on the Pi is limited to local face-recognition encodings (§2.6) — no other ML inference on frames, no face *description*, only enrolled-name lookup. The model is our object-recognition system, biometric encodings are our identity index, and the transcript remains our safety filter.
 
 ### 2.4 Retention policy — never retain frames
 
 Pollen has no retention concerns. Kids-teacher has `KidsReviewStore` (audio/transcript artifacts, gated by env flags).
 
-- **FR-KID-8** Frames are sent to Gemini and discarded. **Not** written to disk. **Not** synced to GCS. **Not** added to `KidsReviewStore`. `kids_review_store.py` stays untouched by this feature. Even when `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`, no frames appear anywhere on disk.
+- **FR-KID-8** Frames are sent to Gemini and discarded. **Not** written to disk. **Not** synced to GCS. **Not** added to `KidsReviewStore`. `kids_review_store.py` stays untouched by this feature. Even when `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`, no frames appear anywhere on disk. Frames consumed by the local face-rec pipeline (§2.6) are likewise processed in-memory and discarded; only the resulting 128-D encodings persist (`~/.myra/faces.pkl`), never the source pixels.
 
 ### 2.5 Locked profile extension
 
@@ -93,7 +93,9 @@ objects the child is holding up or pointing at.
 - Only one object at a time. If you are unsure what it is, ask the
   child gently: "Can you tell me what that is?"
 - Do not describe the child's body, face, clothes, or hair.
-- Do not describe anyone else in the room. Do not guess who they are.
+- Do not describe other people's faces, clothes, or hair either.
+  You may greet enrolled people by name (you will be told who is
+  present), but never describe how anyone looks.
 - If the object is not safe for young children (medicine, a lighter,
   a real or toy gun, alcohol, pills, anything sharp), do not describe
   it. Say calmly: "That one is for grown-ups. Can you show me a toy
@@ -102,26 +104,87 @@ objects the child is holding up or pointing at.
   talking and listening. Do not say you cannot see.
 ```
 
+### 2.6 Face recognition — voice-driven enrollment + persistent identity
+
+Pollen does head-tracking but no identity. Kids-teacher needs to remember up to **30 people** (family, close friends, regular visitors) so the robot can greet them by name on subsequent sessions and the model has the relationship context already loaded from `~/.myra/memory.md` (per `tasks/plan-persistent-memory.md`).
+
+Recognition runs **locally on the Pi 5** via the `face_recognition` (dlib) library. Frames never leave the device for face-rec; only 128-D encodings are stored. This pipeline is independent of the Gemini video stream — Gemini still receives 1 fps for object recognition, and face-rec runs in parallel against the same `CameraWorker` buffer.
+
+This section supersedes the older standalone design at `tasks/face-recognition-design.md` (now marked SUPERSEDED). The dlib library, encoding format, distance tolerance, and CLI tool from that doc remain accurate building blocks; their integration target is now this section.
+
+#### 2.6.1 Enrollment — voice-driven (primary)
+
+- **FR-KID-10** When a parent or child says "this is X" / "remember this is X" / "Myra, meet X", the model calls a `remember_face(name, relationship?)` tool. The backend grabs the latest frame from `CameraWorker.get_latest_frame()`, runs `face_recognition.face_encodings()`, and:
+  - **Exactly one face detected** → append `{name: encoding}` to `~/.myra/faces.pkl`; if `relationship` is supplied, also append `"<name> <relationship>"` (e.g., *"Aunt Priya is Myra's mother's sister"*) to `~/.myra/memory.md` via the same atomic-rewrite path as the persistent-memory plan; confirm verbally ("Got it — I'll remember Aunt Priya next time!").
+  - **Zero or 2+ faces** → refuse gracefully ("I can't see them clearly — can they look at me?") without persisting anything.
+- **FR-KID-11** A `forget_face(name)` tool removes all encodings for that name from `faces.pkl` and removes the corresponding line from `memory.md` (substring match, mirroring the persistent-memory plan's `forget` tool semantics).
+- **FR-KID-12** CLI fallback (`scripts/enroll_faces.py`) is preserved for seeding from reference photos or bulk-import. Voice and CLI write to the same `~/.myra/faces.pkl`; either path produces an interchangeable file.
+- **FR-KID-13** **Capacity:** soft cap 30 names × ≤8 encodings/name. Past 30 names, `remember_face` refuses and asks the parent to prune via `forget_face` or by editing `~/.myra/memory.md` + running the CLI rebuild.
+- **FR-KID-14** **Implementation dependency:** voice enrollment requires Gemini Live tool-call plumbing, which is shared with persistent-memory v2 (`remember`/`forget` tools). Whichever feature lands first builds that plumbing; the second feature reuses it. CLI enrollment (FR-KID-12) is not blocked on tool-calling and can ship first.
+
+#### 2.6.2 Recognition — session-start + on-demand
+
+- **FR-KID-15** **Session-start sweep:** within the first ~1 s of a session, capture 5 frames from `CameraWorker`, run face-rec across them, build the "currently present" name list (≥2-of-5 hits per name to confirm, distance ≤ `FACE_TOLERANCE`). Inject as a one-line system note appended to `instructions`: `You can currently see: Myra, Aunt Priya.` The model uses these names naturally when greeting.
+- **FR-KID-16** **On-demand re-check:** every 10 s, run a lightweight HOG bbox count (no encoding) on the latest frame. If the count changes, run a single-frame recognition pass on the new face and inject either `<name> just joined.` (recognized) or `Someone new is here. If a grown-up tells you who, you can remember them.` (unrecognized). Recognition is throttled to at most one new-arrival event per 5 s.
+- **FR-KID-17** **No per-frame face-rec.** We do not run face-rec on every Gemini-bound frame. Session-start + on-demand only.
+- **FR-KID-18** When face-rec is unavailable (library missing, encodings file empty, camera disabled), the present-names note is omitted entirely — the model behaves as if it doesn't know who's there, which is the same as today.
+
+#### 2.6.3 Storage, privacy, and memory linkage
+
+- **FR-KID-19** Encodings live at `~/.myra/faces.pkl` (override via `MYRA_FACES_FILE`), gitignored, outside the package dir so reinstalls / `git pull` / `apt reinstall` leave them alone — same survival model as `~/.myra/memory.md`. Format: `{name: [np.ndarray(128,), ...]}`. 30 names × 8 encodings ≈ 30 KB.
+- **FR-KID-20** Encodings are biometric data: never committed, never synced to GCS, never sent to Gemini/OpenAI. Local-only. `data/kids_review.runtime.v1/` continues to hold zero face data.
+- **FR-KID-21** Frames consumed by face-rec are processed in-memory and discarded — same retention rule as FR-KID-8. `faces.pkl` is the only on-disk visual artifact this feature produces.
+- **FR-KID-22** **Memory linkage:** the system prompt assembled in `kids_teacher_profile.load_profile()` becomes `instructions + memory.md + present-names note`. Relationships and stories about each person ("Aunt Priya bakes cookies", "Ahaan is Myra's little brother") live in `memory.md` as ordinary memory facts; `faces.pkl` is purely the biometric index that maps observation → name. The two files reference each other only by name string.
+
+#### 2.6.4 Provider gate & graceful degradation
+
+- **FR-KID-23** When `KIDS_TEACHER_REALTIME_PROVIDER=openai`: face-rec is disabled (no `CameraWorker` runs). One log line: `face-rec disabled: provider=openai`. `remember_face` / `forget_face` tools are not registered with the OpenAI backend.
+- **FR-KID-24** When `face_recognition` / dlib is unavailable (e.g., dev laptop, partial install): camera + object-rec still work; face-rec degrades to no-op with one warning at startup. `remember_face` becomes a polite refusal ("I can't remember faces yet — ask a grown-up to set me up.").
+- **FR-KID-25** When `~/.myra/faces.pkl` is missing or empty: session-start sweep is a no-op; on-demand re-check still fires for unrecognized arrivals (FR-KID-16) so the parent can opportunistically enroll.
+
+#### 2.6.5 Safety
+
+- **SR-KID-5** **Voice-enrollment guardrail:** the locked profile instructs the model to only call `remember_face` when an adult voice (or Myra herself) explicitly introduces someone present. Refuse if Myra appears alone and asks to remember a stranger ("Let's wait until a grown-up is here to help"). Hard enforcement (speaker diarization, age detection) is out of scope; the Pi sits on the family's home network and `faces.pkl` is parent-editable / parent-clearable.
+- **SR-KID-6** **Names, not features.** The model is told it knows *names* of enrolled people, not *features*. SR-KID-1 stays in force for description; SR-KID-6 just clarifies that name-greeting is the one allowed identity action.
+- **SR-KID-7** **Parent-clearable.** `rm ~/.myra/faces.pkl` clears all enrollments. `forget_face` clears one. No admin UI required for v1.
+
+#### 2.6.6 Files to add or touch (face-rec layer)
+
+- `src/face_service.py` (new) — `load_encodings()`, `save_encodings()`, `enroll_from_frame(name, frame, relationship=None)`, `identify_in_frame(frame) -> list[str]`, `forget(name) -> bool`. Pure functions over a numpy frame; no camera coupling. ~120 lines.
+- `src/kids_teacher_gemini_backend.py` — declare `remember_face` and `forget_face` `FunctionDeclaration`s alongside the persistent-memory `remember`/`forget`; route `tool_call` events through `face_service`.
+- `src/kids_teacher_profile.py` — append the present-names note to `instructions` after the existing memory.md concatenation.
+- `src/robot_kids_teacher.py` — kick off the session-start sweep right after `CameraWorker.start()`; schedule the 10 s on-demand re-check task in the per-session `async with`.
+- `scripts/enroll_faces.py` (preserve from existing design) — CLI for photo-based enrollment.
+- `~/.myra/faces.pkl` — runtime-created on first enrollment.
+- `.gitignore` — add `faces/` and `**/.myra/faces.pkl`.
+
 ---
 
 ## 3. Non-functional requirements
 
 - **NFR-1** Bandwidth ≤ 100 KB/s at default settings (1 fps × ~50–80 KB per native-res JPEG at qscale=3). Well within Pi 5 WiFi headroom.
 - **NFR-2** No measurable impact on audio latency. Pollen's producer-thread + async-consumer split prevents the mic pump from ever blocking on camera I/O.
-- **NFR-3** CPU on Pi 5 ≤ +5% at default settings (JPEG encode only; no ML inference).
+- **NFR-3** CPU on Pi 5 ≤ +5% at default settings (JPEG encode only; object-rec ML happens on Gemini's side).
 - **NFR-4** Graceful degradation: missing `av` / broken camera → audio-only session, one warning at start, never fatal.
+- **NFR-5** Face-rec CPU budget (Pi 5): session-start sweep ≈ 5 frames × ~150 ms HOG+encode ≈ 750 ms one-time per session. On-demand HOG bbox poll ≈ 50 ms every 10 s ≈ 0.5 % steady-state. Single-frame recognition on new arrivals ≈ 200 ms, capped at one per 5 s. Total steady-state overhead < 2 % CPU. Identification across 30 enrolled people is 30 × 128-D Euclidean distances — sub-millisecond.
+- **NFR-6** Face-rec storage: `faces.pkl` ≤ ~30 KB at full capacity (30 × 8 × 128 × 4 bytes ≈ 122 KB worst-case with float32; typically smaller with default float64 → fewer encodings per name). Negligible.
+- **NFR-7** Face-rec graceful degradation: missing `face_recognition` / dlib → camera + object-rec still work, face-rec is silent no-op with one startup warning. Missing `~/.myra/faces.pkl` → session-start sweep is a no-op; first `remember_face` creates the file.
 
 ---
 
 ## 4. Config (minimal)
 
-Only one knob specific to kids-teacher:
+Knobs specific to kids-teacher:
 
 ```
-KIDS_TEACHER_CAMERA_FPS   1.0   float; 0.2–5.0 supported, clamped
+KIDS_TEACHER_CAMERA_FPS         1.0                     float; 0.2–5.0, clamped
+KIDS_TEACHER_FACE_REC_ENABLED   true                    bool; defaults true on gemini, ignored on openai
+KIDS_TEACHER_FACE_TOLERANCE     0.50                    float; dlib distance threshold, 0.4–0.6 sane range
+KIDS_TEACHER_FACE_RECHECK_SEC   10.0                    float; on-demand bbox-poll interval (FR-KID-16)
+MYRA_FACES_FILE                 ~/.myra/faces.pkl       path override; mirrors MYRA_MEMORY_FILE
 ```
 
-Not exposed: resolution (Pollen doesn't downscale, we won't either) and JPEG quality (adopt Pollen's qscale=3 as a constant). If tuning is needed later, add flags then — not speculatively now.
+Not exposed: camera resolution (Pollen doesn't downscale, we won't either), JPEG quality (Pollen's qscale=3 as a constant), face-rec detection model (HOG fixed; CNN model is GPU-only and not on the Pi). If tuning is needed later, add flags then — not speculatively now.
 
 ---
 
@@ -147,7 +210,25 @@ Light sanity tests for the lifted code (not redundant with Pollen's tests, but e
 | `test_video_sender_loop_skips_when_session_is_none` | Before/after session connect, no sends are attempted. |
 | `test_video_task_cancelled_on_session_teardown` | `video_task.cancel()` + `await video_task` path completes within one tick. |
 
-All mocked. No real camera, Gemini, or robot required.
+Face-recognition tests (new):
+
+| Test | Verifies |
+|---|---|
+| `test_remember_face_persists_encoding_with_one_face` | `remember_face("Aunt Priya", "is Myra's aunt")` on a frame with exactly one face writes to `faces.pkl` and appends a line to `memory.md`. |
+| `test_remember_face_refuses_when_zero_faces` | Blank frame → no write to `faces.pkl`, no write to `memory.md`, polite refusal returned to model. |
+| `test_remember_face_refuses_when_multiple_faces` | 2-face frame → no write, polite refusal. |
+| `test_forget_face_removes_encoding_and_memory_line` | Encoding + memory line gone after `forget_face("Aunt Priya")`. |
+| `test_session_start_sweep_injects_present_names` | Mocked 5-frame sweep with 2 known faces → `instructions` contains `You can currently see: Myra, Aunt Priya.`. |
+| `test_on_demand_recheck_announces_new_arrival` | Bbox count goes 1 → 2 between polls → single recognition pass + injected note. |
+| `test_on_demand_recheck_throttled_to_5s` | Two new faces in 1 s produce at most one event. |
+| `test_face_rec_disabled_when_provider_openai` | `provider=openai` → no `CameraWorker`, no face-rec tools registered, log emitted. |
+| `test_face_rec_degrades_gracefully_when_dlib_missing` | Patch `face_recognition` import to fail → camera/object-rec still run; one warning logged; `remember_face` returns the polite refusal. |
+| `test_faces_pkl_persists_across_sessions` | Enroll, tear down, reload — encoding survives. |
+| `test_no_frames_persisted_during_face_rec` | Run an enrollment + a recognition pass; assert `~/.myra/` contains only `faces.pkl` (and any pre-existing `memory.md`); no images on disk. Regression for FR-KID-21. |
+| `test_capacity_cap_at_30_names` | 30 names enrolled → 31st `remember_face` is refused with the "ask the parent to prune" message. |
+| `test_present_names_note_omitted_when_no_encodings` | Empty `faces.pkl` → no `You can currently see:` line in `instructions`. |
+
+All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` is patched at import).
 
 ---
 
@@ -160,9 +241,17 @@ All mocked. No real camera, Gemini, or robot required.
    - Say "no" → robot says "Okay!" and stays silent about visuals until something new appears.
    - Hold up a medicine bottle → robot redirects calmly to a safe topic.
    - Hold up nothing / cover the camera → robot continues normal audio conversation, does **not** mention not seeing.
-3. Confirm no frames landed in `data/kids_review.runtime.v1/` even with `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`.
-4. Swap `KIDS_TEACHER_REALTIME_PROVIDER=openai` → logs "camera disabled: provider=openai"; session runs audio-only.
-5. Remove the `av` package → one warning at session start; session runs audio-only.
+3. Face recognition (with another adult in frame):
+   - Adult says "Myra, this is Aunt Priya. She's your mom's sister." → robot replies *"Got it — I'll remember Aunt Priya next time!"*
+   - Confirm `~/.myra/faces.pkl` exists with one entry; confirm `~/.myra/memory.md` gained a line *"Aunt Priya is Myra's mom's sister"*.
+   - End the session, restart `python src/robot_kids_teacher.py` with the same person in frame → robot greets *"Hi Aunt Priya! Hi Myra!"* on first turn.
+   - Mid-session, a second known person walks in → robot acknowledges *"Oh, Daddy just joined!"* without prompting.
+   - Say "forget Aunt Priya" → encoding removed, memory line removed (verify both files).
+   - Stranger walks in → robot says something like *"Someone new is here — would you like me to learn who they are?"*; nothing is enrolled until an adult confirms.
+4. Confirm no frames landed in `data/kids_review.runtime.v1/` or `~/.myra/` even with `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`. Only `faces.pkl` and `memory.md` should appear under `~/.myra/`.
+5. Swap `KIDS_TEACHER_REALTIME_PROVIDER=openai` → logs "camera disabled: provider=openai" **and** "face-rec disabled: provider=openai"; session runs audio-only with no recognition.
+6. Remove the `av` package → one warning at session start; session runs audio-only.
+7. Remove the `face_recognition` package (or stub the import to fail) → camera + object-rec still work; one warning at session start; `remember_face` requests are politely refused.
 
 ---
 
@@ -170,6 +259,10 @@ All mocked. No real camera, Gemini, or robot required.
 
 - **Gemini free-tier quota** — ~900 frames per 15-min session at 1 fps. Confirm during implementation; if the quota is tight, drop default to 0.5 fps. Single-knob change via `KIDS_TEACHER_CAMERA_FPS`.
 - **How long is "a few seconds"?** Prompt-engineering judgment call. Start with the wording above; adjust after observing Myra-in-the-loop if the robot over- or under-reacts.
+- **Tool-call plumbing sequencing.** `remember_face` / `forget_face` (FR-KID-10/11) and persistent-memory v2 (`remember` / `forget`) share the same Gemini Live tool-call wiring. Whoever lands first builds it; the other reuses. CLI face enrollment ships independently (FR-KID-12).
+- **Speaker authority for enrollment (SR-KID-5).** Today's guardrail is prompt-only: the model decides whether the requester sounds like an adult. Hard speaker diarization / age detection is out of scope; revisit only if we observe Myra trying to over-enroll.
+- **Capacity past 30.** If we hit the cap in practice, options are (a) raise the cap (cheap — sub-second identification stays fine to ~1000 names) or (b) build a parent-facing prune UI. Defer until it bites.
+- **Encoding tolerance drift.** A child's face changes meaningfully over months. We're not handling this in v1; if false-negatives rise, the parent re-runs voice enrollment ("Myra, that's still you!") to add a fresh encoding for the same name.
 
 ---
 
