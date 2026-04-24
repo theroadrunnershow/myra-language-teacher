@@ -119,36 +119,35 @@ the file with "her name is Aanya, her brother is Rohan, she loves
 tigers" and the robot will reference those naturally for weeks.
 
 **v2 — on-demand tool calls from the Live model.**
-The Gemini Live session declares two tools — `remember(fact: str)`
-and `forget(substring: str)` — and the model invokes them
-mid-conversation when the child or parent asks it to. The Live model
-itself produces the cleaned, third-person fact text inside the tool
-call, so there is no separate summarizer LLM and no second vendor on
-the transcript path.
+The Gemini Live session declares one tool — `remember(fact: str)` —
+and the model invokes it mid-conversation when the child or parent
+asks it to. The Live model itself produces the cleaned, third-person
+fact text inside the tool call, so there is no separate summarizer
+LLM and no second vendor on the transcript path.
 
 Mechanism:
 
-1. **Declare tools on the Live config.** Extend `_build_live_config`
+1. **Declare the tool on the Live config.** Extend `_build_live_config`
    in `kids_teacher_gemini_backend.py` (around line 138) to set
-   `tools=[…]` on the returned `LiveConnectConfig` with two
-   `FunctionDeclaration`s:
+   `tools=[…]` on the returned `LiveConnectConfig` with one
+   `FunctionDeclaration`:
    - `remember(fact: str)` — "Persist a fact the child or parent
      asked you to remember. `fact` should be a single, third-person
      sentence about the child (e.g. 'Her favourite colour is blue').
      Skip facts already covered by existing memory."
-   - `forget(substring: str)` — "Remove a remembered fact when the
-     child or parent says to forget it. `substring` matches a line
-     in the memory file."
-2. **Instruct the model** in `instructions.txt` to use the tools
+
+   Forgetting/removing facts is intentionally out of scope: the
+   parent edits `~/.myra/memory.md` directly. Voice-driven
+   `forget` would add tool-description bloat that risks hurting
+   `remember` accuracy, with little payoff for a 4-year-old's flow.
+2. **Instruct the model** in `instructions.txt` to use the tool
    eagerly:
    > If the child or parent asks you to remember something, call the
    > `remember` tool with a clean, third-person sentence about the
-   > child, then say "Got it, I'll remember!" If they ask you to
-   > forget something, call `forget` with a phrase that identifies
-   > the line. If you don't yet know the child's name, gently ask in
-   > the first turn ("What should I call you?"); once they tell you,
-   > call `remember` with "Her/His/Their name is …" and use the name
-   > from then on.
+   > child, then say "Got it, I'll remember!" If you don't yet know
+   > the child's name, gently ask in the first turn ("What should I
+   > call you?"); once they tell you, call `remember` with
+   > "Her/His/Their name is …" and use the name from then on.
 3. **Handle `tool_call` events asynchronously** in the realtime
    layer. Gemini Live already surfaces `tool_call` and
    `tool_call_cancellation` at the top level of the message envelope
@@ -161,24 +160,17 @@ Mechanism:
      `tool_response` of `{"status": "scheduled"}` back to the Live
      session so the model is unblocked and the next conversational
      turn proceeds without delay.
-   - Spawn a background `asyncio.Task` that performs the actual
-     `memory_file.append(fact)` / `memory_file.remove(substring)` —
-     including the `fcntl.flock` acquisition and atomic
-     tempfile-rename — entirely off the realtime read path.
-   - When the background task completes, emit a normalized
-     `memory.updated` event on the existing event queue (with
-     `status=ok|already_known|error` and the fact text) for
-     observability / UI / tests. The Live model has already moved
-     on; this event is for everyone else.
-   - The verbal "Got it, I'll remember!" is a soft commitment from
-     the model, decoupled from the actual write. If the background
-     write fails (disk full, permission), the failure is logged and
-     emitted but **not** re-spoken to the child — the parent will
-     notice via logs or by inspecting `memory.md`. This is an
-     intentional simplification: the conversation stays smooth, and
-     write failures on a Pi with a healthy SD card are rare enough
-     that surfacing them mid-conversation isn't worth the
-     complexity.
+   - Spawn a background `asyncio.Task` that calls
+     `memory_file.append(fact)` — including the `fcntl.flock`
+     acquisition and atomic tempfile-rename — entirely off the
+     realtime read path.
+   - If the background append raises, just `log.warning(...,
+     exc_info=True)`. No event emission, no retry, no verbal
+     correction to the child. The verbal "Got it, I'll remember!"
+     is a soft commitment from the model, decoupled from the actual
+     write; on a Pi with a healthy SD card, write failures are rare
+     enough that quietly logging is the right tradeoff. Parent
+     notices by inspecting `memory.md` or the log.
 4. **No re-load mid-session.** Gemini Live's `system_instruction` is
    fixed for the connection, but the newly remembered fact is already
    in the model's working context (it just produced it), so
@@ -213,17 +205,17 @@ Why async (non-blocking) tool dispatch:
   is for *future* sessions. There is no in-session correctness reason
   to wait for the write to land before continuing.
 
-Failure modes (all handled off the conversation path):
-- Tool call malformed (missing `fact`, empty string) → background
-  task logs a warning and emits `memory.updated{status: "error"}`;
-  no file change. Model already said "Got it" — accept the small lie
-  in exchange for not derailing a 4-year-old's conversation. Parent
-  notices via logs.
+Failure modes (all handled off the conversation path — the rule is
+just log and move on):
+- Tool call malformed (missing `fact`, empty string) → log a
+  warning, no file change. Model already said "Got it"; accept the
+  small lie rather than derail a 4-year-old's conversation.
 - Tool call duplicates an existing line → `memory_file.append` does
-  a case-insensitive substring check, skips silently, and emits
-  `memory.updated{status: "already_known"}`.
-- File write error (disk full, permission) → logged + emitted as
-  `error`; no re-speak to the child. Parent investigates.
+  a case-insensitive substring check and skips silently. Logged at
+  debug.
+- File write error (disk full, permission) → logged as a warning
+  with `exc_info`. Parent investigates via the log or by inspecting
+  `memory.md`.
 - Live session disconnects between tool call dispatch and the
   background write completing → the background task is anchored to
   the realtime layer, not the Live socket; it finishes the append
@@ -249,28 +241,26 @@ v1:
   appears in the assembled instructions.
 
 v2 (only when v1 has shipped and is in use):
-- `src/kids_teacher_gemini_backend.py` — declare `remember` / `forget`
-  tools on the Live config (`_build_live_config`); on incoming
-  `tool_call`, immediately reply with `{"status": "scheduled"}` and
-  spawn a background `asyncio.Task` that calls `memory_file.append` /
-  `memory_file.remove` and emits `memory.updated`. Existing event
-  names already include `tool_call` / `tool_call_cancellation` (see
-  line 542) so the realtime layer will surface them; we just have to
-  handle them.
-- `src/kids_teacher_realtime.py` — propagate `memory.updated` to any
-  consumers that want it (logging, future UI).
+- `src/kids_teacher_gemini_backend.py` — declare the `remember` tool
+  on the Live config (`_build_live_config`); on incoming `tool_call`,
+  immediately reply with `{"status": "scheduled"}` and spawn a
+  background `asyncio.Task` that calls `memory_file.append` (logging
+  any exception). Existing event names already include `tool_call` /
+  `tool_call_cancellation` (see line 542) so the realtime layer will
+  surface them; we just have to handle them.
 - One paragraph in `instructions.txt` (the wording above).
 - Tests:
-  - Tool declarations appear on the assembled `LiveConnectConfig`.
+  - The `remember` declaration appears on the assembled
+    `LiveConnectConfig`.
   - Tool-call round-trip with a fake backend: synthetic `tool_call`
     event in → synthetic `tool_response` (`scheduled`) sent back
     *before* the background task is awaited; once awaited,
-    `memory_file` is mutated and `memory.updated{status: "ok"}` is
-    emitted. The "before" assertion is the non-blocking guarantee.
-  - Duplicate-fact handling: second `remember` of the same fact
-    emits `already_known` and does not double-write.
+    `memory_file` contains the new line. The "before" assertion is
+    the non-blocking guarantee.
   - Slow-write simulation: a `memory_file.append` that sleeps for
     500ms does not delay the `tool_response` send.
+  - Failing-write simulation: `memory_file.append` raising
+    `OSError` results in a logged warning and no crash.
 
 ## Bounds and edge cases
 
@@ -299,18 +289,6 @@ v2 (only when v1 has shipped and is in use):
 3. **Mastery tracking.** Out of scope here. If we want SR later, add
    a tiny `mastery` SQLite table (or even another markdown file)
    purely for that — don't conflate it with memory.
-4. **`forget` in v2 or defer?** `remember` covers the 90% case. The
-   parent can also delete lines by editing `memory.md` directly.
-   Shipping `forget` from day one is cheap (one extra
-   `FunctionDeclaration`, one extra dispatch arm) and lets the child
-   say "forget about the tiger thing" naturally — recommended. Open
-   to dropping it from v2 if the tool description bloat affects
-   `remember` accuracy.
-5. **Surfacing async write failures.** Current plan: log + emit
-   `memory.updated{error}`, no verbal correction. Alternative: queue
-   a one-shot system message into the next session ("by the way, I
-   couldn't save 'X' last time"). Skipped for v2 as overkill; revisit
-   if write failures turn out to be common.
 
 ## Rollout
 
