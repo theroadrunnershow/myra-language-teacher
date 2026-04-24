@@ -108,6 +108,49 @@ Design doc: [tasks/face-recognition-design.md](face-recognition-design.md)
 - [ ] Run full test suite — confirm all tests pass
 - [ ] On-Pi verification — enroll, verify, run full session
 
+### Persistent Memory ("Robot That Remembers Myra")
+Design doc: [tasks/plan-persistent-memory.md](plan-persistent-memory.md)
+
+Goal: the robot accumulates memory of the child across sessions, devices, and
+reinstalls — so it can greet with continuity, run spaced repetition on words
+she's actually struggling with, and reference family/favorites/inside jokes.
+
+Key design choices (see plan doc for rationale):
+- **Child-keyed, not device-keyed.** Primary key is a parent-set `child_id`;
+  device IDs are incidental. Cloud is the source of truth so a reinstall just
+  re-fetches.
+- **Four memory kinds**, separated by access pattern: semantic (facts),
+  procedural (per-word mastery), episodic (session log), affective (likes/
+  frustrations).
+- **Firestore for the hot path, GCS for cold episode blobs** — but v1 may use
+  a single GCS JSON blob per child to avoid the new Firestore dep.
+- **LLM injection via a ≤500-token preamble** built at session start; never
+  dump full history into the model context.
+- **Privacy: admin-only access, cascade-delete path, no raw audio in memory.**
+
+Checklist (rollout phases — ship tests with each):
+
+- [ ] `High` Resolve open questions in plan doc §"Open questions" (Firestore
+  vs. blob-only, web identity model, offline cache scope) before any coding
+- [ ] `High` v1: `src/memory_store.py` — GCS-backed semantic + last-3-sessions
+  summary, keyed on `child_id`. Read-on-start, write-on-session-end. Tests
+  with a fake GCS client.
+- [ ] `High` v1: `build_memory_preamble(child_id) -> str` consumed by both
+  `kids_teacher_backend` and `kids_teacher_gemini_backend`. Hard ≤500-token
+  cap. Falls back to empty string on fetch failure (never blocks start).
+- [ ] `High` v1: admin routes — `GET`/`DELETE`/`POST redact` under
+  `/admin/memory/{child_id}`. Reuse existing admin auth.
+- [ ] `Medium` v2: per-word mastery (attempts/successes/ease/last_seen) +
+  spaced-repetition word selection in `kids_teacher_flow`
+- [ ] `Medium` v3: episodic JSONL append-only blobs + weekly summarizer that
+  refreshes the affective doc and trims episodes older than 1 year
+- [ ] `Medium` Schema versioning + migration path (`schema_version: 1` on
+  every doc, migration helper invoked on read)
+- [ ] `Low` v4: local SQLite cache on robot for offline tolerance — only if
+  a real offline scenario surfaces in practice
+- [ ] `Low` Multi-child households (schema already supports it; deferred
+  until needed)
+
 ### Language Lesson Polish
 
 - [ ] Add celebratory jingles
