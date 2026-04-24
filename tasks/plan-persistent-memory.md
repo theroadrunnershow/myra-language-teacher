@@ -1,11 +1,17 @@
-# Plan: Persistent Memory ("Robot That Remembers Myra")
+# Plan: Persistent Memory
 
 ## Context
 
-The kids-teacher flow on Reachy Mini should remember things about Myra
-across sessions — her brother's name, that she loves tigers, that her
-favorite colour is blue, the inside joke from yesterday. Today everything
-is in-process; nothing survives a restart.
+The kids-teacher flow on Reachy Mini should remember things about the
+child it's talking to across sessions — their name, a sibling's name,
+that they love tigers, that their favourite colour is blue, the inside
+joke from yesterday. Today everything is in-process; nothing survives a
+restart.
+
+The robot doesn't ship knowing whom it's talking to. On a fresh device
+the memory file is empty; the kids-teacher flow asks the child for
+their name in the first turn and persists it through the same memory
+mechanism as everything else (see "Capturing the child's name" below).
 
 ## The smallest thing that works
 
@@ -19,9 +25,10 @@ system prompt at session start.
 Example contents:
 
 ```markdown
-# Things to remember about Myra
+# Things to remember about the child
 
-- Her little brother is Ahaan _(2026-03-12)_
+- Her name is Aanya _(2026-03-10)_
+- Her little brother is Rohan _(2026-03-12)_
 - She loves tigers and elephants _(2026-03-14)_
 - Favourite colour is blue _(2026-04-01)_
 - Inside joke: when she says "ba-ba-banana" we say "yes ma'am!" _(2026-04-12)_
@@ -33,10 +40,33 @@ spaced-repetition machinery, no LLM-written recaps, no admin routes.
 ## Scope
 
 - **Reachy-only, kids-teacher-only.** No web client, no other modes.
-- **Single child per device.** No keying.
+- **Single child per device.** No keying. The name is learned, not
+  hardcoded — see "Capturing the child's name" below.
 - **Memory ≠ mastery tracking.** Mastery (per-word success rate, spaced
   repetition) is a separate feature, deferred. Mixing them was what
   bloated the previous design.
+
+## Capturing the child's name
+
+The child's name is not configured anywhere — it's learned from the
+child themself and persisted in `memory.md` like any other fact.
+
+- On a fresh device, `memory.md` is missing or empty. The robot has no
+  name to greet with.
+- One sentence in `instructions.txt` covers the prompt side:
+  > If you don't yet know the child's name, gently ask in the first
+  > turn ("What should I call you?"). Once they tell you, use it.
+- The name is captured by the same path as any other memory:
+  - **v1 (parent-curated):** the parent can pre-seed `memory.md` with
+    `- Her name is Aanya` so the robot is ready on first run. No prompt
+    nudge needed if the line is already there.
+  - **v2 (auto-enrich):** the end-of-session summarizer treats the name
+    introduction as a "remember this" moment and appends a `Her/His/
+    Their name is …` bullet. Subsequent sessions read it from
+    `memory.md` and use it.
+- The name lives in the same file as everything else; no separate
+  `child_name` field, no extra schema. Keeps the "one markdown file"
+  invariant intact.
 
 ## Why markdown over a DB
 
@@ -80,8 +110,8 @@ step uses a lightweight LLM. Three phases:
 The parent edits `~/.myra/memory.md` directly. The robot reads it on
 every session start. Ships immediately, no LLM conversion needed. This
 is genuinely useful on its own: a parent can seed the file with "her
-brother is Ahaan, she loves tigers" and the robot will reference those
-naturally for weeks.
+name is Aanya, her brother is Rohan, she loves tigers" and the robot
+will reference those naturally for weeks.
 
 **v2 — end-of-session conversion via Ollama Cloud.**
 Once v1 is in use, add automatic enrichment. Mechanism:
@@ -90,9 +120,11 @@ Once v1 is in use, add automatic enrichment. Mechanism:
    `publish_transcript` events with speaker + final-vs-partial flags
    (`kids_teacher_realtime.py:319`); a small in-memory collector
    subscribes for the duration of the session.
-2. **Real-time ack.** Add one sentence to `instructions.txt`:
+2. **Real-time ack.** Add two sentences to `instructions.txt`:
    > If the child or parent asks you to remember something, simply say
    > "Got it, I'll remember!" — you don't need to do anything else.
+   > If you don't yet know the child's name, gently ask in the first
+   > turn ("What should I call you?") and use it once they tell you.
    The Live model handles conversational confirmation; the actual file
    write is async.
 3. **At session end**, call the project's text-only LLM abstraction
@@ -102,11 +134,12 @@ Once v1 is in use, add automatic enrichment. Mechanism:
      `Speaker: text` lines)
    - A prompt like:
      > Extract moments where the child or parent asked the robot to
-     > remember something. Return new facts as markdown bullets in the
-     > existing file's style (one fact per bullet, third person about
-     > the child, append `_(YYYY-MM-DD)_`). Skip facts already covered
-     > by existing memory. If nothing was asked to be remembered,
-     > return exactly `NONE`.
+     > remember something — or where the child told the robot their
+     > name. Return new facts as markdown bullets in the existing
+     > file's style (one fact per bullet, third person about the child,
+     > append `_(YYYY-MM-DD)_`). Skip facts already covered by
+     > existing memory. If nothing was asked to be remembered and no
+     > name was introduced, return exactly `NONE`.
 4. **Append** the returned bullets to `memory.md` via the same atomic
    write path used by manual edits.
 
@@ -236,9 +269,9 @@ v2 (only when v1 has shipped and is in use):
 ## Open questions
 
 1. **System-prompt heading.** Should the file's contents be wrapped in
-   a `## Things to remember about Myra` heading, or just appended raw?
-   I'd default to appending raw since the file already has its own
-   `# Things to remember about Myra` heading at the top.
+   a `## Things to remember about the child` heading, or just appended
+   raw? I'd default to appending raw since the file already has its
+   own `# Things to remember about the child` heading at the top.
 2. **Date stamps in the file.** Useful for the LLM ("we said this
    recently"); also helps the parent prune. Default: yes, append
    `_(YYYY-MM-DD)_` on each new line.
