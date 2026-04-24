@@ -1,5 +1,18 @@
 # Face Recognition Design: Reachy Mini Robot
 
+> **STATUS — SUPERSEDED (2026-04-24)**
+>
+> Face recognition is now part of [`camera-object-recognition-design.md`](camera-object-recognition-design.md) §2.6. That doc folds vision (object + identity) into the Pollen-based camera pipeline used by kids-teacher, adds **voice-driven enrollment** (the user says *"this is Aunt Priya"* and the robot calls a `remember_face` tool), supports up to **30 enrolled people**, and links face identity to persistent memory at `~/.myra/memory.md` + `~/.myra/faces.pkl`.
+>
+> This file is kept for historical reference. The dlib-based pipeline, encoding format, distance tolerance, and `scripts/enroll_faces.py` CLI described below remain accurate building blocks — but their integration target is now §2.6 of the camera doc, not the older `robot_teacher.py` flow. In particular:
+>
+> - **Enrollment:** voice-driven is now the primary path; CLI is the fallback for photo-based bulk seeding (FR-KID-12 in the camera doc).
+> - **Recognition cadence:** session-start sweep + on-demand re-check (FR-KID-15/16), not just session-start.
+> - **Capacity:** target raised from "<10" to 30 (FR-KID-13).
+> - **Storage location:** moved from `faces/encodings.pkl` (in-repo) to `~/.myra/faces.pkl` (mirrors `~/.myra/memory.md`, gitignored, survives reinstalls).
+> - **Memory linkage:** names + relationships go in `~/.myra/memory.md` per `tasks/plan-persistent-memory.md`; `faces.pkl` is purely the biometric index.
+> - **Integration target:** `src/robot_kids_teacher.py` (kids-teacher mode on Reachy), not the older `src/robot_teacher.py`.
+
 ## Context
 
 The robot needs to know who is in front of it when a session starts so it can greet them by name and personalize the lesson. There are fewer than 10 known people. Reference photos will be provided per person for enrollment.
