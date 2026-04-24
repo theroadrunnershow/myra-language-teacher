@@ -259,9 +259,32 @@ class GeminiRealtimeBackend:
         events: list[dict] = []
         server_content = _attr(raw_message, "server_content")
         if server_content is None:
-            # Log non-server_content messages so we can spot go_away,
-            # session_resumption_update, tool_call, or other signals we
-            # might be silently ignoring.
+            # Log non-server_content messages with per-type detail so we
+            # can see the actual contents of session_resumption_update
+            # (new_handle, resumable) and go_away (time_left) — these
+            # are what drive the multi-turn reconnect protocol.
+            srupdate = _attr(raw_message, "session_resumption_update")
+            if srupdate is not None:
+                new_handle = _attr(srupdate, "new_handle")
+                if isinstance(new_handle, str) and len(new_handle) > 40:
+                    handle_preview: Any = f"{new_handle[:40]}...(len={len(new_handle)})"
+                else:
+                    handle_preview = new_handle
+                logger.info(
+                    "[kids_teacher_gemini_backend] session_resumption_update: "
+                    "new_handle=%r resumable=%s last_consumed_client_message_index=%s",
+                    handle_preview,
+                    _attr(srupdate, "resumable"),
+                    _attr(srupdate, "last_consumed_client_message_index"),
+                )
+                return events
+            goaway = _attr(raw_message, "go_away")
+            if goaway is not None:
+                logger.info(
+                    "[kids_teacher_gemini_backend] go_away: time_left=%s",
+                    _attr(goaway, "time_left"),
+                )
+                return events
             present = _summarize_top_level_fields(raw_message)
             logger.info(
                 "[kids_teacher_gemini_backend] non-server_content message: fields=%s",
