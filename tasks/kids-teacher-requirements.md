@@ -16,6 +16,202 @@ After reviewing the current codebase, the recommended implementation path is to 
 
 **V1 backend decision:** V1 should be **OpenAI-only**, using the **OpenAI Realtime API** for live voice sessions. The app should support both `gpt-realtime` and `gpt-realtime-mini`, with the active model chosen by deployment configuration.
 
+> **Superseded by the 2026-04-23 amendment below.** V1.1 adds Gemini Flash
+> Live as a runtime-selectable provider (env-var switch; OpenAI remains the
+> fallback path), narrows kids-teacher language scope to English (primary)
+> and Telugu (pending listening check), and **removes Assamese from
+> kids-teacher entirely**. See the "2026-04-23 Amendment — Gemini Flash
+> Live migration" section for details.
+
+---
+
+## 2026-04-23 Amendment — Gemini Flash Live migration
+
+### Why this amendment exists
+
+The original V1 decision locked in the OpenAI Realtime API. Operating
+cost on OpenAI's paid tier is blocking further development of the
+kids-teacher feature for a single-user toddler project. Google's Gemini
+Flash Live API offers a usable free tier for this workload, and the
+codebase's existing `RealtimeBackend` protocol already provides the
+abstraction required for a clean provider swap (only
+`src/kids_teacher_backend.py` touches the OpenAI SDK directly; the
+factory is injected at a single call site in
+`src/robot_kids_teacher.py:137`).
+
+### Validation of the "Gemini is free" claim
+
+Validated against current Google docs (April 2026); citations in the
+plan file `~/.claude/plans/purring-wishing-lemur.md`.
+
+| Claim | Reality |
+|---|---|
+| "10 RPM / 15 RPM free tier for Live API" | The RPM numbers apply to `generateContent`, not Live API. Live API is gated by **concurrent sessions** (3 on free). One kid = one session, so free tier fits. |
+| "Flash-Lite is on Live" | **No.** Only `gemini-live-2.5-flash-native-audio` (GA) and a preview variant are available on Live API. |
+| "Free with no caveats" | On the AI Studio free tier, Google may use prompts and audio for model training. Paid tier (or Vertex) disables this. Accepted risk for now. |
+| Cost if free tier exhausted | ~$0.35 per 15-min session on Gemini 2.5 Flash native-audio — roughly 4× cheaper than `gpt-realtime`. |
+
+### Scope decisions locked in before implementation
+
+1. **English-first.** English is the primary target and quality bar.
+2. **Telugu is keep-if-good.** After Phase 1 ships, a 5-minute Telugu
+   listening check decides whether to keep Telugu in
+   `KIDS_SUPPORTED_LANGUAGES` or drop it too.
+3. **Assamese is removed from kids-teacher entirely.** The narrowed
+   language set for kids-teacher is `{english, telugu}`. The standalone
+   language-lesson flow (which uses `words_db.py` + gTTS) is
+   unaffected; Assamese words still work there.
+4. **Keep OpenAI as a runtime-switchable provider** via
+   `KIDS_TEACHER_REALTIME_PROVIDER=openai|gemini`. Instant rollback
+   path; small ongoing maintenance cost.
+5. **Stay on Gemini AI Studio free tier with training enabled.**
+   Documented as a risk; revisit if the app is ever shared outside the
+   family.
+
+### How this amendment changes the existing requirements
+
+- **§FR13 "Multilingual detection and response"** is narrowed for
+  kids-teacher from `{English, Telugu, Assamese, Tamil, Malayalam}` to
+  `{English, Telugu}`. Tamil/Malayalam never shipped; Assamese is
+  withdrawn.
+- **§"V1 backend decision"** (line 17) → now: OpenAI or Gemini
+  selectable by env var. Default provider for local development moves
+  to Gemini once Phase 1 is green.
+- **§"Deployment configuration"** adds: `KIDS_TEACHER_REALTIME_PROVIDER`
+  (`openai` | `gemini`), `KIDS_TEACHER_GEMINI_MODEL` (default
+  `gemini-live-2.5-flash-native-audio`), and a new secret
+  `GEMINI_API_KEY`.
+- **§"Safety enforcement layers"** requires verifying that Gemini's
+  `input_audio_transcription` opt-in is enabled so child transcripts
+  still feed the safety layer (a regression risk called out below).
+- **AC10 / AC11** (multilingual acceptance criteria) apply only to
+  English and Telugu for kids-teacher. Remove Assamese/Tamil/Malayalam
+  expectations.
+
+### Architecture — why this is a small change
+
+The codebase is already set up for provider abstraction:
+
+- `RealtimeBackend` is a `Protocol` in `src/kids_teacher_backend.py:126-158`
+  with 5 async methods + an `events()` async iterator and 9 normalized
+  event types.
+- The concrete `OpenAIRealtimeBackend` is instantiated from exactly one
+  place: `src/robot_kids_teacher.py:137` (lambda passed to
+  `KidsTeacherFlowDeps.backend_factory`).
+- Tests use a `FakeRealtimeBackend` that already demonstrates the
+  protocol is sufficient for a non-OpenAI implementation.
+- Everything above the backend layer — handler, safety, hooks, robot
+  bridge, flow, routes, tests — remains untouched.
+
+### Implementation plan (Phase 1 — MVP, English only)
+
+#### Files to modify
+
+| File | Change |
+|---|---|
+| `src/kids_teacher_gemini_backend.py` | **new** — `GeminiRealtimeBackend` implementing the existing `RealtimeBackend` protocol via `google-genai`. Lazy-imports `google.genai` inside `connect()`. |
+| `src/kids_teacher_backend.py` | Add `resolve_realtime_provider()` returning `"openai"` or `"gemini"` from `KIDS_TEACHER_REALTIME_PROVIDER`. No changes to `OpenAIRealtimeBackend`. |
+| `src/kids_teacher_types.py` | Add `ALLOWED_GEMINI_MODELS = frozenset({"gemini-live-2.5-flash-native-audio"})`. Narrow `KIDS_SUPPORTED_LANGUAGES` to `{english, telugu}`. |
+| `src/robot_kids_teacher.py` | Provider switch at `backend_factory` (line 137); SDK presence check conditional on provider (line 154); make mic target rate provider-dependent (16 kHz for Gemini, 24 kHz for OpenAI) at line 34. |
+| `profiles/kids_teacher/instructions.txt` | Remove the Assamese language-guidelines section so the system prompt does not invite the model into Assamese. |
+| `requirements.txt` | Add `google-genai` alongside the existing `openai>=1.59.0`. Both SDKs remain installed. |
+| `tests/test_kids_teacher_gemini_backend.py` | **new** — module imports without `google.genai` installed; protocol conformance; voice-map translation; session-payload translation (OpenAI-shaped dict → `LiveConnectConfig`); event normalization across the 9 event types. |
+| `tests/test_kids_teacher_provider_selection.py` | **new** — `resolve_realtime_provider()` env-var cases; `robot_kids_teacher.main()` picks the right backend factory. |
+
+No changes required to: `kids_teacher_realtime.py`, `kids_teacher_flow.py`,
+`kids_safety.py`, `kids_teacher_profile.py`, `kids_teacher_robot_bridge.py`,
+`kids_teacher_routes.py`, `templates/kids_teacher.html`,
+`static/js/kids_teacher.js`, `profiles/kids_teacher/voice.txt`, or
+`profiles/kids_teacher/tools.txt`. That is the payoff of the existing
+Protocol abstraction.
+
+#### Event normalization (raw Gemini → internal)
+
+| Internal event | Gemini source |
+|---|---|
+| `input.speech_started` | Server VAD signal at the start of user speech |
+| `input.speech_stopped` | Mirrored when user audio stream ends |
+| `input_transcript.delta` | `server_content.input_transcription.text` partials |
+| `input_transcript.final` | `server_content.input_transcription` with `is_final=True` |
+| `assistant_transcript.delta` | `server_content.output_transcription.text` partials |
+| `assistant_transcript.final` | `server_content.output_transcription` with `is_final=True` |
+| `audio.chunk` | `server_content.model_turn.parts[*].inline_data.data` (raw PCM16 LE 24 kHz mono — same rate as OpenAI, playback unchanged) |
+| `response.done` | `server_content.turn_complete == True` |
+| `error` | Exceptions raised from `session.receive()` |
+
+**Must verify during implementation:** input/output transcription are
+opt-in on Gemini Live (`input_audio_transcription={}` +
+`output_audio_transcription={}` in `LiveConnectConfig`). Without these,
+the safety layer — which classifies topics from child transcripts —
+regresses to silence.
+
+#### Voice mapping
+
+Current `profiles/kids_teacher/voice.txt` = `"alloy"` (OpenAI). Gemini's
+30-voice set is disjoint. The Gemini backend maintains a small internal
+map (`alloy → Kore`, `echo → Puck`, `shimmer → Aoede`, fallback `Kore`)
+so the profile file stays single-source. No new profile file.
+
+#### Environment & secrets
+
+- New env vars: `KIDS_TEACHER_REALTIME_PROVIDER` (default `openai`,
+  flip to `gemini` locally), `KIDS_TEACHER_GEMINI_MODEL` (default
+  `gemini-live-2.5-flash-native-audio`), `GEMINI_API_KEY`.
+- Existing OpenAI env vars remain untouched.
+- Terraform secret wiring for `GEMINI_API_KEY` is deferred to Phase 2
+  (local development first).
+
+### Verification plan
+
+1. `pytest` full suite passes — new Gemini tests green, existing tests
+   unchanged.
+2. With provider unset (OpenAI default), existing behaviour is
+   regression-free.
+3. Local Gemini smoke test: `GEMINI_API_KEY=… KIDS_TEACHER_REALTIME_PROVIDER=gemini
+   KIDS_ENABLED_LANGUAGES=english python -m robot_kids_teacher
+   --session-id smoke --max-seconds 30`. Verify:
+   - connection opens, no SDK errors;
+   - mic audio reaches Gemini;
+   - audio chunks return;
+   - input transcripts arrive;
+   - `response.done` fires;
+   - status LISTENING → SPEAKING → LISTENING.
+4. English voice listening check — does it sound warm and
+   age-appropriate for a 4-year-old?
+5. Barge-in check — child interrupt stops assistant playback.
+6. Regression — flip provider back to `openai`, re-run the smoke test.
+
+### Phase 2 follow-ups (not covered by this amendment)
+
+1. Telugu listening check; keep Telugu if acceptable, otherwise narrow
+   `KIDS_SUPPORTED_LANGUAGES` to `{english}` only.
+2. Terraform wiring for `GEMINI_API_KEY` in `infra/secret_manager.tf`
+   and Cloud Run service env.
+3. Optional: enable billing to disable training on child voice audio
+   (currently accepted risk).
+4. Optional: session-resumption to survive the 15-minute audio-only
+   session cap.
+
+### Open risks tracked by this amendment
+
+1. **Input-transcription opt-in on Gemini Live** — safety layer relies
+   on child transcripts. Must confirm
+   `input_audio_transcription={}` is set during implementation.
+2. **Telugu voice quality** — unverified. Decision deferred to Phase 2
+   listening check.
+3. **No explicit `cancel_response` on Gemini** — barge-in relies on
+   server VAD + `audio_stream_end`. Needs integration-test
+   verification.
+4. **Free-tier training use on child audio** — accepted risk; revisit
+   before sharing the app beyond the family.
+5. **15-minute session cap** — fine for toddler attention; defer
+   session-resumption until it actually bites.
+
+### Status
+
+- Planning: ✅ complete (this amendment)
+- Phase 1 implementation: 🏗 in progress
+
 ---
 
 ## Reference Research Update
