@@ -223,17 +223,61 @@ class _FakeSession:
 
 
 class _FakeConnectionCM:
-    def __init__(self, session: _FakeSession) -> None:
+    def __init__(self, session: Any) -> None:
         self._session = session
         self.entered = False
         self.exited = False
 
-    async def __aenter__(self) -> _FakeSession:
+    async def __aenter__(self) -> Any:
         self.entered = True
         return self._session
 
     async def __aexit__(self, *exc: Any) -> None:
         self.exited = True
+
+
+class _MultiTurnFakeSession:
+    """Fake session that yields one turn's messages per receive() call.
+
+    Matches the real Gemini SDK behavior: ``session.receive()`` exits on
+    every ``turn_complete``; callers must re-invoke it to get the next
+    turn. After all scripted turns are exhausted, ``receive()`` blocks
+    forever — simulating an idle-but-alive session that only unblocks
+    when the reader task is cancelled (via ``backend.close()``).
+    """
+
+    def __init__(self, turns: list[list[Any]]) -> None:
+        self._turns = list(turns)
+        self._turn_index = 0
+        self.sent_audio: list[Any] = []
+        self.sent_text: list[Any] = []
+        self.cancelled_with: list[bool] = []
+        self.receive_calls: int = 0
+
+    async def receive(self):
+        self.receive_calls += 1
+        if self._turn_index >= len(self._turns):
+            # Block until cancelled — real SDK blocks on the WebSocket.
+            await asyncio.Future()
+            return
+        messages = self._turns[self._turn_index]
+        self._turn_index += 1
+        for msg in messages:
+            yield msg
+
+    async def send_realtime_input(
+        self,
+        *,
+        audio: Any | None = None,
+        audio_stream_end: bool | None = None,
+    ) -> None:
+        if audio is not None:
+            self.sent_audio.append(audio)
+        if audio_stream_end is not None:
+            self.cancelled_with.append(audio_stream_end)
+
+    async def send_client_content(self, *, turns: Any, turn_complete: bool) -> None:
+        self.sent_text.append((turns, turn_complete))
 
 
 class _FakeLive:
@@ -544,3 +588,56 @@ async def test_reader_loop_yields_audio_and_response_done() -> None:
     types = [e["type"] for e in received]
     assert "audio.chunk" in types
     assert "response.done" in types
+
+
+@pytest.mark.asyncio
+async def test_reader_loop_handles_multiple_turns_on_single_session() -> None:
+    """Regression test for the post-turn-1 hang.
+
+    Gemini's ``session.receive()`` iterator exits on ``turn_complete``;
+    the reader loop must re-enter ``receive()`` so the SAME WebSocket
+    serves multiple turns. Two scripted turns should produce two
+    ``response.done`` events without reconnecting.
+    """
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_server_message(audio_bytes=b"\x01"),
+                _build_server_message(turn_complete=True),
+            ],
+            [
+                _build_server_message(audio_bytes=b"\x02"),
+                _build_server_message(turn_complete=True),
+            ],
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    received: list[dict] = []
+    gen = backend.events()
+    try:
+        # 4 events total: 2 audio.chunk + 2 response.done across 2 turns.
+        for _ in range(4):
+            received.append(await asyncio.wait_for(gen.__anext__(), timeout=1.0))
+    finally:
+        await backend.close()
+
+    types = [e["type"] for e in received]
+    assert types.count("response.done") == 2, (
+        f"expected two response.done events across two turns, got types={types}"
+    )
+    assert types.count("audio.chunk") == 2
+    # Both scripted turns were consumed, plus a third receive() call that
+    # blocked on the idle-session Future until close() cancelled it.
+    assert session.receive_calls >= 2
+    # Session context manager entered once and exited once — NO reconnect.
+    assert manager.entered is True
+    assert manager.exited is True
+    assert len(client._live.connect_calls) == 1

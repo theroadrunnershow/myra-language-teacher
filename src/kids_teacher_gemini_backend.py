@@ -232,21 +232,49 @@ class GeminiRealtimeBackend:
         self._reader_task = asyncio.create_task(self._reader_loop())
 
     async def _reader_loop(self) -> None:
-        """Translate raw Gemini Live messages into the normalized event shape."""
+        """Translate raw Gemini Live messages into the normalized event shape.
+
+        ``session.receive()`` yields one turn's messages up to and
+        including ``turn_complete``, then the iterator exits — the
+        WebSocket stays alive between turns but the iterator is consumed.
+        We wrap it in an outer loop so the session spans multiple turns
+        on the same connection. See
+        ``python-genai/google/genai/live.py::AsyncSession.receive``:
+        it explicitly ``break``s the inner yield loop on ``turn_complete``.
+        Without this outer loop, turn 2 audio is streamed into a socket
+        nobody is reading, and the session dies on the keepalive ping
+        ~30s later.
+        """
         assert self._session is not None
+        turn_index = 0
         try:
-            async for raw_message in self._session.receive():
-                for normalized in self._normalize_message(raw_message):
-                    await self._event_queue.put(normalized)
+            while not self._closed:
+                async for raw_message in self._session.receive():
+                    for normalized in self._normalize_message(raw_message):
+                        await self._event_queue.put(normalized)
+                # receive() exited — turn ended. Loop back to receive()
+                # for the next turn on the SAME session / WebSocket.
+                turn_index += 1
+                logger.info(
+                    "[kids_teacher_gemini_backend] turn %d ended; awaiting next turn on same session",
+                    turn_index,
+                )
+                # Cooperative yield — guards against a misbehaving fake
+                # or server that returns an immediately-empty receive()
+                # from pegging the event loop.
+                await asyncio.sleep(0)
         except asyncio.CancelledError:
             logger.info("[kids_teacher_gemini_backend] reader loop cancelled")
             raise
         except Exception as exc:  # pragma: no cover - integration path
-            logger.warning("[kids_teacher_gemini_backend] reader loop error: %s", exc)
+            logger.warning(
+                "[kids_teacher_gemini_backend] reader loop error (session likely dead): %s",
+                exc,
+            )
             await self._event_queue.put({"type": "error", "message": str(exc)})
         else:
             logger.info(
-                "[kids_teacher_gemini_backend] reader loop ended (session.receive() completed)"
+                "[kids_teacher_gemini_backend] reader loop ended cleanly (close() called)"
             )
 
     def _normalize_message(self, raw_message: Any) -> list[dict]:
