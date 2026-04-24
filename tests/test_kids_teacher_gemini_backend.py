@@ -474,6 +474,50 @@ def test_normalize_message_without_server_content_returns_empty() -> None:
 
 
 # ---------------------------------------------------------------------------
+# server_content.interrupted → barge-in trigger
+#
+# Regression for the on-device 2026-04-24 session where the child said
+# "stop" mid-assistant-response, Gemini sent server_content.interrupted=True,
+# and the robot kept talking until the output audio queue drained naturally.
+# The backend used to only log the signal; it must surface it as
+# input.speech_started so the handler can flush.
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_interrupted_emits_speech_started() -> None:
+    backend = _new_backend()
+    msg = SimpleNamespace(server_content=SimpleNamespace(interrupted=True))
+    events = backend._normalize_message(msg)
+    assert {"type": "input.speech_started"} in events
+
+
+def test_normalize_interrupted_with_turn_complete_orders_speech_started_first() -> None:
+    """Gemini often ships interrupted=True alongside turn_complete.
+
+    The barge-in event must be yielded before response.done, because the
+    handler's cancel path is gated on _assistant_active — and response.done
+    clears that flag. If the order flipped, the flush would never run.
+    """
+    backend = _new_backend()
+    msg = SimpleNamespace(
+        server_content=SimpleNamespace(interrupted=True, turn_complete=True)
+    )
+    events = backend._normalize_message(msg)
+    types = [e["type"] for e in events]
+    assert "input.speech_started" in types
+    assert "response.done" in types
+    assert types.index("input.speech_started") < types.index("response.done")
+
+
+def test_normalize_no_interrupted_field_does_not_emit_speech_started() -> None:
+    backend = _new_backend()
+    msg = _build_server_message(audio_bytes=b"\x01\x02")
+    events = backend._normalize_message(msg)
+    types = [e["type"] for e in events]
+    assert "input.speech_started" not in types
+
+
+# ---------------------------------------------------------------------------
 # send_audio / send_text / cancel_response
 # ---------------------------------------------------------------------------
 

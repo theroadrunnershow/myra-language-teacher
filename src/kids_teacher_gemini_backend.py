@@ -417,6 +417,16 @@ class GeminiRealtimeBackend:
         if _attr(server_content, "generation_complete"):
             logger.info("[kids_teacher_gemini_backend] generation_complete received")
 
+        # Gemini's earliest barge-in signal. Must be emitted BEFORE any
+        # turn_complete on the same message so the handler can cancel the
+        # active response while _assistant_active is still True — otherwise
+        # response.done clears the gate first and the flush never runs.
+        if _attr(server_content, "interrupted"):
+            logger.info(
+                "[kids_teacher_gemini_backend] server reported interrupted=True"
+            )
+            events.append({"type": "input.speech_started"})
+
         # Turn complete → response.done.
         if _attr(server_content, "turn_complete"):
             logger.info("[kids_teacher_gemini_backend] turn_complete received")
@@ -425,14 +435,6 @@ class GeminiRealtimeBackend:
                 events.append({"type": "input.speech_stopped"})
                 self._input_speech_active = False
             events.append({"type": "response.done"})
-
-        # Gemini reports model-interrupted turns via server_content.interrupted.
-        # We don't emit a dedicated event; the handler already manages barge-in
-        # via input.speech_started. Logged for diagnostic parity only.
-        if _attr(server_content, "interrupted"):
-            logger.info(
-                "[kids_teacher_gemini_backend] server reported interrupted=True"
-            )
 
         return events
 

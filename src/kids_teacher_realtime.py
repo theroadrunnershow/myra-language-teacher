@@ -229,6 +229,16 @@ class KidsTeacherRealtimeHandler:
         audio = event.get("audio")
         if not audio:
             return
+        # Open the barge-in gate if audio leads transcript. Gemini's native-audio
+        # path can ship audio chunks before any assistant transcript delta; if
+        # we only flipped _assistant_active on transcript, a speech_started in
+        # that window would no-op and audio would keep playing past interrupt.
+        if not self._assistant_active:
+            self._assistant_active = True
+            logger.info(
+                "[kids_teacher_realtime] assistant response started (audio-first)"
+            )
+            self._publish_status(SessionStatus.SPEAKING)
         # Forward to playback. We also track chunks in the pending queue so
         # interrupt() can confirm a drain happened — but the queue is
         # non-authoritative, playback is driven by hooks.

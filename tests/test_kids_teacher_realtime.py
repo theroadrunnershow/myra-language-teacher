@@ -258,6 +258,34 @@ async def test_speech_started_triggers_barge_in() -> None:
     await run_task
 
 
+async def test_audio_chunk_before_transcript_opens_barge_in_gate() -> None:
+    """Regression: Gemini's native-audio path can ship audio.chunk before any
+    assistant_transcript.delta. The barge-in gate (_assistant_active) must
+    still open on audio alone, otherwise a speech_started arriving in that
+    window no-ops and the robot keeps talking past the interrupt."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Audio arrives first — no transcript delta yet.
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x00\x01"})
+    await asyncio.sleep(0.01)
+
+    # Server VAD now reports the child started speaking. Before the fix this
+    # was a no-op because _assistant_active was still False.
+    await backend.push_event({"type": "input.speech_started"})
+    await asyncio.sleep(0.01)
+
+    assert backend.cancel_calls == 1
+    assert hooks.stop_playback_calls >= 1
+
+    await backend.end_stream()
+    await run_task
+
+
 async def test_speech_stopped_does_not_cancel() -> None:
     """VAD speech_stopped is an informational marker — no barge-in."""
     backend = FakeRealtimeBackend()
