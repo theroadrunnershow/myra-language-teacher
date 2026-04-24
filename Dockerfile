@@ -11,7 +11,7 @@ WORKDIR /app
 ENV PYTHONPATH=/app/src
 
 # Install Python dependencies first (separate layer for caching)
-COPY requirements.txt .
+COPY requirements.txt requirements-common.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy application code
