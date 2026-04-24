@@ -9,6 +9,7 @@ must work on a lightweight image where openai is not installed.
 from __future__ import annotations
 
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -169,6 +170,86 @@ def test_openai_backend_uses_injected_client_factory_model_default(
     assert backend.model == DEFAULT_REALTIME_MODEL
     # Constructing does NOT call the factory yet — only connect() does.
     assert calls == []
+
+
+class _StubSession:
+    def __init__(self) -> None:
+        self.updates: list[dict] = []
+
+    async def update(self, *, session: dict) -> None:
+        self.updates.append(session)
+
+
+class _StubConnection:
+    def __init__(self) -> None:
+        self.session = _StubSession()
+        self.closed = False
+
+    def __aiter__(self) -> "_StubConnection":
+        return self
+
+    async def __anext__(self) -> dict:
+        raise StopAsyncIteration
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _StubConnectionManager:
+    def __init__(self, connection: _StubConnection) -> None:
+        self._connection = connection
+        self.enter_calls = 0
+
+    async def enter(self) -> _StubConnection:
+        self.enter_calls += 1
+        return self._connection
+
+
+class _StubRealtimeNamespace:
+    def __init__(self, manager: _StubConnectionManager) -> None:
+        self._manager = manager
+        self.models: list[str] = []
+
+    def connect(self, *, model: str) -> _StubConnectionManager:
+        self.models.append(model)
+        return self._manager
+
+
+class _FailingConnectionManager:
+    async def enter(self) -> _StubConnection:
+        raise RuntimeError("boom")
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_connect_supports_connection_manager_shape() -> None:
+    connection = _StubConnection()
+    manager = _StubConnectionManager(connection)
+    realtime = _StubRealtimeNamespace(manager)
+    client = SimpleNamespace(beta=SimpleNamespace(realtime=realtime))
+    backend = OpenAIRealtimeBackend(
+        model="gpt-realtime-mini",
+        client_factory=lambda: client,
+    )
+
+    payload = {"instructions": "Only safe topics."}
+    await backend.connect(payload)
+    await backend.close()
+
+    assert realtime.models == ["gpt-realtime-mini"]
+    assert manager.enter_calls == 1
+    assert connection.session.updates == [payload]
+    assert connection.closed is True
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_connect_raises_when_connection_open_fails() -> None:
+    client = SimpleNamespace(
+        beta=SimpleNamespace(realtime=SimpleNamespace(connect=lambda *, model: _FailingConnectionManager()))
+    )
+    backend = OpenAIRealtimeBackend(client_factory=lambda: client)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await backend.connect({"instructions": "Only safe topics."})
 
 
 # ---------------------------------------------------------------------------

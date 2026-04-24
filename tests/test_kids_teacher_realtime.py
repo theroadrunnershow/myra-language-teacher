@@ -459,6 +459,19 @@ async def test_connect_failure_emits_error_without_hang() -> None:
     assert not any(s.status == SessionStatus.LISTENING for s in hooks.statuses)
 
 
+async def test_run_after_connect_failure_exits_cleanly() -> None:
+    backend = FakeRealtimeBackend(connect_error=RuntimeError("boom"))
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    await asyncio.wait_for(handler.run(), timeout=1.0)
+
+    statuses = [s.status for s in hooks.statuses]
+    assert SessionStatus.ERROR in statuses
+    assert statuses[-1] == SessionStatus.ENDED
+
+
 async def test_stream_ends_unexpectedly_emits_ended() -> None:
     # No scripted events — stream ends immediately.
     backend = FakeRealtimeBackend()

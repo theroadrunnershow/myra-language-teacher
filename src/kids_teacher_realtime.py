@@ -68,6 +68,7 @@ class KidsTeacherRealtimeHandler:
 
         self._started = False
         self._stopped = False
+        self._connect_failed = False
         self._run_task: Optional[asyncio.Task] = None
 
         # Track whether an assistant response is actively streaming so we
@@ -85,14 +86,16 @@ class KidsTeacherRealtimeHandler:
         """Connect the backend and move the session into LISTENING state."""
         if self._started:
             return
-        self._started = True
         payload = build_session_payload(self._config)
         try:
             await self._backend.connect(payload)
         except Exception as exc:
+            self._connect_failed = True
             logger.warning("[kids_teacher_realtime] backend.connect raised: %s", exc)
             self._publish_status(SessionStatus.ERROR, detail=str(exc))
             return
+        self._connect_failed = False
+        self._started = True
         self._publish_status(SessionStatus.LISTENING)
 
     async def push_audio(self, chunk: bytes) -> None:
@@ -124,6 +127,9 @@ class KidsTeacherRealtimeHandler:
 
     async def run(self) -> None:
         """Main loop: consume backend events until stop or response stream ends."""
+        if self._connect_failed:
+            self._publish_status(SessionStatus.ENDED)
+            return
         try:
             await self._event_loop()
         except asyncio.CancelledError:
@@ -344,5 +350,4 @@ class KidsTeacherRealtimeHandler:
 
     def _now_ms(self) -> int:
         return int(self._clock() * 1000)
-
 

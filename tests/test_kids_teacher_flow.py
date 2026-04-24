@@ -107,14 +107,7 @@ async def test_backend_connect_failure_surfaces_as_error_status():
         backend_factory=lambda: backend,
         hooks_factory=lambda: hooks,
     )
-    # End the stream so run() does not block forever.
-    async def end_soon():
-        await asyncio.sleep(0)
-        await backend.end_stream()
-
-    ender = asyncio.create_task(end_soon())
     await run_kids_teacher_session(config=_config(), deps=deps)
-    await ender
 
     statuses = [s.status for s in hooks.statuses]
     assert SessionStatus.ERROR in statuses

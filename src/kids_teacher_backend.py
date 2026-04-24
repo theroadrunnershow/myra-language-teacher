@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import inspect
 import logging
 import os
 from typing import Any, AsyncIterator, Callable, Optional, Protocol
@@ -191,24 +192,20 @@ class OpenAIRealtimeBackend:
 
     async def connect(self, session_payload: dict) -> None:
         """Open the realtime connection and start pumping raw SDK events."""
+        client_factory = self._client_factory
+        if client_factory is None:
+            # Lazy import: never touch the SDK at module load time.
+            import openai  # type: ignore
+
+            client_factory = openai.AsyncOpenAI  # type: ignore[attr-defined]
+
+        self._client = client_factory()
         try:
-            client_factory = self._client_factory
-            if client_factory is None:
-                # Lazy import: never touch the SDK at module load time.
-                import openai  # type: ignore
-
-                client_factory = openai.AsyncOpenAI  # type: ignore[attr-defined]
-
-            self._client = client_factory()
-            # Real OpenAI SDK surface: async context manager on
-            # ``client.realtime.connect(model=...)``. We keep the exact
-            # call shape here but tests exercise the fake backend, so we
-            # do not require the SDK at test time.
             self._connection = await self._open_connection(session_payload)
-            self._reader_task = asyncio.create_task(self._reader_loop())
         except Exception as exc:  # pragma: no cover - hit only in integration
             logger.warning("[kids_teacher_backend] connect failed: %s", exc)
-            await self._event_queue.put({"type": "error", "message": str(exc)})
+            raise
+        self._reader_task = asyncio.create_task(self._reader_loop())
 
     async def _open_connection(self, session_payload: dict) -> Any:
         """Open the SDK-level connection and send the session.update payload.
@@ -221,9 +218,32 @@ class OpenAIRealtimeBackend:
         realtime_ns = getattr(self._client, "realtime", None)
         if realtime_ns is None:
             realtime_ns = self._client.beta.realtime  # type: ignore[attr-defined]
-        connection = await realtime_ns.connect(model=self._model)  # type: ignore[attr-defined]
-        await connection.session.update(session=session_payload)  # type: ignore[attr-defined]
+        # SDK versions differ here:
+        # - some return an awaitable connection directly
+        # - openai==1.61 returns an AsyncRealtimeConnectionManager whose
+        #   supported non-context-manager flow is ``await ...connect().enter()``
+        connection = await self._enter_connection(
+            realtime_ns.connect(model=self._model)  # type: ignore[attr-defined]
+        )
+        try:
+            await connection.session.update(session=session_payload)  # type: ignore[attr-defined]
+        except Exception:
+            await connection.close()  # type: ignore[attr-defined]
+            raise
         return connection
+
+    @staticmethod
+    async def _enter_connection(connection_or_manager: Any) -> Any:
+        """Normalize SDK connection helpers across OpenAI client versions."""
+        enter = getattr(connection_or_manager, "enter", None)
+        if callable(enter):
+            return await enter()
+        if inspect.isawaitable(connection_or_manager):
+            return await connection_or_manager
+        aenter = getattr(connection_or_manager, "__aenter__", None)
+        if callable(aenter):
+            return await aenter()
+        return connection_or_manager
 
     async def _reader_loop(self) -> None:
         """Translate raw SDK events into the normalized dict shape."""
