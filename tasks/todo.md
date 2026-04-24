@@ -111,45 +111,42 @@ Design doc: [tasks/face-recognition-design.md](face-recognition-design.md)
 ### Persistent Memory ("Robot That Remembers Myra")
 Design doc: [tasks/plan-persistent-memory.md](plan-persistent-memory.md)
 
-Goal: the robot accumulates memory of the child across sessions, devices, and
-reinstalls — so it can greet with continuity, run spaced repetition on words
-she's actually struggling with, and reference family/favorites/inside jokes.
+Goal: kids-teacher flow on Reachy Mini accumulates memory across sessions so
+the robot can greet with continuity, run spaced repetition on words she's
+actually struggling with, and reference family/favorites/inside jokes.
+
+Scope: **Reachy-only, kids-teacher only, single child per device.** No web
+client, no multi-tenancy, no cloud.
 
 Key design choices (see plan doc for rationale):
-- **Child-keyed, not device-keyed.** Primary key is a parent-set `child_id`;
-  device IDs are incidental. Cloud is the source of truth so a reinstall just
-  re-fetches.
-- **Four memory kinds**, separated by access pattern: semantic (facts),
-  procedural (per-word mastery), episodic (session log), affective (likes/
-  frustrations).
-- **Firestore for the hot path, GCS for cold episode blobs** — but v1 may use
-  a single GCS JSON blob per child to avoid the new Firestore dep.
-- **LLM injection via a ≤500-token preamble** built at session start; never
-  dump full history into the model context.
-- **Privacy: admin-only access, cascade-delete path, no raw audio in memory.**
+- **Local SQLite on the Pi** at `~/.myra/memory.db` (override via
+  `MYRA_MEMORY_DB_PATH`). Survives reboots and app reinstalls; an SD-card
+  reflash wipes it (acceptable; backup script deferred to v4).
+- **Privacy by construction:** child data never leaves the device.
+- **Four tables** matching access patterns: `child` (semantic),
+  `affect` (likes/frustrations), `mastery` (per-word SR state),
+  `episodes` (session log).
+- **LLM injection via a ≤500-token preamble** at session start; never dump
+  full history into model context. Empty preamble on any DB error — never
+  block the session.
 
 Checklist (rollout phases — ship tests with each):
 
-- [ ] `High` Resolve open questions in plan doc §"Open questions" (Firestore
-  vs. blob-only, web identity model, offline cache scope) before any coding
-- [ ] `High` v1: `src/memory_store.py` — GCS-backed semantic + last-3-sessions
-  summary, keyed on `child_id`. Read-on-start, write-on-session-end. Tests
-  with a fake GCS client.
-- [ ] `High` v1: `build_memory_preamble(child_id) -> str` consumed by both
-  `kids_teacher_backend` and `kids_teacher_gemini_backend`. Hard ≤500-token
-  cap. Falls back to empty string on fetch failure (never blocks start).
-- [ ] `High` v1: admin routes — `GET`/`DELETE`/`POST redact` under
-  `/admin/memory/{child_id}`. Reuse existing admin auth.
-- [ ] `Medium` v2: per-word mastery (attempts/successes/ease/last_seen) +
-  spaced-repetition word selection in `kids_teacher_flow`
-- [ ] `Medium` v3: episodic JSONL append-only blobs + weekly summarizer that
-  refreshes the affective doc and trims episodes older than 1 year
-- [ ] `Medium` Schema versioning + migration path (`schema_version: 1` on
-  every doc, migration helper invoked on read)
-- [ ] `Low` v4: local SQLite cache on robot for offline tolerance — only if
-  a real offline scenario surfaces in practice
-- [ ] `Low` Multi-child households (schema already supports it; deferred
-  until needed)
+- [ ] `High` v1: `src/memory_store.py` — SQLite open + migrate + CRUD for
+  `child`, `affect`, `mastery`, `episodes`. Schema-versioned. Tests cover
+  lifecycle, migrations, transaction rollback.
+- [ ] `High` v1: `src/memory_preamble.py::build_memory_preamble(...)` — pure
+  function, hard ≤500-token cap, truncates `due` words first. Consumed by
+  both `kids_teacher_backend` and `kids_teacher_gemini_backend`.
+- [ ] `High` v1: Wire end-of-session writes in `kids_teacher_flow` —
+  `record_attempt` per word + `append_episode` with LLM-written 1–2 sentence
+  summary. Single transaction.
+- [ ] `Medium` v2: Spaced-repetition word selection (1d/3d/7d/14d ladder,
+  SM-2-ish) drives next-word choice in `kids_teacher_flow`.
+- [ ] `Medium` v3: Weekly affect summarizer — LLM re-summarizes last N
+  episodes into the `affect` row (cron or app-startup).
+- [ ] `Low` v4: `scripts/backup_memory.py` — only if SD-card reflash recovery
+  becomes a real need.
 
 ### Language Lesson Polish
 

@@ -2,144 +2,178 @@
 
 ## Context
 
-The robot should accumulate memory of the child across sessions, devices, and
-reinstalls so it can:
+The kids-teacher flow on Reachy Mini should accumulate memory across sessions
+so the robot can:
 
-- Greet her with continuity ("last time we worked on Telugu animals")
+- Greet with continuity ("last time we worked on Telugu animals")
 - Run spaced repetition on words she's actually struggling with
 - Reference family members, favorites, and shared moments to feel personal
 - Resume narratives and inside jokes across days/weeks
 
-Today every state lives in-process or in `sessionStorage`; nothing survives a
-restart, let alone a reinstall.
+Today every state lives in-process; nothing survives a restart.
 
-## Design constraints
+## Scope
 
-- **Long-lived & device-independent.** Memory must outlive `apt purge`, SD-card
-  reflashes, browser-cache clears, and moves between robot and web client.
-- **Child-keyed, not device-keyed.** The primary key is the child, not the
-  hardware. Multiple devices for the same child must converge.
-- **Tight LLM context budget.** Gemini system instructions can't hold a year of
-  history; memory has to be compressible to a ≤500-token preamble.
-- **Privacy first.** This is a 4-year-old's data. Admin-only access, explicit
-  delete path, no PII beyond first name + stated family relations.
-- **Offline-tolerant.** A robot with no internet should still run a session;
-  memory writes can buffer and flush later.
+- **Reachy-only.** Web client is out of scope. The kids-teacher flow only runs
+  on the Pi-hosted robot.
+- **Single child per device.** One Reachy = one child. No multi-tenancy, no
+  `child_id` keying. If we ever need it, the schema below trivially extends.
+- **Kids-teacher flow only.** No reuse from the legacy lesson page or the
+  word-DB editor.
 
-## Identity
+## Storage: local SQLite on the Pi
 
-Primary key: `child_id` — a stable string set via the admin config flow
-(parent picks/types it once; "myra" is fine). Re-entered post-reinstall in
-<30s, or auto-recovered from the planned face-recognition encodings.
+Path: `~/.myra/memory.db` (override via `MYRA_MEMORY_DB_PATH`).
 
-Secondary key: `device_id` — robot serial # on Reachy, localStorage UUID on
-web. Used for telemetry and last-seen, never as the lookup key.
+Why SQLite over a JSON file:
+- Atomic writes — matters for crashes mid-session
+- Queries for spaced repetition (`WHERE next_due <= now ORDER BY next_due`)
+- Cheap schema migrations (`schema_version` table + idempotent `ALTER`s)
+- Single file, no daemon, `sqlite3` is in the stdlib
 
-## Memory taxonomy
+What "persistent" actually buys us:
+- Reboots: ✓ (filesystem)
+- App reinstall / `pip install` / `git pull`: ✓ (data lives outside the
+  package)
+- `apt reinstall` of the Myra package: ✓ (DB is in `~/.myra/`, not in any
+  packaged dir)
+- SD-card reflash: ✗ — accept this, mitigate with an optional backup script
+  (`scripts/backup_memory.py` → copy to USB or email). Not required for v1.
 
-Four categories, separated because their access patterns differ:
+No cloud. No Firestore. No GCS. Memory never leaves the device, which is
+strictly better for a 4-year-old's data.
 
-| Kind        | Examples                                  | Read freq | Write freq | Store     |
-|-------------|-------------------------------------------|-----------|------------|-----------|
-| Semantic    | name, age, family, favorite animal        | each session start | rare | Firestore doc |
-| Procedural  | per-word mastery (attempts, ease, last_seen) | every turn | every turn | Firestore subcoll |
-| Episodic    | session timestamp, words covered, mood    | rare (recap) | end of session | GCS JSONL |
-| Affective   | excites/frustrates/jokes                  | each session start | weekly summarizer | Firestore doc |
+## Schema
 
-## Storage layout
+```sql
+CREATE TABLE schema_version (version INTEGER NOT NULL);
 
+-- singleton row
+CREATE TABLE child (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    name TEXT NOT NULL,
+    age INTEGER,
+    languages TEXT,                 -- JSON array
+    family TEXT,                    -- JSON: [{relation, name}, ...]
+    updated_at TEXT NOT NULL
+);
+
+-- singleton row, refreshed by the weekly summarizer
+CREATE TABLE affect (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    excites TEXT,                   -- JSON array
+    frustrates TEXT,                -- JSON array
+    jokes TEXT,                     -- JSON array
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE mastery (
+    english TEXT NOT NULL,
+    language TEXT NOT NULL,         -- 'telugu' | 'assamese' | ...
+    attempts INTEGER NOT NULL DEFAULT 0,
+    successes INTEGER NOT NULL DEFAULT 0,
+    ease REAL NOT NULL DEFAULT 2.5, -- SM-2 style
+    last_seen TEXT,
+    next_due TEXT,
+    PRIMARY KEY (english, language)
+);
+CREATE INDEX idx_mastery_due ON mastery(next_due);
+
+CREATE TABLE episodes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL,
+    ended_at TEXT NOT NULL,
+    words_covered TEXT,             -- JSON array of english words
+    mood TEXT,                      -- 'engaged'|'frustrated'|'tired'|...
+    summary TEXT                    -- one-line LLM-written recap
+);
+CREATE INDEX idx_episodes_ended_at ON episodes(ended_at);
 ```
-Firestore:
-  memory/{child_id}                          # semantic + affective doc
-    schema_version: 1
-    child:        { name, age, languages, family: [...] }
-    affect:       { excites: [...], frustrates: [...], jokes: [...] }
-    last_session: { device_id, ended_at, summary_text }
 
-  memory/{child_id}/mastery/{english_word}   # procedural — one doc per word
-    attempts: int
-    successes: int
-    ease: float
-    last_seen: timestamp
-    languages_seen: [...]
-
-GCS:
-  gs://{bucket}/memory/{child_id}/episodes/{YYYY-MM}.jsonl
-                                              # append one line per session
-```
-
-Local cache: SQLite at `~/.myra/memory.db` on robot, IndexedDB on web. Read
-on boot, write-through on update, periodic reconcile against the cloud.
+`schema_version` starts at 1. Migrations: `memory_store.migrate()` runs on
+open and is idempotent.
 
 ## Retrieval (hot path)
 
-Session start:
+Session start, in `kids_teacher_flow` (or backend init):
 
-1. Read `memory/{child_id}` (1 doc, <2 KB).
-2. Read top-N due-for-review mastery docs (`last_seen + ease_interval < now`).
-3. Compose a preamble string (~300 tokens) and inject into Gemini system
-   instructions. Example:
-   > You're talking with Myra (4). She loves tigers; her little brother is
-   > Ahaan. Last session she nailed Telugu colors but stumbled on "water"
-   > (పానీయం). Today try animals + revisit "water" once.
-4. Don't pull episodes into context; the semantic+affective doc is the
-   compressed view of them.
+1. `child = memory_store.get_child()` — 1 row.
+2. `affect = memory_store.get_affect()` — 1 row.
+3. `due = memory_store.due_for_review(limit=5)` — words past `next_due`.
+4. `recap = memory_store.last_session_summary()` — newest `episodes.summary`.
+5. `build_memory_preamble(child, affect, due, recap) -> str` — hard cap
+   ~500 tokens, truncate `due` first if needed. Inject into the system
+   instructions for both `kids_teacher_backend` and
+   `kids_teacher_gemini_backend`.
+
+Failure mode: any DB error → return empty preamble, log a warning, never
+block session start.
 
 ## Writes (cold path)
 
-End of session:
+End of session, in `kids_teacher_flow`:
 
-1. Aggregate the in-memory turn log into:
-   - Episode JSONL line → append to month blob in GCS
-   - Mastery patches → batched Firestore writes (one per word touched)
-   - Affective deltas → optional, only when something notable surfaces
-2. Re-summarize `last_session.summary_text` (~2 sentences) so next session's
-   preamble has fresh context.
-3. Weekly cron / app-startup task: re-summarize affective signals from the
-   last 30 days of episodes; trim episodes older than 1 year.
+1. For each word touched: `memory_store.record_attempt(word, language,
+   correct: bool)` — updates `attempts/successes`, recomputes `ease` and
+   `next_due` (SM-2-ish, kept simple: 1d / 3d / 7d / 14d ladder gated on
+   success).
+2. `memory_store.append_episode(started_at, ended_at, words_covered, mood,
+   summary)` — `summary` is a 1–2 sentence string the LLM produces at
+   session-end (cheap; we already have a turn log).
+3. Affect updates are *not* per-session. A weekly task (or app-startup
+   check) re-summarizes the last N episodes into the affect row. Out of
+   scope for v1 — start with manual updates via admin CLI.
 
-Sync policy mirrors `dynamic_words_store`: `never` / `session_end` /
-`shutdown`.
+All writes are inside a single `with conn:` transaction so a crash leaves
+the DB consistent.
 
-## LLM integration
+## Files to add / touch
 
-- New helper `build_memory_preamble(child_id) -> str` consumed by both
-  `kids_teacher_backend` and `kids_teacher_gemini_backend`.
-- Bounded length (hard cap ~500 tokens; truncate oldest first).
-- Falls back to an empty string when memory is missing or fetch fails — never
-  blocks session start.
+- `src/memory_store.py` — new. Public API:
+  - `open(path: str | None = None) -> Connection`
+  - `migrate(conn)`
+  - `get_child(conn) -> dict | None`
+  - `set_child(conn, **fields)`
+  - `get_affect(conn) -> dict`
+  - `due_for_review(conn, limit=5) -> list[dict]`
+  - `record_attempt(conn, english, language, correct)`
+  - `append_episode(conn, **fields)`
+  - `last_session_summary(conn) -> str | None`
+- `src/memory_preamble.py` — pure function `build_memory_preamble(...)`
+  → `str`. Keeps prompt-shaping out of the store.
+- `src/kids_teacher_backend.py` + `kids_teacher_gemini_backend.py` —
+  inject preamble into system instructions. One call site each.
+- `src/kids_teacher_flow.py` — record attempts + append episode on
+  session end. Hooked into the existing end-of-session path.
+- `tests/test_memory_store.py` — DB lifecycle, migrations, SR scheduling,
+  due-for-review correctness, transaction rollback on error.
+- `tests/test_memory_preamble.py` — preamble shape, token cap, graceful
+  empties.
+- `tests/test_kids_teacher_flow.py` (extend) — assert attempts + episodes
+  written on session end.
+- `scripts/backup_memory.py` — *optional, deferred.* Copy DB to a path
+  (USB / scp). Only if SD-reflash recovery becomes a real need.
 
-## Privacy & admin
+## Open questions
 
-- Admin-only routes: `GET /admin/memory/{child_id}` (view), `DELETE` (cascade
-  delete Firestore + GCS), `POST /admin/memory/{child_id}/redact` (drop
-  affective + episodic, keep mastery).
-- Memory writes gated by the existing kids-safety review filter; anything
-  flagged is dropped before reaching cloud.
-- No raw audio in memory — that's `kids_review_store`'s job, kept separate.
-- Schema versioned so future migrations don't strand old data.
+1. **DB path.** `~/.myra/memory.db` follows XDG-ish convention; alternative
+   is `/var/lib/myra/memory.db` if we want it survivable across user
+   account changes. Recommend `~/.myra/` for now (simpler perms).
+2. **Mood detection.** `episodes.mood` is easy if the LLM tags it at
+   session-end; punt to a follow-up if that's not free.
+3. **Spaced-repetition aggressiveness.** Start with a fixed 1d / 3d / 7d /
+   14d ladder; tune later if Myra's retention curve says otherwise.
+4. **Backup story.** Defer until reflash actually loses something the
+   parent cares about.
 
-## Open questions to resolve before coding
+## Rollout
 
-1. Firestore vs. just-GCS for the hot path. Firestore is new dependency; one
-   alternative is a single JSON blob in GCS keyed by child_id, read-modify-
-   write at session boundaries. Simpler, fine until mastery grows past ~1 K
-   words.
-2. Web client identity — does the parent type `child_id` once and we trust
-   the browser, or do we require Google sign-in? Family-only deployment can
-   probably get away with the typed-once model.
-3. Local cache: do we ship offline-first from day one, or cloud-only v1 and
-   add caching when a real offline scenario shows up?
-4. Multi-child households — out of scope for v1 (Myra-only) but the schema
-   above supports it without changes.
+1. v1: `memory_store.py` + `build_memory_preamble` + write hook on session
+   end. No mastery-driven word selection yet — just remember and recall.
+   ~1.5 days incl. tests.
+2. v2: Spaced repetition drives word selection in `kids_teacher_flow`.
+   ~1 day.
+3. v3: Weekly affect summarizer (LLM-driven, cron or app-startup). ~0.5 day.
+4. v4 (optional): backup script.
 
-## Rollout sketch
-
-1. v1: Single GCS blob per child, semantic + last-3-sessions summary only.
-   No mastery yet. Memory preamble works. ~2 days.
-2. v2: Add mastery (Firestore subcollection or expand the blob), drive
-   spaced-repetition word selection. ~3 days.
-3. v3: Episodic JSONL + weekly summarizer. ~2 days.
-4. v4: Local cache + offline tolerance. Only if a real need emerges.
-
-Each step shipping with tests before moving on.
+Each step ships with tests before the next starts.
