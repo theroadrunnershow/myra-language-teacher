@@ -147,12 +147,18 @@ Checklist:
 - [ ] `Medium` v2: Session-transcript collector that subscribes to
   `publish_transcript` events (`kids_teacher_realtime.py:319`), keeping
   final lines in memory for the duration of the session.
-- [ ] `Medium` v2: `src/memory_summarizer.py` — calls **Ollama Cloud**
-  (per project policy: non-WebRTC / non-Live-API calls go through Ollama
-  Cloud) with the transcript + current memory, returns new markdown
-  bullets or `NONE`. New deps: `ollama` SDK, env vars `OLLAMA_API_KEY`,
-  `OLLAMA_MODEL`, `OLLAMA_HOST` (default `https://ollama.com`). Disabled
-  when `OLLAMA_API_KEY` is unset. Tests with a fake Ollama client.
+- [ ] `Medium` v2: `src/text_llm.py` — project-wide configurable
+  abstraction for any non-vision / non-audio / non-Live-API LLM call.
+  Single `complete(system, user, temperature)` function dispatching on
+  `MYRA_TEXT_LLM_PROVIDER` ∈ {`ollama`, `openai`, `gemini`} +
+  `MYRA_TEXT_LLM_MODEL`. Cloud-only for v1. Lazy-imports per-provider
+  SDK; only new dep is `ollama` (`openai` and `google-genai` already
+  present). One fake-client test per provider + dispatcher tests.
+  `.env.example` documents all three options.
+- [ ] `Medium` v2: `src/memory_summarizer.py` —
+  `summarize_session_to_memory(transcript, existing_memory) -> str`
+  returning new markdown bullets or `NONE`. Calls `text_llm.complete()`,
+  provider-agnostic. Disabled when `MYRA_TEXT_LLM_PROVIDER` is unset.
 - [ ] `Medium` v2: Wire end-of-session call into `kids_teacher_flow` —
   invoke summarizer, append result to `memory.md` via `memory_file`.
   Failures log a warning, never block session shutdown.

@@ -95,8 +95,8 @@ Once v1 is in use, add automatic enrichment. Mechanism:
    > "Got it, I'll remember!" — you don't need to do anything else.
    The Live model handles conversational confirmation; the actual file
    write is async.
-3. **At session end**, call **Ollama Cloud** (per project policy: any
-   non-WebRTC / non-Live-API calls go through Ollama Cloud) with:
+3. **At session end**, call the project's text-only LLM abstraction
+   (see "Text-LLM abstraction" below) with:
    - The current `~/.myra/memory.md` contents
    - The full session transcript (final lines only, joined as plain
      `Speaker: text` lines)
@@ -119,33 +119,68 @@ Why end-of-session, not real-time per turn:
 - Avoids tying memory writes to Gemini Live's tool-calling path, which
   doesn't exist on this codebase.
 
-Ollama Cloud wiring:
-- New env vars: `OLLAMA_API_KEY` (required to enable v2),
-  `OLLAMA_MODEL` (default to a small chat model — pick one that's
-  reliable for short JSON-ish extraction; document the choice in
-  `.env.example`), `OLLAMA_HOST` (default `https://ollama.com`).
-- New dep: `ollama` Python SDK (Cloud-compatible). Add to
-  `requirements.txt` so it's available on the Reachy host.
-- New module `src/memory_summarizer.py` — single public function
+### Text-LLM abstraction (project-wide)
+
+Project policy: any text-only (non-vision, non-audio, non-Live-API)
+LLM call routes through a single configurable abstraction. Three
+supported providers: **Ollama** (cloud), **OpenAI**, and **Gemini /
+Google**. Cloud-only for v1 — no local-on-Pi fallback yet.
+
+New module `src/text_llm.py`. Minimal public surface:
+
+```python
+def complete(*, system: str, user: str, temperature: float = 0.0) -> str:
+    """Single-shot text completion. Provider + model from env."""
+```
+
+No streaming, no tools, no images, no message history — that's all
+out of scope. If a future caller needs more, extend then.
+
+Configuration via env (project-wide, not kids-teacher-scoped):
+
+| Env var                  | Values / Notes |
+|--------------------------|---|
+| `MYRA_TEXT_LLM_PROVIDER` | `ollama` \| `openai` \| `gemini` |
+| `MYRA_TEXT_LLM_MODEL`    | provider-specific model id |
+| `OLLAMA_API_KEY`         | required when provider=ollama |
+| `OLLAMA_HOST`            | optional, defaults to `https://ollama.com` |
+| `OPENAI_API_KEY`         | required when provider=openai (already used by realtime path) |
+| `GEMINI_API_KEY`         | required when provider=gemini (already used by realtime path) |
+
+Implementation notes:
+- Each provider gets a thin adapter function inside `text_llm.py`
+  (`_complete_ollama`, `_complete_openai`, `_complete_gemini`); the
+  public `complete()` dispatches on `MYRA_TEXT_LLM_PROVIDER`.
+- Lazy-import the SDKs inside their adapter to keep import cost down
+  and so missing-SDK errors only fire when that provider is selected.
+- `ollama` is the only new dependency — add to `requirements.txt`.
+  `openai` and `google-genai` are already present.
+- Document defaults and the three provider options in `.env.example`.
+  Don't hard-code a default `MYRA_TEXT_LLM_MODEL`; require explicit
+  selection so the choice is visible in config.
+- Tests: one fake-client test per provider plus a dispatcher test for
+  unknown / missing provider strings.
+
+Memory summarizer wiring:
+
+- `src/memory_summarizer.py` — single public function
   `summarize_session_to_memory(transcript: str, existing_memory: str)
-  -> str` that returns either `"NONE"` or one or more markdown
-  bullet lines.
-- v2 is **disabled when `OLLAMA_API_KEY` is unset** — v1 (parent-edit)
-  keeps working; the system never blocks a session on memory writes.
+  -> str` that returns either `"NONE"` or one or more markdown bullet
+  lines. Internally calls `text_llm.complete(...)` — provider-agnostic.
+- v2 is **disabled when `MYRA_TEXT_LLM_PROVIDER` is unset** — v1
+  (parent-edit) keeps working; the system never blocks a session on
+  memory writes.
 
 Privacy note (be explicit):
-- Ollama Cloud is a *second* vendor beyond Google (which already gets
-  the live audio). Adding it means session transcripts are sent to
-  Ollama as well. The transcript is text-only (no raw audio), but
-  this is a real privacy widening. Worth confirming the parent is OK
-  with it before flipping `OLLAMA_API_KEY` on.
-- An optional v2.5 / future improvement: route through a local
-  Ollama instance on the Pi instead of Cloud (same SDK, just a
-  different `OLLAMA_HOST`). Defers until the Cloud path proves out
-  the UX.
+Whichever provider is selected becomes a *second* vendor beyond the
+Live API's audio path. Session transcripts (text only, no audio) are
+sent there. Worth confirming the parent is OK with the chosen
+provider before enabling.
 
 Failure modes:
-- `OLLAMA_API_KEY` missing → skip v2 entirely, log info once at startup.
+- `MYRA_TEXT_LLM_PROVIDER` unset → skip v2 entirely, log info once at
+  startup.
+- Provider-specific API key missing → log error once, skip v2.
 - Network error / timeout → log warning, no file change. Acceptable;
   parent can edit manually.
 - LLM hallucinates a fact → tight prompt + low temperature; parent can
