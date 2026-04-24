@@ -3,7 +3,7 @@
 A toddler-friendly platform with **two modes**:
 
 - **Language Lesson** — scripted pronunciation practice for **Telugu**, **Assamese**, **Tamil**, and **Malayalam** with an animated mascot.
-- **Kids Teacher** — open-ended preschool conversation for 4–5 year olds over OpenAI Realtime voice, with a locked safety profile and no scripted answers.
+- **Kids Teacher** — open-ended preschool conversation for 4–5 year olds over a realtime voice backend (OpenAI Realtime *or* Google Gemini Flash Live, selectable at runtime), with a locked safety profile and no scripted answers.
 
 Both modes share the same FastAPI app and, on the Reachy Mini robot, the same audio hardware. The current language-lesson behavior is untouched; kids-teacher is an additive sibling flow.
 
@@ -23,9 +23,9 @@ Both modes share the same FastAPI app and, on the Reachy Mini robot, the same au
 
 ### Kids Teacher (new)
 
-- 🧸 Open-ended voice conversation for 4–5 year olds via **OpenAI Realtime**
+- 🧸 Open-ended voice conversation for 4–5 year olds via **OpenAI Realtime** or **Google Gemini Flash Live** (chosen by `KIDS_TEACHER_REALTIME_PROVIDER`)
 - 🔒 **Locked preschool profile** with disallowed-topic refusals, restricted-topic family-safe answers, and clarification behavior
-- 🌐 Multilingual — English, Telugu, Assamese, Tamil, Malayalam with confidence-based language selection and default fallback
+- 🌐 Multilingual — English (primary) and Telugu with confidence-based language selection and English fallback (Assamese/Tamil/Malayalam stay on the language-lesson flow)
 - ✋ Natural **barge-in** — the child can interrupt the assistant at any time (server-VAD triggered)
 - 👪 **Admin policy precedence** — admins can add restrictions; the system safety floor can never be weakened
 - 📼 Optional **review storage** — transcript and raw-audio retention are separate opt-ins, default OFF, local-first with optional GCS sync
@@ -41,8 +41,8 @@ Both modes share the same FastAPI app and, on the Reachy Mini robot, the same au
 | Audio conversion    | pydub + ffmpeg (WebM / MP4 / OGG → WAV)                     | language lesson |
 | Fuzzy matching      | rapidfuzz (`token_sort_ratio`, 0–100 scale)                 | language lesson |
 | Translation         | Google Cloud Translate (on-demand, cached to GCS)           | language lesson |
-| Realtime voice      | OpenAI Realtime (`gpt-realtime` or `gpt-realtime-mini`) with server-side VAD | kids teacher |
-| Input transcription | `gpt-4o-mini-transcribe`                                    | kids teacher |
+| Realtime voice      | OpenAI Realtime (`gpt-realtime`, `gpt-realtime-mini`) **or** Gemini Flash Live (`gemini-live-2.5-flash-native-audio`) — server-side VAD on both | kids teacher |
+| Input transcription | `gpt-4o-mini-transcribe` (OpenAI path) / built-in on Gemini  | kids teacher |
 | Frontend            | Vanilla HTML / CSS / JS + Jinja2 templates                  | both |
 
 
@@ -237,18 +237,37 @@ If `--child-name` is omitted, the script prompts for it interactively. See `REAC
 
 ## 🧸 Kids Teacher Mode
 
-An open-ended preschool conversation mode for 4–5 year olds. Unlike the language-lesson flow (which scores pronunciation of a known target word), kids teacher is a streaming voice conversation with a locked safety profile. It runs on top of OpenAI Realtime and reuses the robot's audio hardware.
+An open-ended preschool conversation mode for 4–5 year olds. Unlike the language-lesson flow (which scores pronunciation of a known target word), kids teacher is a streaming voice conversation with a locked safety profile. It runs on either OpenAI Realtime or Google Gemini Flash Live (chosen at runtime) and reuses the robot's audio hardware.
+
+### Provider selection — OpenAI vs. Gemini
+
+Kids-teacher supports two realtime backends behind the same `RealtimeBackend` protocol. Pick one per deployment via `KIDS_TEACHER_REALTIME_PROVIDER` (`openai` | `gemini`, default `openai`). Both backends implement the same 9-event contract (`input.speech_started`, `input_transcript.delta/final`, `assistant_transcript.delta/final`, `audio.chunk`, `response.done`, `error`, etc.) so the handler, safety layer, review store, and robot bridge are unchanged.
+
+| Dimension | OpenAI Realtime | Gemini Flash Live |
+| --------- | --------------- | ----------------- |
+| Model    | `gpt-realtime` / `gpt-realtime-mini` | `gemini-live-2.5-flash-native-audio` (GA) |
+| Transport | WebSocket / WebRTC | WebSocket only |
+| Mic input rate | PCM16 LE 24 kHz mono | PCM16 LE 16 kHz mono |
+| Speaker output | PCM16 LE 24 kHz mono | PCM16 LE 24 kHz mono (same — robot playback unchanged) |
+| Free tier | No | Yes (3 concurrent sessions; 15-min audio session cap) |
+| Approx. cost for a full 15-min session | ~$1.44 on `gpt-realtime` | ~$0.35 (paid tier); free for single-user AI Studio |
+| Data handling | Not used for training | **Free tier may be used for training** — enable billing (or use Vertex AI) to disable |
+| Voice options | `alloy`, `echo`, `shimmer`, … (mapped automatically on the Gemini path) | 30 prebuilt voices (`Kore`, `Puck`, `Aoede`, …); `Kore` is the default for child-facing use |
+| Telugu output | Supported | Listed as supported in Live docs; empirical quality not yet verified — see `tasks/todo.md` |
+
+The `profiles/kids_teacher/voice.txt` value is an OpenAI voice name; when provider is Gemini the backend maps it to the closest Gemini voice (`alloy → Kore`, `echo → Puck`, etc.), so no profile-file change is needed when switching providers.
 
 ### Architecture at a glance
 
 ```
-Child speech ─▶ mic pump ─▶ RealtimeBackend (OpenAI) ─▶ Handler ─▶ Safety wrapper ─▶ Review store ─▶ Hooks ─▶ Robot speaker
-                                    ▲                              │
-                                    └────── interrupt() ───────────┘   (on unsafe input)
+Child speech ─▶ mic pump ─▶ RealtimeBackend (OpenAI | Gemini) ─▶ Handler ─▶ Safety wrapper ─▶ Review store ─▶ Hooks ─▶ Robot speaker
+                                    ▲                                       │
+                                    └──────── interrupt() ──────────────────┘   (on unsafe input)
 ```
 
 - `src/kids_teacher_realtime.py` — session handler (partial/final transcripts, recent-turn memory, barge-in, fallback)
-- `src/kids_teacher_backend.py` — OpenAI Realtime adapter (the only place `import openai` lives)
+- `src/kids_teacher_backend.py` — OpenAI Realtime adapter (the only place `import openai` lives) + `resolve_realtime_provider()`
+- `src/kids_teacher_gemini_backend.py` — Gemini Flash Live adapter (the only place `import google.genai` lives); translates the OpenAI-shaped session payload into `LiveConnectConfig` and always enables `input_audio_transcription` so the safety layer keeps working
 - `src/kids_safety.py` — topic classifier, refusal/redirect/family-safe helpers, admin-policy precedence
 - `src/kids_review_store.py` — local-first transcript + raw-audio retention, optional GCS sync
 - `src/kids_teacher_flow.py` — orchestrator; wires safety + review + hooks around the handler
@@ -257,15 +276,34 @@ Child speech ─▶ mic pump ─▶ RealtimeBackend (OpenAI) ─▶ Handler ─�
 
 ### Prerequisites
 
-In addition to the base setup:
+In addition to the base setup, provide credentials for whichever provider you're using:
+
+**OpenAI path (default):**
 
 ```bash
-# OpenAI API key is required for realtime voice
 export OPENAI_API_KEY=sk-...
-
-# openai>=1.59.0 is already in requirements.txt; re-run if upgrading
+# openai>=1.59.0 is already in requirements.txt
 pip install -r requirements.txt
 ```
+
+**Gemini path:**
+
+```bash
+export GEMINI_API_KEY=...                              # from https://aistudio.google.com/apikey
+export KIDS_TEACHER_REALTIME_PROVIDER=gemini
+# google-genai>=1.0.0 is already in requirements.txt
+pip install -r requirements.txt
+```
+
+Or drop them into `.env` at the repo root (loaded automatically by `env_loader.load_project_dotenv()`, shell env takes precedence):
+
+```
+GEMINI_API_KEY=your-key-here
+KIDS_TEACHER_REALTIME_PROVIDER=gemini
+KIDS_TEACHER_GEMINI_MODEL=gemini-live-2.5-flash-native-audio
+```
+
+`.env` is already gitignored, so the API key stays local. Both SDKs (`openai` and `google-genai`) are installed from `requirements.txt` regardless of which provider you pick, so switching providers is just an env-var flip — no reinstall.
 
 ### Run a kids-teacher session
 
@@ -297,13 +335,20 @@ source /home/pollen/myra-venv/bin/activate
 pip install -r requirements.txt -r requirements-robot.txt
 ```
 
-**B2. Set the API key.** Either export it in the shell you'll run from, or add it to `/home/pollen/myra-language-teacher/.env` so the entry script picks it up via `env_loader`:
+**B2. Set credentials.** Either export them in the shell, or add them to `/home/pollen/myra-language-teacher/.env` so the entry script picks them up via `env_loader`. For OpenAI:
 
 ```bash
 export OPENAI_API_KEY=sk-...
 ```
 
-**B3. Start the session on the Pi.** No FastAPI server is required — the CLI connects to OpenAI Realtime directly and drives the robot's mic + speaker via `kids_teacher_robot_bridge.py`:
+For Gemini (Phase 1 default on dev laptops — set to `gemini` in `.env` after you have a key):
+
+```bash
+export GEMINI_API_KEY=...
+export KIDS_TEACHER_REALTIME_PROVIDER=gemini
+```
+
+**B3. Start the session on the Pi.** No FastAPI server is required — the CLI connects to the selected realtime provider directly and drives the robot's mic + speaker via `kids_teacher_robot_bridge.py`:
 
 ```bash
 source /home/pollen/myra-venv/bin/activate
@@ -314,16 +359,19 @@ PYTHONPATH=src python src/robot_kids_teacher.py \
   --max-seconds 900                                   # optional; no cap when omitted
 ```
 
-If `openai` is not importable, the script exits cleanly with code `2` rather than crashing. The same command also works on any non-robot host that has a mic + speaker, `OPENAI_API_KEY`, and `openai` installed — useful for smoke-testing off the robot.
+If the selected provider's SDK (`openai` or `google.genai`) is not importable, the script exits cleanly with code `2` rather than crashing. The same command also works on any non-robot host that has a mic + speaker, the relevant API key, and the matching SDK installed — useful for smoke-testing off the robot.
 
 ### Configuration (env vars)
 
-Backend model:
+Provider + backend model:
 
-| Variable                       | Default            | Purpose |
-| ------------------------------ | ------------------ | ------- |
-| `OPENAI_API_KEY`               | _(required)_       | OpenAI credentials for the realtime session |
-| `KIDS_TEACHER_REALTIME_MODEL`  | `gpt-realtime`     | Model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
+| Variable                           | Default                                   | Purpose |
+| ---------------------------------- | ----------------------------------------- | ------- |
+| `KIDS_TEACHER_REALTIME_PROVIDER`   | `openai`                                  | Realtime backend: `openai` or `gemini`. Picks which SDK is imported and which model allowlist is applied |
+| `OPENAI_API_KEY`                   | _(required when provider=openai)_         | OpenAI credentials for the realtime session |
+| `KIDS_TEACHER_REALTIME_MODEL`      | `gpt-realtime`                            | OpenAI model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
+| `GEMINI_API_KEY`                   | _(required when provider=gemini)_         | Google AI Studio API key — https://aistudio.google.com/apikey |
+| `KIDS_TEACHER_GEMINI_MODEL`        | `gemini-live-2.5-flash-native-audio`      | Gemini Live model name. Only the GA native-audio model is accepted (preview variants rejected on purpose) |
 
 Review storage (both default **OFF**; enable explicitly per deployment):
 
@@ -548,7 +596,8 @@ myra-language-teacher/
 │   ├── robot_teacher.py             # Reachy Mini language-lesson driver (runs on Pi)
 │   ├── kids_teacher_types.py        # Shared contract (events, session config, hooks)
 │   ├── kids_teacher_profile.py      # File-based profile loader
-│   ├── kids_teacher_backend.py      # OpenAI Realtime adapter (only place that imports openai)
+│   ├── kids_teacher_backend.py      # OpenAI Realtime adapter + provider resolver (only place that imports openai)
+│   ├── kids_teacher_gemini_backend.py # Gemini Flash Live adapter (only place that imports google.genai)
 │   ├── kids_teacher_realtime.py     # Session handler: transcripts, memory, barge-in, fallback
 │   ├── kids_teacher_fakes.py        # FakeRealtimeBackend for tests
 │   ├── kids_safety.py               # Topic classifier + response helpers + policy merge
@@ -590,6 +639,8 @@ myra-language-teacher/
 │   ├── test_bridge.py               # Audio bridge integration (requires live server on :8765)
 │   ├── test_kids_teacher_profile.py
 │   ├── test_kids_teacher_backend.py
+│   ├── test_kids_teacher_gemini_backend.py
+│   ├── test_kids_teacher_provider_selection.py
 │   ├── test_kids_teacher_realtime.py
 │   ├── test_kids_teacher_robot_bridge.py
 │   ├── test_kids_safety.py
