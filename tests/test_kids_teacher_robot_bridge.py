@@ -328,6 +328,95 @@ def test_default_play_chunk_decodes_pcm16_and_resamples(monkeypatch):
     assert robot.played_audio is None
 
 
+def test_default_play_chunk_stretches_output_rate_when_speed_below_one(monkeypatch):
+    """playback_speed=0.8 must bump dst_rate to output_rate / 0.8 so the
+    speaker gets 1.25x the samples and plays the audio 20% slower.
+    """
+    robot = FakeRobotController()
+    robot.output_sample_rate = 16000
+
+    captured = {}
+
+    def fake_to_float32_audio(samples):
+        return samples.astype(np.float32) / 32767.0
+
+    def fake_resample_audio(samples, src_rate: int, dst_rate: int):
+        captured["rates"] = (src_rate, dst_rate)
+        return np.zeros(4, dtype=np.float32)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "robot_teacher",
+        types.SimpleNamespace(
+            _to_float32_audio=fake_to_float32_audio,
+            _resample_audio=fake_resample_audio,
+        ),
+    )
+
+    audio_bytes = np.array([0, 1, -1], dtype="<i2").tobytes()
+    _default_play_chunk(robot, audio_bytes, 24000, playback_speed=0.8)
+
+    assert captured["rates"] == (24000, 20000)
+
+
+def test_default_play_chunk_ignores_invalid_speed(monkeypatch):
+    """Non-positive speed must NOT reach _resample_audio — resample would
+    raise or produce garbage. Falls back to the native output_sample_rate.
+    """
+    robot = FakeRobotController()
+    robot.output_sample_rate = 16000
+
+    captured = {}
+
+    def fake_resample_audio(samples, src_rate: int, dst_rate: int):
+        captured["rates"] = (src_rate, dst_rate)
+        return np.zeros(2, dtype=np.float32)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "robot_teacher",
+        types.SimpleNamespace(
+            _to_float32_audio=lambda s: s.astype(np.float32),
+            _resample_audio=fake_resample_audio,
+        ),
+    )
+
+    audio_bytes = np.array([0, 1], dtype="<i2").tobytes()
+    _default_play_chunk(robot, audio_bytes, 24000, playback_speed=0.0)
+
+    assert captured["rates"] == (24000, 16000)
+
+
+def test_hooks_thread_playback_speed_through_to_default_player(monkeypatch):
+    """Constructing KidsTeacherRobotHooks with playback_speed != 1.0 must
+    flow that speed into the default _default_play_chunk invocation on the
+    playback thread (the default, non-injected path).
+    """
+    import kids_teacher_robot_bridge as bridge
+
+    captured: List[Tuple[int, float]] = []
+
+    def fake_default_play_chunk(robot, audio_bytes, sample_rate, *, playback_speed=1.0):
+        captured.append((sample_rate, playback_speed))
+
+    monkeypatch.setattr(bridge, "_default_play_chunk", fake_default_play_chunk)
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        sample_rate=24000,
+        playback_speed=0.8,
+    )
+    hooks.start()
+    try:
+        hooks.start_assistant_playback(b"chunk-1")
+        assert _wait_until(lambda: len(captured) == 1, timeout=1.0)
+    finally:
+        hooks.stop(timeout=1.0)
+
+    assert captured[0] == (24000, 0.8)
+
+
 def test_bridge_start_primes_speaker_eagerly():
     """Priming at bridge.start() means the first audible delta doesn't pay
     the ~0.3s warmup cost on the critical path."""
@@ -534,3 +623,55 @@ def test_build_robot_hooks_stub_still_raises_for_backcompat():
 
     with pytest.raises(NotImplementedError):
         build_robot_hooks_stub(object())
+
+
+def test_build_robot_hooks_honors_playback_speed_env(monkeypatch):
+    """KIDS_TEACHER_PLAYBACK_SPEED must flow into the constructed hooks and
+    out to the default play_chunk path.
+    """
+    import kids_teacher_robot_bridge as bridge
+
+    captured: List[float] = []
+
+    def fake_default_play_chunk(robot, audio_bytes, sample_rate, *, playback_speed=1.0):
+        captured.append(playback_speed)
+
+    monkeypatch.setattr(bridge, "_default_play_chunk", fake_default_play_chunk)
+    monkeypatch.setenv("KIDS_TEACHER_PLAYBACK_SPEED", "0.8")
+
+    hooks = build_robot_hooks(FakeRobotController())
+    hooks.start()
+    try:
+        hooks.start_assistant_playback(b"chunk")
+        assert _wait_until(lambda: len(captured) == 1, timeout=1.0)
+    finally:
+        hooks.stop(timeout=1.0)
+
+    assert captured[0] == 0.8
+
+
+@pytest.mark.parametrize("bad_value", ["nope", "0.1", "5.0", ""])
+def test_build_robot_hooks_falls_back_on_bad_speed_env(monkeypatch, bad_value):
+    """Unparseable or out-of-range values must fall back to 1.0 (native)."""
+    import kids_teacher_robot_bridge as bridge
+
+    captured: List[float] = []
+
+    def fake_default_play_chunk(robot, audio_bytes, sample_rate, *, playback_speed=1.0):
+        captured.append(playback_speed)
+
+    monkeypatch.setattr(bridge, "_default_play_chunk", fake_default_play_chunk)
+    if bad_value:
+        monkeypatch.setenv("KIDS_TEACHER_PLAYBACK_SPEED", bad_value)
+    else:
+        monkeypatch.delenv("KIDS_TEACHER_PLAYBACK_SPEED", raising=False)
+
+    hooks = build_robot_hooks(FakeRobotController())
+    hooks.start()
+    try:
+        hooks.start_assistant_playback(b"chunk")
+        assert _wait_until(lambda: len(captured) == 1, timeout=1.0)
+    finally:
+        hooks.stop(timeout=1.0)
+
+    assert captured[0] == 1.0

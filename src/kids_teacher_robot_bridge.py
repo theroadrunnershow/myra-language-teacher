@@ -77,6 +77,7 @@ class KidsTeacherRobotHooks:
         logger_override: Optional[logging.Logger] = None,
         max_queued_chunks: int = _DEFAULT_MAX_QUEUED_CHUNKS,
         play_chunk: Optional[Callable[[Any, bytes, int], None]] = None,
+        playback_speed: float = 1.0,
     ) -> None:
         """Create a hook implementation bound to ``robot_controller``.
 
@@ -94,11 +95,25 @@ class KidsTeacherRobotHooks:
                 Defaults to :func:`_default_play_chunk`, which decodes bytes
                 with :mod:`robot_teacher` helpers and pushes to the robot
                 speaker. Tests override this to avoid SDK imports.
+            playback_speed: Playback rate multiplier applied by the default
+                play_chunk only. ``1.0`` = native; ``0.8`` = 20% slower
+                (with a proportional pitch drop, since we stretch via
+                resampling rather than a phase vocoder). Ignored if a
+                custom ``play_chunk`` is provided — callers that inject
+                their own chunk player own their own speed policy.
         """
         self._robot = robot_controller
         self._sample_rate = sample_rate
         self._log = logger_override or logger
-        self._play_chunk = play_chunk or _default_play_chunk
+        if play_chunk is not None:
+            self._play_chunk = play_chunk
+        else:
+            # Bind playback_speed into the default player so the background
+            # thread's call signature stays ``(robot, bytes, sample_rate)``.
+            speed = playback_speed
+            self._play_chunk = lambda robot, audio, sr: _default_play_chunk(
+                robot, audio, sr, playback_speed=speed
+            )
 
         # Playback queue + signaling primitives. deque + Event is lighter
         # than queue.Queue and gives us O(1) flush for barge-in.
@@ -294,7 +309,13 @@ class KidsTeacherRobotHooks:
             )
 
 
-def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: int) -> None:
+def _default_play_chunk(
+    robot_controller: Any,
+    audio_bytes: bytes,
+    sample_rate: int,
+    *,
+    playback_speed: float = 1.0,
+) -> None:
     """Default playback: decode assistant PCM16 audio and push it into the
     robot's streaming speaker path.
 
@@ -302,6 +323,12 @@ def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: 
     concatenate without the per-chunk tail sleep that one-shot playback
     imposes. Import ``robot_teacher`` helpers lazily so this module stays
     importable on stripped-down test hosts (no ``pydub``/``ffmpeg``).
+
+    ``playback_speed`` stretches audio in time by over-resampling: the
+    speaker consumes samples at its native ``output_sample_rate``, so feeding
+    it ``1/speed`` as many samples per input second makes playback take
+    ``1/speed`` as long. Pitch drops proportionally — this is a resample,
+    not a phase vocoder.
     """
     import numpy as np
 
@@ -311,11 +338,10 @@ def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: 
 
     pcm16 = np.frombuffer(audio_bytes, dtype="<i2")
     samples = _to_float32_audio(pcm16)
-    samples = _resample_audio(
-        samples,
-        sample_rate,
-        getattr(robot_controller, "output_sample_rate", sample_rate),
-    ).reshape(-1, 1)
+    output_rate = getattr(robot_controller, "output_sample_rate", sample_rate)
+    if playback_speed != 1.0 and playback_speed > 0:
+        output_rate = max(1, int(round(output_rate / playback_speed)))
+    samples = _resample_audio(samples, sample_rate, output_rate).reshape(-1, 1)
     robot_controller.play_audio_streaming(samples)
 
 

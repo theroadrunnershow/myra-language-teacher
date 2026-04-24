@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
@@ -116,6 +117,39 @@ def build_robot_hooks_stub(robot_controller: object) -> KidsTeacherRuntimeHooks:
     )
 
 
+_PLAYBACK_SPEED_ENV = "KIDS_TEACHER_PLAYBACK_SPEED"
+# Guard against values that would make playback unintelligible or risk a
+# zero/negative rate reaching scipy.signal.resample.
+_PLAYBACK_SPEED_MIN = 0.25
+_PLAYBACK_SPEED_MAX = 2.0
+
+
+def _resolve_playback_speed() -> float:
+    """Parse ``KIDS_TEACHER_PLAYBACK_SPEED`` with a safe fallback to 1.0."""
+    raw = os.environ.get(_PLAYBACK_SPEED_ENV, "").strip()
+    if not raw:
+        return 1.0
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "[kids_teacher_flow] %s=%r is not a float; falling back to 1.0",
+            _PLAYBACK_SPEED_ENV,
+            raw,
+        )
+        return 1.0
+    if not (_PLAYBACK_SPEED_MIN <= value <= _PLAYBACK_SPEED_MAX):
+        logger.warning(
+            "[kids_teacher_flow] %s=%s outside [%s, %s]; falling back to 1.0",
+            _PLAYBACK_SPEED_ENV,
+            value,
+            _PLAYBACK_SPEED_MIN,
+            _PLAYBACK_SPEED_MAX,
+        )
+        return 1.0
+    return value
+
+
 def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
     """Build the real robot audio bridge hooks for a running session.
 
@@ -126,7 +160,10 @@ def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
     """
     from kids_teacher_robot_bridge import KidsTeacherRobotHooks
 
-    return KidsTeacherRobotHooks(robot_controller=robot_controller)
+    return KidsTeacherRobotHooks(
+        robot_controller=robot_controller,
+        playback_speed=_resolve_playback_speed(),
+    )
 
 
 # ---------------------------------------------------------------------------
