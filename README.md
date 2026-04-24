@@ -605,9 +605,9 @@ myra-language-teacher/
 │   ├── secret_manager.tf
 │   ├── variables.tf
 │   └── GCP_MIGRATION.md         # AWS → GCP migration notes
-└── deploy/
-    ├── bootstrap.sh             # Initial GCP project setup
-    └── build-push.sh            # Docker build + push to Artifact Registry
+└── .github/
+    └── workflows/
+        └── deploy.yml           # Build + deploy pipeline for Cloud Run
 ```
 
 ---
@@ -646,7 +646,7 @@ Browser ──HTTPS──▶ Cloud Run (FastAPI + faster-whisper)
 
 | Threshold            | Action                                                               |
 | -------------------- | -------------------------------------------------------------------- |
-| Monthly limit (default $15) | Cloud Scheduler trigger scales Cloud Run to 0; app goes offline |
+| Monthly limit (default $15) | Billing budget alert publishes to Pub/Sub; Cloud Function scales Cloud Run to 0 |
 
 Restart manually when ready.
 
@@ -662,11 +662,13 @@ Restart manually when ready.
 
 ### Build & Deploy
 
-**Build and push the Docker image to Artifact Registry:**
+**Recommended deploy path:** push to `main` and let GitHub Actions build and deploy to Cloud Run:
 
 ```bash
-./deploy/build-push.sh
+git push origin main
 ```
+
+Workflow: [.github/workflows/deploy.yml](/Users/abhisheksunku/Downloads/claude_projects/myra-language-teacher/.github/workflows/deploy.yml)
 
 **Deploy / update GCP infrastructure with Terraform:**
 
@@ -677,13 +679,13 @@ terraform plan  -var="project_id=<YOUR_PROJECT>"
 terraform apply -var="project_id=<YOUR_PROJECT>"
 ```
 
-**First-time GCP project setup:**
+**One-time GCP bootstrap and manual Artifact Registry setup:**
 
-```bash
-./deploy/bootstrap.sh
-```
-
-> See `infra/GCP_MIGRATION.md` for full migration notes from the previous AWS setup.
+See [infra/GCP_MIGRATION.md](/Users/abhisheksunku/Downloads/claude_projects/myra-language-teacher/infra/GCP_MIGRATION.md) for the full setup flow, including:
+- enabling GCP APIs
+- creating the Terraform service account
+- creating the GCS Terraform state bucket
+- configuring Docker for Artifact Registry
 
 ### Docker Notes
 
