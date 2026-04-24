@@ -40,7 +40,11 @@ load_project_dotenv()
 logger = logging.getLogger(__name__)
 
 
-DEFAULT_GEMINI_MODEL = "gemini-live-2.5-flash-native-audio"
+# Default targets AI Studio (api_key auth) since that's the path users
+# hit with a free-tier key. Vertex users should override via
+# KIDS_TEACHER_GEMINI_MODEL=gemini-live-2.5-flash-native-audio (the
+# Vertex GA id, which is not available on AI Studio's v1beta endpoint).
+DEFAULT_GEMINI_MODEL = "gemini-2.5-flash-native-audio-preview-12-2025"
 GEMINI_MODEL_ENV_VAR = "KIDS_TEACHER_GEMINI_MODEL"
 GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
 

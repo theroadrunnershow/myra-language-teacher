@@ -18,9 +18,28 @@ from typing import Optional, Protocol, runtime_checkable
 # swap-proof and prevents accidental use of a non-realtime chat model.
 ALLOWED_REALTIME_MODELS: frozenset[str] = frozenset({"gpt-realtime", "gpt-realtime-mini"})
 
-# V1.1 Gemini Live allowlist. Only the GA native-audio Live model is
-# approved; preview variants are intentionally excluded.
-ALLOWED_GEMINI_MODELS: frozenset[str] = frozenset({"gemini-live-2.5-flash-native-audio"})
+# V1.1 Gemini Live allowlist.
+#
+# The Google Gen AI API exposes two separate endpoints with DIFFERENT
+# model ids for the same underlying capability:
+#
+#   - AI Studio (api_key auth, v1beta):
+#       * gemini-2.5-flash-native-audio-preview-12-2025  (current native-audio preview)
+#       * gemini-3.1-flash-live-preview                 (newer Live API preview)
+#   - Vertex AI (service-account auth):
+#       * gemini-live-2.5-flash-native-audio            (GA)
+#
+# The Vertex GA id does NOT resolve on the AI Studio endpoint (you'll
+# get a 1008 "not found for API version v1beta" error). We accept all
+# three so users can pick whichever matches their auth path; stale
+# preview ids (e.g. -09-2025) are still rejected.
+ALLOWED_GEMINI_MODELS: frozenset[str] = frozenset(
+    {
+        "gemini-2.5-flash-native-audio-preview-12-2025",
+        "gemini-3.1-flash-live-preview",
+        "gemini-live-2.5-flash-native-audio",
+    }
+)
 
 # Union of every model id acceptable on KidsTeacherSessionConfig.
 ALLOWED_ALL_MODELS: frozenset[str] = ALLOWED_REALTIME_MODELS | ALLOWED_GEMINI_MODELS

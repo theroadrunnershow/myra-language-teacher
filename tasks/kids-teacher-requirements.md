@@ -79,8 +79,11 @@ plan file `~/.claude/plans/purring-wishing-lemur.md`.
   to Gemini once Phase 1 is green.
 - **§"Deployment configuration"** adds: `KIDS_TEACHER_REALTIME_PROVIDER`
   (`openai` | `gemini`), `KIDS_TEACHER_GEMINI_MODEL` (default
-  `gemini-live-2.5-flash-native-audio`), and a new secret
-  `GEMINI_API_KEY`.
+  `gemini-2.5-flash-native-audio-preview-12-2025` for the AI Studio
+  endpoint; Vertex users override to `gemini-live-2.5-flash-native-audio`),
+  and a new secret `GEMINI_API_KEY`. **Note**: the Vertex GA id is not
+  available on AI Studio's v1beta endpoint — mixing them produces a
+  `1008 not found` error.
 - **§"Safety enforcement layers"** requires verifying that Gemini's
   `input_audio_transcription` opt-in is enabled so child transcripts
   still feed the safety layer (a regression risk called out below).

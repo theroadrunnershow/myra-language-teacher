@@ -245,7 +245,7 @@ Kids-teacher supports two realtime backends behind the same `RealtimeBackend` pr
 
 | Dimension | OpenAI Realtime | Gemini Flash Live |
 | --------- | --------------- | ----------------- |
-| Model    | `gpt-realtime` / `gpt-realtime-mini` | `gemini-live-2.5-flash-native-audio` (GA) |
+| Model    | `gpt-realtime` / `gpt-realtime-mini` | `gemini-2.5-flash-native-audio-preview-12-2025` (AI Studio default), `gemini-3.1-flash-live-preview` (AI Studio), or `gemini-live-2.5-flash-native-audio` (Vertex GA only) |
 | Transport | WebSocket / WebRTC | WebSocket only |
 | Mic input rate | PCM16 LE 24 kHz mono | PCM16 LE 16 kHz mono |
 | Speaker output | PCM16 LE 24 kHz mono | PCM16 LE 24 kHz mono (same — robot playback unchanged) |
@@ -300,10 +300,15 @@ Or drop them into `.env` at the repo root (loaded automatically by `env_loader.l
 ```
 GEMINI_API_KEY=your-key-here
 KIDS_TEACHER_REALTIME_PROVIDER=gemini
-KIDS_TEACHER_GEMINI_MODEL=gemini-live-2.5-flash-native-audio
+# AI Studio (api_key auth) — this is what a free-tier key hits:
+KIDS_TEACHER_GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
+# Vertex AI only — do NOT use with an AI Studio key (404s with "not found for v1beta"):
+# KIDS_TEACHER_GEMINI_MODEL=gemini-live-2.5-flash-native-audio
 ```
 
 `.env` is already gitignored, so the API key stays local. Both SDKs (`openai` and `google-genai`) are installed from `requirements.txt` regardless of which provider you pick, so switching providers is just an env-var flip — no reinstall.
+
+> **Model-id gotcha.** Google exposes Gemini Live on two separate endpoints with **different** model ids for the same capability. If you use an AI Studio API key (the `api_key` path), you must use an AI Studio model id. The Vertex GA id (`gemini-live-2.5-flash-native-audio`) will fail with `1008 models/... not found for API version v1beta` on the AI Studio endpoint. The defaults in this repo target AI Studio; Vertex users should override `KIDS_TEACHER_GEMINI_MODEL` explicitly.
 
 ### Run a kids-teacher session
 
@@ -371,7 +376,7 @@ Provider + backend model:
 | `OPENAI_API_KEY`                   | _(required when provider=openai)_         | OpenAI credentials for the realtime session |
 | `KIDS_TEACHER_REALTIME_MODEL`      | `gpt-realtime`                            | OpenAI model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
 | `GEMINI_API_KEY`                   | _(required when provider=gemini)_         | Google AI Studio API key — https://aistudio.google.com/apikey |
-| `KIDS_TEACHER_GEMINI_MODEL`        | `gemini-live-2.5-flash-native-audio`      | Gemini Live model name. Only the GA native-audio model is accepted (preview variants rejected on purpose) |
+| `KIDS_TEACHER_GEMINI_MODEL`        | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini Live model. Accepted: `gemini-2.5-flash-native-audio-preview-12-2025` + `gemini-3.1-flash-live-preview` on AI Studio, `gemini-live-2.5-flash-native-audio` on Vertex. The Vertex id will 404 on the AI Studio endpoint |
 
 Review storage (both default **OFF**; enable explicitly per deployment):
 
