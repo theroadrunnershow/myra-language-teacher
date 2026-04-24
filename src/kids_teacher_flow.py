@@ -13,7 +13,7 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, List, Optional, Tuple
 
 from kids_review_store import KidsReviewStore
 from kids_safety import (
@@ -36,6 +36,10 @@ from kids_teacher_types import (
     SessionStatus,
     Speaker,
 )
+
+MicPumpFactory = Callable[
+    [KidsTeacherRealtimeHandler, asyncio.Event], Awaitable[None]
+]
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +145,13 @@ class KidsTeacherFlowDeps:
     )
     review_store: Optional[KidsReviewStore] = None
     clock: Callable[[], float] = field(default_factory=lambda: time.time)
+    # Optional mic pump coroutine factory. Receives the live handler and a
+    # stop event; must forward mic audio into ``handler.push_audio(...)`` and
+    # exit when the stop event is set. The flow sets the stop event during
+    # teardown and awaits the returned coroutine before calling hook stop().
+    # Headless/test callers leave this as ``None``; the robot entry point
+    # wires ``pump_microphone_to_backend``.
+    mic_pump_factory: Optional[MicPumpFactory] = None
 
 
 async def run_kids_teacher_session(
@@ -201,6 +212,18 @@ async def run_kids_teacher_session(
     # the hooks <-> handler circular dependency.
     safety_hooks.set_interrupt(handler.interrupt)
 
+    # Let hooks with a lifecycle (e.g. KidsTeacherRobotHooks spawns its
+    # playback thread here) do any pre-session setup. Guarded so hook
+    # impls without start()/stop() stay untouched.
+    _call_hook_lifecycle(hooks, "start")
+
+    mic_stop_event = asyncio.Event()
+    mic_task: Optional[asyncio.Task] = None
+    if deps.mic_pump_factory is not None:
+        mic_task = asyncio.create_task(
+            deps.mic_pump_factory(handler, mic_stop_event)
+        )
+
     try:
         await handler.start()
         run_task = asyncio.create_task(handler.run())
@@ -230,6 +253,16 @@ async def run_kids_teacher_session(
         # Handler already publishes ERROR status for backend failures; we
         # catch here only to make sure review-store cleanup still runs.
         logger.exception("[kids_teacher_flow] session crashed: %s", exc)
+    finally:
+        mic_stop_event.set()
+        if mic_task is not None:
+            try:
+                await mic_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] mic pump ended: %s", exc
+                )
+        _call_hook_lifecycle(hooks, "stop")
 
     if review_store is not None:
         try:
@@ -239,6 +272,32 @@ async def run_kids_teacher_session(
                 review_store.sync_to_object_store(force=False)
         except Exception as exc:
             logger.warning("[kids_teacher_flow] review_store teardown: %s", exc)
+
+
+# ---------------------------------------------------------------------------
+# Internal: hook lifecycle helper
+# ---------------------------------------------------------------------------
+
+
+def _call_hook_lifecycle(hooks: Any, method_name: str) -> None:
+    """Invoke ``hooks.start()`` / ``hooks.stop()`` if the hook exposes it.
+
+    The :class:`KidsTeacherRuntimeHooks` protocol is intentionally narrow and
+    does not mandate a start/stop lifecycle — the test hooks
+    (:class:`NullRuntimeHooks`, :class:`RecordingRuntimeHooks`) do not need
+    one. Only the real robot bridge spawns a playback thread and therefore
+    needs deterministic setup/teardown; this helper calls it if present and
+    swallows any error so a hook bug never crashes the session flow.
+    """
+    method = getattr(hooks, method_name, None)
+    if not callable(method):
+        return
+    try:
+        method()
+    except Exception as exc:
+        logger.warning(
+            "[kids_teacher_flow] hooks.%s() raised: %s", method_name, exc
+        )
 
 
 # ---------------------------------------------------------------------------

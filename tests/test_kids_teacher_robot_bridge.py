@@ -307,6 +307,38 @@ async def test_mic_pump_stops_when_stop_event_is_set():
     assert stop_event.is_set()
 
 
+async def test_mic_pump_treats_none_as_retry_not_end_of_stream():
+    """``None`` from mic_source must not end the stream — pump polls again.
+
+    The robot API ``mini.media.get_audio_sample()`` returns ``None`` between
+    frames; treating that as end-of-stream would tear the session down on
+    the first quiet moment.
+    """
+    handler = FakeHandler()
+    stop_event = asyncio.Event()
+
+    schedule = [None, None, b"\x01\x02", None, b"\x03\x04"]
+    index = {"i": 0}
+
+    def reader():
+        i = index["i"]
+        index["i"] = i + 1
+        if i >= len(schedule):
+            stop_event.set()
+            return None
+        return schedule[i]
+
+    await asyncio.wait_for(
+        pump_microphone_to_backend(
+            handler, mic_source=reader, stop_event=stop_event
+        ),
+        timeout=1.0,
+    )
+
+    assert handler.pushed == [b"\x01\x02", b"\x03\x04"]
+    assert stop_event.is_set()
+
+
 async def test_mic_pump_treats_empty_bytes_as_end_of_stream():
     handler = FakeHandler()
 

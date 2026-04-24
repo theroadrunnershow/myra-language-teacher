@@ -311,10 +311,18 @@ async def pump_microphone_to_backend(
 
     ``mic_source`` contract: each ``next(mic_source)`` (for generators) or
     each ``mic_source()`` call (for callables) must return **PCM16 mono
-    bytes at 16 kHz** — the format the OpenAI Realtime API expects. This
-    function does NOT resample or re-encode; producing the right format is
-    the caller's job (see ``robot_teacher.mic_samples_to_wav_bytes`` et al.
+    bytes at the rate expected by the OpenAI Realtime API**. This function
+    does NOT resample or re-encode; producing the right format is the
+    caller's job (see ``robot_teacher.mic_samples_to_wav_bytes`` et al.
     for utilities).
+
+    Return-value semantics:
+
+    * non-empty ``bytes`` — forwarded to ``handler.push_audio``.
+    * ``None`` — no frame available yet; pump yields briefly and retries.
+      (Matches the robot ``mini.media.get_audio_sample()`` API, which
+      returns ``None`` when its buffer is momentarily empty.)
+    * ``b""`` — end of stream (loop exits).
 
     Stop conditions (any one ends the loop):
 
@@ -340,6 +348,12 @@ async def pump_microphone_to_backend(
         except Exception as exc:
             logger.warning("[kids_teacher_robot_bridge] mic_source raised: %s", exc)
             return
+
+        if chunk is None:
+            # No frame ready yet — yield to the loop so the websocket reader
+            # and keepalive can make progress, then poll again.
+            await asyncio.sleep(0.01)
+            continue
 
         if not chunk:
             # Empty bytes means "end of stream" per the docstring contract.

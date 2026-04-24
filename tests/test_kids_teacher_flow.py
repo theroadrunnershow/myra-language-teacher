@@ -337,6 +337,113 @@ async def test_safety_interrupts_backend_on_unsafe_child_input():
     assert any("safe" in t.lower() or "talk about" in t.lower() for t in assistant_texts)
 
 
+# ---------------------------------------------------------------------------
+# Mic pump + hook lifecycle wiring
+# ---------------------------------------------------------------------------
+
+
+async def test_mic_pump_factory_is_invoked_and_stopped_on_session_end():
+    """Flow should spawn the pump with the handler and signal stop on teardown."""
+    backend = FakeRealtimeBackend(scripted_events=[])
+    hooks = RecordingRuntimeHooks()
+
+    captured: dict = {}
+
+    async def pump(handler, stop_event: asyncio.Event) -> None:
+        captured["handler"] = handler
+        captured["stop_event"] = stop_event
+        await stop_event.wait()
+        captured["observed_stop"] = True
+
+    deps = KidsTeacherFlowDeps(
+        backend_factory=lambda: backend,
+        hooks_factory=lambda: hooks,
+        mic_pump_factory=pump,
+    )
+
+    async def end_after_seed():
+        await asyncio.sleep(0)
+        await backend.end_stream()
+
+    ender = asyncio.create_task(end_after_seed())
+    await run_kids_teacher_session(config=_config("mic-pump"), deps=deps)
+    await ender
+
+    # Pump was invoked with a handler that exposes push_audio — i.e. the
+    # real realtime handler, not a mock.
+    assert "handler" in captured
+    assert hasattr(captured["handler"], "push_audio")
+    # Stop event was set by the flow's teardown and the pump observed it.
+    assert captured.get("observed_stop") is True
+    assert captured["stop_event"].is_set()
+
+
+async def test_hook_start_and_stop_are_called_when_present():
+    """Hook impls that expose start()/stop() should get both lifecycle calls."""
+
+    class LifecycleHooks(RecordingRuntimeHooks):
+        def __init__(self) -> None:
+            super().__init__()
+            self.start_calls = 0
+            self.stop_calls = 0
+
+        def start(self) -> None:
+            self.start_calls += 1
+
+        def stop(self) -> None:
+            self.stop_calls += 1
+
+    hooks = LifecycleHooks()
+    backend = FakeRealtimeBackend(scripted_events=[])
+    deps = KidsTeacherFlowDeps(
+        backend_factory=lambda: backend,
+        hooks_factory=lambda: hooks,
+    )
+
+    async def end_after_seed():
+        await asyncio.sleep(0)
+        await backend.end_stream()
+
+    ender = asyncio.create_task(end_after_seed())
+    await run_kids_teacher_session(config=_config("lifecycle"), deps=deps)
+    await ender
+
+    assert hooks.start_calls == 1
+    assert hooks.stop_calls == 1
+
+
+async def test_mic_pump_stops_when_stop_event_triggers_session_end():
+    """When the outer stop_event wins, the pump still gets a clean shutdown."""
+    backend = FakeRealtimeBackend(scripted_events=[])
+    hooks = RecordingRuntimeHooks()
+
+    pump_stopped = asyncio.Event()
+
+    async def pump(handler, stop_event: asyncio.Event) -> None:
+        await stop_event.wait()
+        pump_stopped.set()
+
+    deps = KidsTeacherFlowDeps(
+        backend_factory=lambda: backend,
+        hooks_factory=lambda: hooks,
+        mic_pump_factory=pump,
+    )
+
+    stop_event = asyncio.Event()
+
+    async def trigger_stop():
+        await asyncio.sleep(0.01)
+        stop_event.set()
+
+    triggerer = asyncio.create_task(trigger_stop())
+    await run_kids_teacher_session(
+        config=_config("stop-mic"), deps=deps, stop_event=stop_event
+    )
+    await triggerer
+
+    assert pump_stopped.is_set()
+
+
 async def test_safety_allows_safe_child_input():
     """A safe topic passes through without fallback injection."""
     scripted = [

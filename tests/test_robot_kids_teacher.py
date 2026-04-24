@@ -48,3 +48,27 @@ def test_missing_openai_returns_exit_code_two(monkeypatch):
 
     exit_code = robot_kids_teacher.main(["--session-id", "test-session"])
     assert exit_code == 2
+
+
+def test_missing_reachy_mini_returns_exit_code_two(monkeypatch):
+    """If the Reachy SDK is absent, the CLI must bail with exit 2 — not
+    crash mid-setup and not leave a half-opened OpenAI websocket behind.
+    """
+    import robot_kids_teacher
+
+    def _blocked_import(name, *args, **kwargs):
+        if name == "reachy_mini" or name.startswith("reachy_mini."):
+            raise ImportError("reachy_mini not installed in test env")
+        return original_import(name, *args, **kwargs)
+
+    original_import = (
+        __builtins__["__import__"]
+        if isinstance(__builtins__, dict)
+        else __builtins__.__import__
+    )
+    monkeypatch.setattr("builtins.__import__", _blocked_import)
+    sys.modules.pop("reachy_mini", None)
+    sys.modules.pop("reachy_mini.utils", None)
+
+    exit_code = robot_kids_teacher.main(["--session-id", "test-session"])
+    assert exit_code == 2
