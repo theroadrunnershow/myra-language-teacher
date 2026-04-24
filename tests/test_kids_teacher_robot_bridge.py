@@ -11,9 +11,11 @@ import asyncio
 import sys
 import threading
 import time
+import types
 from typing import List, Optional, Tuple
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -30,6 +32,7 @@ if "reachy_mini.utils" not in sys.modules:
 from kids_teacher_flow import build_robot_hooks  # noqa: E402
 from kids_teacher_robot_bridge import (  # noqa: E402
     KidsTeacherRobotHooks,
+    _default_play_chunk,
     pump_microphone_to_backend,
 )
 from kids_teacher_types import (  # noqa: E402
@@ -60,6 +63,10 @@ class FakeRobotController:
 
     def idle(self) -> None:
         self.calls.append("idle")
+
+    def play_audio(self, samples, suppress_speak_anim: bool = False) -> None:
+        self.played_audio = samples
+        self.suppress_speak_anim = suppress_speak_anim
 
 
 class RecordingPlayChunk:
@@ -262,6 +269,41 @@ def test_playback_thread_drains_queued_chunks():
         assert recorder.chunks == [b"chunk-1", b"chunk-2"]
     finally:
         hooks.stop(timeout=1.0)
+
+
+def test_default_play_chunk_decodes_pcm16_and_resamples(monkeypatch):
+    robot = FakeRobotController()
+    robot.output_sample_rate = 16000
+
+    calls = {}
+
+    def fake_to_float32_audio(samples):
+        calls["to_float32_audio"] = np.array(samples, copy=True)
+        return samples.astype(np.float32) / 32767.0
+
+    def fake_resample_audio(samples, src_rate: int, dst_rate: int):
+        calls["resample"] = (np.array(samples, copy=True), src_rate, dst_rate)
+        return np.array([0.25, -0.25], dtype=np.float32)
+
+    fake_robot_teacher = types.SimpleNamespace(
+        _to_float32_audio=fake_to_float32_audio,
+        _resample_audio=fake_resample_audio,
+    )
+    monkeypatch.setitem(sys.modules, "robot_teacher", fake_robot_teacher)
+
+    audio_bytes = np.array([1000, -1000, 2000], dtype="<i2").tobytes()
+    _default_play_chunk(robot, audio_bytes, 24000)
+
+    np.testing.assert_array_equal(
+        calls["to_float32_audio"],
+        np.array([1000, -1000, 2000], dtype=np.int16),
+    )
+    assert calls["resample"][1:] == (24000, 16000)
+    np.testing.assert_array_equal(
+        robot.played_audio,
+        np.array([[0.25], [-0.25]], dtype=np.float32),
+    )
+    assert robot.suppress_speak_anim is True
 
 
 # ---------------------------------------------------------------------------

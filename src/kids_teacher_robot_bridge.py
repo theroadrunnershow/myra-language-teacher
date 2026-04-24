@@ -278,20 +278,25 @@ class KidsTeacherRobotHooks:
 
 
 def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: int) -> None:
-    """Default playback: decode assistant audio and push to the robot speaker.
+    """Default playback: decode assistant PCM16 audio and play it on the robot.
 
     Import ``robot_teacher`` helpers lazily so this module can be imported in
     environments where those helpers fail (e.g. missing ``pydub``/``ffmpeg``
     on a stripped-down test host).
     """
+    import numpy as np
+
     # Imported lazily: robot_teacher pulls numpy + scipy + pydub; tests that
     # don't touch playback should not pay that cost.
-    from robot_teacher import mp3_bytes_to_robot_samples  # local import
+    from robot_teacher import _resample_audio, _to_float32_audio  # local import
 
-    samples = mp3_bytes_to_robot_samples(
-        audio_bytes,
-        output_rate=getattr(robot_controller, "output_sample_rate", sample_rate),
-    )
+    pcm16 = np.frombuffer(audio_bytes, dtype="<i2")
+    samples = _to_float32_audio(pcm16)
+    samples = _resample_audio(
+        samples,
+        sample_rate,
+        getattr(robot_controller, "output_sample_rate", sample_rate),
+    ).reshape(-1, 1)
     robot_controller.play_audio(samples, suppress_speak_anim=True)
 
 
