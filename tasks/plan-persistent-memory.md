@@ -71,52 +71,94 @@ That's the entire v1 hot path.
 ## Writes
 
 The user's framing: memory is enriched only when the child or parent
-*asks* the robot to remember. Two phases:
+*asks* the robot to remember (e.g. "remember I love tigers"). A raw
+utterance isn't a clean memory entry — it needs deduping, filler-word
+stripping, third-person rewriting, and date-stamping. That conversion
+step uses a lightweight LLM. Three phases:
 
 **v1 — read-only / parent-curated.**
 The parent edits `~/.myra/memory.md` directly. The robot reads it on
-every session start. Ships immediately, no tool-use plumbing needed.
-This is genuinely useful on its own: a parent can seed the file with
-"her brother is Ahaan, she loves tigers" and the robot will reference
-those naturally for weeks.
+every session start. Ships immediately, no LLM conversion needed. This
+is genuinely useful on its own: a parent can seed the file with "her
+brother is Ahaan, she loves tigers" and the robot will reference those
+naturally for weeks.
 
-**v2 — robot-writable via a `remember` tool.**
-Gemini Live supports function calling. We declare:
+**v2 — end-of-session conversion via Ollama Cloud.**
+Once v1 is in use, add automatic enrichment. Mechanism:
 
-```python
-remember = FunctionDeclaration(
-    name="remember",
-    description=(
-        "Append a fact about the child to long-term memory. Call this "
-        "when the child or parent says 'remember that...' or shares "
-        "something the robot should know next time."
-    ),
-    parameters={"type": "object", "properties": {
-        "fact": {"type": "string", "description": "One-sentence fact."}
-    }, "required": ["fact"]},
-)
+1. **Collect** the session transcript. The realtime layer already emits
+   `publish_transcript` events with speaker + final-vs-partial flags
+   (`kids_teacher_realtime.py:319`); a small in-memory collector
+   subscribes for the duration of the session.
+2. **Real-time ack.** Add one sentence to `instructions.txt`:
+   > If the child or parent asks you to remember something, simply say
+   > "Got it, I'll remember!" — you don't need to do anything else.
+   The Live model handles conversational confirmation; the actual file
+   write is async.
+3. **At session end**, call **Ollama Cloud** (per project policy: any
+   non-WebRTC / non-Live-API calls go through Ollama Cloud) with:
+   - The current `~/.myra/memory.md` contents
+   - The full session transcript (final lines only, joined as plain
+     `Speaker: text` lines)
+   - A prompt like:
+     > Extract moments where the child or parent asked the robot to
+     > remember something. Return new facts as markdown bullets in the
+     > existing file's style (one fact per bullet, third person about
+     > the child, append `_(YYYY-MM-DD)_`). Skip facts already covered
+     > by existing memory. If nothing was asked to be remembered,
+     > return exactly `NONE`.
+4. **Append** the returned bullets to `memory.md` via the same atomic
+   write path used by manual edits.
 
-forget = FunctionDeclaration(
-    name="forget",
-    description="Remove a remembered fact by substring match.",
-    parameters={"type": "object", "properties": {
-        "fact_substring": {"type": "string"}
-    }, "required": ["fact_substring"]},
-)
-```
+Why end-of-session, not real-time per turn:
+- One LLM call per session is cheap and predictable.
+- The trigger detection ("did anyone ask to remember?") and the
+  conversion collapse into one LLM judgement — fewer moving parts
+  than a regex trigger plus a separate conversion call.
+- The child already got real-time acknowledgement from the Live model.
+- Avoids tying memory writes to Gemini Live's tool-calling path, which
+  doesn't exist on this codebase.
 
-Tool body: `memory_file.append(fact)` / `memory_file.remove(substring)`.
-File operation is `open(... "a")` plus a `flock`; on remove, read-modify-
-rewrite with atomic rename.
+Ollama Cloud wiring:
+- New env vars: `OLLAMA_API_KEY` (required to enable v2),
+  `OLLAMA_MODEL` (default to a small chat model — pick one that's
+  reliable for short JSON-ish extraction; document the choice in
+  `.env.example`), `OLLAMA_HOST` (default `https://ollama.com`).
+- New dep: `ollama` Python SDK (Cloud-compatible). Add to
+  `requirements.txt` so it's available on the Reachy host.
+- New module `src/memory_summarizer.py` — single public function
+  `summarize_session_to_memory(transcript: str, existing_memory: str)
+  -> str` that returns either `"NONE"` or one or more markdown
+  bullet lines.
+- v2 is **disabled when `OLLAMA_API_KEY` is unset** — v1 (parent-edit)
+  keeps working; the system never blocks a session on memory writes.
 
-Adds a small system-prompt nudge:
+Privacy note (be explicit):
+- Ollama Cloud is a *second* vendor beyond Google (which already gets
+  the live audio). Adding it means session transcripts are sent to
+  Ollama as well. The transcript is text-only (no raw audio), but
+  this is a real privacy widening. Worth confirming the parent is OK
+  with it before flipping `OLLAMA_API_KEY` on.
+- An optional v2.5 / future improvement: route through a local
+  Ollama instance on the Pi instead of Cloud (same SDK, just a
+  different `OLLAMA_HOST`). Defers until the Cloud path proves out
+  the UX.
 
-> If the child or parent says "remember that…", call the `remember` tool.
-> At the end of an interesting session, you may call it once to record a
-> notable fact (e.g. a new favourite, a milestone).
+Failure modes:
+- `OLLAMA_API_KEY` missing → skip v2 entirely, log info once at startup.
+- Network error / timeout → log warning, no file change. Acceptable;
+  parent can edit manually.
+- LLM hallucinates a fact → tight prompt + low temperature; parent can
+  delete the bullet from the file.
+- Empty / unremarkable transcript → returns `NONE`, nothing happens.
 
-This requires adding tool-use plumbing to the Gemini Live backend, which
-doesn't exist yet — a bounded but real change. v1 ships without it.
+**v3 — real-time tool-call enrichment.**
+*Only if v2 surfaces a real friction point* (e.g. parent wants to see
+the file update mid-conversation, or session-end conversion frequently
+misses things). Add `remember` / `forget` tools to the Gemini Live
+config; route `tool_call` events back to `memory_file`. This requires
+adding Live tool-use plumbing to the backend — a bounded but real
+change. Not on the v1/v2 path.
 
 ## Files to add / touch
 

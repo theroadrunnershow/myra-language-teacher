@@ -141,12 +141,24 @@ Checklist:
   to assert it shows up in the assembled session payload.
 - [ ] `High` v1: Soft 4 KB cap with a warning log when exceeded (parent
   prunes manually).
-- [ ] `Medium` v2: Add Gemini Live tool-use plumbing + declare `remember`
-  and `forget` function tools so the child/parent can say "remember
-  that…" and the robot writes it. Route `tool_call` events back to
-  `memory_file`. One-line nudge in `instructions.txt`. **Only after v1
-  has been used for a couple of weeks and parent-editing is genuinely
-  friction.**
+- [ ] `Medium` v2: One-sentence nudge in `instructions.txt` so the Live
+  model verbally acknowledges "remember…" requests in real time even
+  though the file write is async.
+- [ ] `Medium` v2: Session-transcript collector that subscribes to
+  `publish_transcript` events (`kids_teacher_realtime.py:319`), keeping
+  final lines in memory for the duration of the session.
+- [ ] `Medium` v2: `src/memory_summarizer.py` — calls **Ollama Cloud**
+  (per project policy: non-WebRTC / non-Live-API calls go through Ollama
+  Cloud) with the transcript + current memory, returns new markdown
+  bullets or `NONE`. New deps: `ollama` SDK, env vars `OLLAMA_API_KEY`,
+  `OLLAMA_MODEL`, `OLLAMA_HOST` (default `https://ollama.com`). Disabled
+  when `OLLAMA_API_KEY` is unset. Tests with a fake Ollama client.
+- [ ] `Medium` v2: Wire end-of-session call into `kids_teacher_flow` —
+  invoke summarizer, append result to `memory.md` via `memory_file`.
+  Failures log a warning, never block session shutdown.
+- [ ] `Low` v3: Real-time `remember` / `forget` tool-call enrichment
+  via Gemini Live tool-use plumbing. **Only if v2 surfaces a real
+  friction point.**
 
 ### Language Lesson Polish
 
