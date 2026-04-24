@@ -106,7 +106,7 @@ class KidsTeacherRealtimeHandler:
 
     async def interrupt(self) -> None:
         """User-initiated barge-in: flush assistant audio and cancel response."""
-        await self._cancel_active_response()
+        await self._cancel_active_response(reason="external_interrupt")
 
     async def stop(self) -> None:
         """Close the backend and emit an ENDED status event."""
@@ -186,7 +186,7 @@ class KidsTeacherRealtimeHandler:
     async def _on_speech_started(self) -> None:
         """Earliest barge-in signal from server-side VAD."""
         if self._assistant_active:
-            await self._cancel_active_response()
+            await self._cancel_active_response(reason="input.speech_started")
 
     async def _on_input_delta(self, event: dict) -> None:
         text = event.get("text", "") or ""
@@ -194,7 +194,7 @@ class KidsTeacherRealtimeHandler:
         # Barge-in: if the assistant is speaking and the child just started
         # producing transcript text, cancel the in-flight response.
         if self._assistant_active:
-            await self._cancel_active_response()
+            await self._cancel_active_response(reason="input_transcript.delta")
         self._publish_transcript(
             Speaker.CHILD, text, is_partial=True, language=language
         )
@@ -212,6 +212,7 @@ class KidsTeacherRealtimeHandler:
         # we flip state to SPEAKING.
         if not self._assistant_active:
             self._assistant_active = True
+            logger.info("[kids_teacher_realtime] assistant response started")
             self._publish_status(SessionStatus.SPEAKING)
         text = event.get("text", "") or ""
         self._publish_transcript(Speaker.ASSISTANT, text, is_partial=True)
@@ -241,6 +242,7 @@ class KidsTeacherRealtimeHandler:
             logger.warning("[kids_teacher_realtime] playback hook raised: %s", exc)
 
     def _on_response_done(self) -> None:
+        logger.info("[kids_teacher_realtime] response.done — turn complete")
         self._assistant_active = False
         self._drain_pending_audio()
         self._publish_status(SessionStatus.LISTENING)
@@ -264,7 +266,7 @@ class KidsTeacherRealtimeHandler:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _cancel_active_response(self) -> None:
+    async def _cancel_active_response(self, *, reason: str = "unspecified") -> None:
         """Cancel the in-flight assistant response and flush queued audio.
 
         Design decision: a fresh assistant response while one is active is
@@ -273,6 +275,10 @@ class KidsTeacherRealtimeHandler:
         point the handler is tracking at most one active assistant stream.
         """
         if self._assistant_active:
+            logger.info(
+                "[kids_teacher_realtime] cancelling active assistant response (reason=%s)",
+                reason,
+            )
             try:
                 await self._backend.cancel_response()
             except Exception as exc:
@@ -280,6 +286,11 @@ class KidsTeacherRealtimeHandler:
                     "[kids_teacher_realtime] cancel_response raised: %s", exc
                 )
             self._assistant_active = False
+        else:
+            logger.debug(
+                "[kids_teacher_realtime] _cancel_active_response no-op (reason=%s, not assistant_active)",
+                reason,
+            )
         self._drain_pending_audio()
         try:
             self._hooks.stop_assistant_playback()

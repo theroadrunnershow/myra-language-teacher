@@ -179,6 +179,9 @@ class GeminiRealtimeBackend:
         # events; we emit them around input_transcription arrivals so the
         # realtime handler's barge-in and status logic keep working.
         self._input_speech_active = False
+        # Trace-logging state: distinguishes the first post-connect send
+        # failure (likely keepalive timeout) from the subsequent spam.
+        self._send_failure_count = 0
 
     @property
     def model(self) -> str:
@@ -264,8 +267,16 @@ class GeminiRealtimeBackend:
             finished = bool(_attr(input_tx, "finished"))
             if text and not self._input_speech_active:
                 self._input_speech_active = True
+                logger.info(
+                    "[kids_teacher_gemini_backend] input_transcription: first delta of turn text=%r",
+                    text[:30],
+                )
                 events.append({"type": "input.speech_started"})
             if finished:
+                logger.info(
+                    "[kids_teacher_gemini_backend] input_transcription: finished text=%r",
+                    text[:60],
+                )
                 events.append(
                     {
                         "type": "input_transcript.final",
@@ -291,6 +302,10 @@ class GeminiRealtimeBackend:
             text = _attr(output_tx, "text") or ""
             finished = bool(_attr(output_tx, "finished"))
             if finished:
+                logger.info(
+                    "[kids_teacher_gemini_backend] output_transcription: finished text=%r",
+                    text[:60],
+                )
                 events.append(
                     {
                         "type": "assistant_transcript.final",
@@ -334,6 +349,7 @@ class GeminiRealtimeBackend:
 
         # Turn complete → response.done.
         if _attr(server_content, "turn_complete"):
+            logger.info("[kids_teacher_gemini_backend] turn_complete received")
             # Flush any dangling speech_started state on end-of-turn.
             if self._input_speech_active:
                 events.append({"type": "input.speech_stopped"})
@@ -344,7 +360,9 @@ class GeminiRealtimeBackend:
         # We don't emit a dedicated event; the handler already manages barge-in
         # via input.speech_started. Logged for diagnostic parity only.
         if _attr(server_content, "interrupted"):
-            logger.debug("[kids_teacher_gemini_backend] server reported interrupt")
+            logger.info(
+                "[kids_teacher_gemini_backend] server reported interrupted=True"
+            )
 
         return events
 
@@ -357,7 +375,19 @@ class GeminiRealtimeBackend:
                 audio=self._types_module.Blob(data=chunk, mime_type=GEMINI_INPUT_MIME)
             )
         except Exception as exc:  # pragma: no cover - integration path
-            logger.warning("[kids_teacher_gemini_backend] send_audio failed: %s", exc)
+            self._send_failure_count += 1
+            if self._send_failure_count == 1:
+                logger.warning(
+                    "[kids_teacher_gemini_backend] Gemini Live session dropped "
+                    "(first send failure — likely keepalive timeout or server disconnect): %s",
+                    exc,
+                )
+            else:
+                logger.warning(
+                    "[kids_teacher_gemini_backend] send_audio failed (#%d, session still dead): %s",
+                    self._send_failure_count,
+                    exc,
+                )
             await self._event_queue.put({"type": "error", "message": str(exc)})
 
     async def send_text(self, text: str) -> None:
@@ -392,12 +422,16 @@ class GeminiRealtimeBackend:
         """
         if self._session is None:
             return
+        logger.info("[kids_teacher_gemini_backend] cancel_response invoked")
         try:
             # ``send_realtime_input`` accepts audio_stream_end=True as the
             # flush signal. Fall back gracefully if the SDK shape differs.
             send = self._session.send_realtime_input
             try:
                 await send(audio_stream_end=True)
+                logger.info(
+                    "[kids_teacher_gemini_backend] sent audio_stream_end=True to Gemini Live"
+                )
             except TypeError:
                 # Older SDK variants do not accept the kwarg; best-effort no-op.
                 logger.debug(
