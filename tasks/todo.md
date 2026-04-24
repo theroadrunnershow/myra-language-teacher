@@ -108,6 +108,46 @@ Design doc: [tasks/face-recognition-design.md](face-recognition-design.md)
 - [ ] Run full test suite — confirm all tests pass
 - [ ] On-Pi verification — enroll, verify, run full session
 
+### Persistent Memory ("Robot That Remembers Myra")
+Design doc: [tasks/plan-persistent-memory.md](plan-persistent-memory.md)
+
+Goal: kids-teacher flow on Reachy Mini remembers things about Myra across
+sessions — her brother's name, that she loves tigers, the inside joke from
+yesterday.
+
+Scope: **Reachy-only, kids-teacher only, single child per device.** Memory
+is *only* enriched when a human asks (parent edits the file, or — in v2 —
+the child/parent says "remember that…" and the LLM calls a tool). Memory
+is **not** the same as mastery tracking; spaced repetition is a separate
+deferred feature.
+
+Key design choices (see plan doc):
+- **One markdown file** at `~/.myra/memory.md` (override via
+  `MYRA_MEMORY_FILE`). The file *is* the system-prompt preamble.
+- **Parent-readable, parent-editable.** `cat`/`vim` covers privacy + audit
+  + delete; no admin routes needed.
+- **No DB, no schema, no episode log, no summarizer, no cron.**
+- **Integration is one concat** into the existing `instructions` string
+  built by `kids_teacher_profile.py` and consumed at
+  `kids_teacher_gemini_backend.py:140`.
+
+Checklist:
+
+- [ ] `High` v1: `src/memory_file.py` — `read()`, `append(fact)`,
+  `remove(substring)`. Atomic write (tempfile + `os.replace`), `flock` on
+  append, missing-file → empty. ~50 lines + tests.
+- [ ] `High` v1: Concat memory text into `instructions` in
+  `kids_teacher_profile.py`. Extend `tests/test_kids_teacher_profile.py`
+  to assert it shows up in the assembled session payload.
+- [ ] `High` v1: Soft 4 KB cap with a warning log when exceeded (parent
+  prunes manually).
+- [ ] `Medium` v2: Add Gemini Live tool-use plumbing + declare `remember`
+  and `forget` function tools so the child/parent can say "remember
+  that…" and the robot writes it. Route `tool_call` events back to
+  `memory_file`. One-line nudge in `instructions.txt`. **Only after v1
+  has been used for a couple of weeks and parent-editing is genuinely
+  friction.**
+
 ### Language Lesson Polish
 
 - [ ] Add celebratory jingles
