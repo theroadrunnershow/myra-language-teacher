@@ -268,25 +268,52 @@ pip install -r requirements.txt
 
 ### Run a kids-teacher session
 
-**Web (status-only page):** the FastAPI app exposes a minimal dashboard. Start the server as usual, then visit:
+There are two startup paths: a FastAPI dashboard that runs on your dev laptop, and a headless CLI that runs the live realtime conversation on the Reachy Mini / Pi. The dashboard does **not** start a conversation — it only surfaces config and review state. They are independent processes; start whichever one(s) you need.
 
-```
-http://localhost:8000/kids-teacher
-```
-
-This page shows the current model, enabled languages, default language, voice, and (when review is enabled) recent sessions. It does **not** run a live conversation in the browser — the realtime session runs on the robot.
-
-**Headless / robot:**
+#### A. Web dashboard on your dev laptop (status only)
 
 ```bash
-# On the Reachy Mini (or any host with OPENAI_API_KEY set and the openai SDK installed)
-export OPENAI_API_KEY=sk-...
-PYTHONPATH=src python src/robot_kids_teacher.py \
-  --session-id session-2026-04-23-a \
-  --max-seconds 900
+# From the repo root on your laptop
+source venv/bin/activate
+export OPENAI_API_KEY=sk-...                          # required — the page reads model/profile from config
+# Optional — enable review listing on the dashboard:
+# export KIDS_REVIEW_TRANSCRIPTS_ENABLED=true
+
+PYTHONPATH=src python src/main.py                     # serves on http://localhost:8000
 ```
 
-If `openai` is not importable, the entry script exits cleanly with code `2` rather than crashing. The realtime session uses the robot's microphone and speaker via `kids_teacher_robot_bridge.py`.
+Then open **[http://localhost:8000/kids-teacher](http://localhost:8000/kids-teacher)**. The page shows the current model, enabled languages, default language, voice, and (when review is enabled) recent sessions.
+
+#### B. Live session on the Reachy Mini / Pi (headless)
+
+**B1. One-time install on the Pi.** SSH in (`ssh pollen@reachy-mini.local`), clone the repo, then install the full dependency set — kids-teacher needs both files because `requirements.txt` provides `openai` and `requirements-robot.txt` provides the Reachy Mini SDK + audio I/O used by the robot bridge:
+
+```bash
+# On the Pi, inside the repo directory
+sudo apt install -y ffmpeg                            # once per Pi image
+python3 -m venv /home/pollen/myra-venv
+source /home/pollen/myra-venv/bin/activate
+pip install -r requirements.txt -r requirements-robot.txt
+```
+
+**B2. Set the API key.** Either export it in the shell you'll run from, or add it to `/home/pollen/myra-language-teacher/.env` so the entry script picks it up via `env_loader`:
+
+```bash
+export OPENAI_API_KEY=sk-...
+```
+
+**B3. Start the session on the Pi.** No FastAPI server is required — the CLI connects to OpenAI Realtime directly and drives the robot's mic + speaker via `kids_teacher_robot_bridge.py`:
+
+```bash
+source /home/pollen/myra-venv/bin/activate
+cd /home/pollen/myra-language-teacher
+
+PYTHONPATH=src python src/robot_kids_teacher.py \
+  --session-id session-2026-04-23-a \                 # optional; defaults to a fresh UUID
+  --max-seconds 900                                   # optional; no cap when omitted
+```
+
+If `openai` is not importable, the script exits cleanly with code `2` rather than crashing. The same command also works on any non-robot host that has a mic + speaker, `OPENAI_API_KEY`, and `openai` installed — useful for smoke-testing off the robot.
 
 ### Configuration (env vars)
 
