@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from collections import deque
 from typing import Any, Callable, Deque, Optional
 
@@ -360,6 +361,15 @@ async def pump_microphone_to_backend(
     read = _resolve_mic_reader(mic_source)
     chunk_duration_ms = max(1, int(chunk_duration_ms))
 
+    # Periodic heartbeat — proves the pump is still running and shows
+    # whether audio frames are actually flowing to the backend after
+    # each turn. Every 2s we report send/none counts since the last
+    # heartbeat, then reset the counters.
+    chunks_sent = 0
+    none_reads = 0
+    last_heartbeat = time.monotonic()
+    heartbeat_interval = 2.0
+
     while True:
         if stop_event is not None and stop_event.is_set():
             return
@@ -372,9 +382,22 @@ async def pump_microphone_to_backend(
             logger.warning("[kids_teacher_robot_bridge] mic_source raised: %s", exc)
             return
 
+        now = time.monotonic()
+        if now - last_heartbeat >= heartbeat_interval:
+            logger.info(
+                "[kids_teacher_robot_bridge] mic pump heartbeat: sent=%d none=%d (last %.1fs)",
+                chunks_sent,
+                none_reads,
+                heartbeat_interval,
+            )
+            chunks_sent = 0
+            none_reads = 0
+            last_heartbeat = now
+
         if chunk is None:
             # No frame ready yet — yield to the loop so the websocket reader
             # and keepalive can make progress, then poll again.
+            none_reads += 1
             await asyncio.sleep(0.01)
             continue
 
@@ -389,6 +412,7 @@ async def pump_microphone_to_backend(
                 "[kids_teacher_robot_bridge] handler.push_audio raised: %s", exc
             )
             return
+        chunks_sent += 1
 
         # Yield to the event loop so this coroutine plays nicely with the
         # realtime handler's own run() loop. No sleep — pacing is driven by

@@ -239,10 +239,15 @@ class GeminiRealtimeBackend:
                 for normalized in self._normalize_message(raw_message):
                     await self._event_queue.put(normalized)
         except asyncio.CancelledError:
+            logger.info("[kids_teacher_gemini_backend] reader loop cancelled")
             raise
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_gemini_backend] reader loop error: %s", exc)
             await self._event_queue.put({"type": "error", "message": str(exc)})
+        else:
+            logger.info(
+                "[kids_teacher_gemini_backend] reader loop ended (session.receive() completed)"
+            )
 
     def _normalize_message(self, raw_message: Any) -> list[dict]:
         """Map one raw ``LiveServerMessage`` to zero-or-more normalized events.
@@ -254,6 +259,14 @@ class GeminiRealtimeBackend:
         events: list[dict] = []
         server_content = _attr(raw_message, "server_content")
         if server_content is None:
+            # Log non-server_content messages so we can spot go_away,
+            # session_resumption_update, tool_call, or other signals we
+            # might be silently ignoring.
+            present = _summarize_top_level_fields(raw_message)
+            logger.info(
+                "[kids_teacher_gemini_backend] non-server_content message: fields=%s",
+                present,
+            )
             return events
 
         # Input transcription (child speech). We synthesize
@@ -346,6 +359,12 @@ class GeminiRealtimeBackend:
                         )
                         continue
                 events.append({"type": "audio.chunk", "audio": data})
+
+        # Generation complete is a distinct signal from turn_complete:
+        # the model has finished producing this response but the turn is
+        # still open for more user audio. Surface it for diagnosis.
+        if _attr(server_content, "generation_complete"):
+            logger.info("[kids_teacher_gemini_backend] generation_complete received")
 
         # Turn complete → response.done.
         if _attr(server_content, "turn_complete"):
@@ -462,6 +481,31 @@ class GeminiRealtimeBackend:
             yield event
             if event.get("type") == "response.done" and self._closed:
                 return
+
+
+_TOP_LEVEL_LIVE_MESSAGE_FIELDS: tuple[str, ...] = (
+    "setup_complete",
+    "server_content",
+    "tool_call",
+    "tool_call_cancellation",
+    "go_away",
+    "session_resumption_update",
+    "usage_metadata",
+)
+
+
+def _summarize_top_level_fields(raw_message: Any) -> str:
+    """Return a short string listing which known top-level fields are set.
+
+    Used only for diagnostic logging of non-server_content Gemini Live
+    messages — do not read values, just field presence.
+    """
+    present = [
+        name
+        for name in _TOP_LEVEL_LIVE_MESSAGE_FIELDS
+        if _attr(raw_message, name) is not None
+    ]
+    return ",".join(present) if present else "(no known fields)"
 
 
 def _attr(obj: Any, name: str) -> Any:
