@@ -128,6 +128,127 @@ def test_prime_speaker_is_idempotent(monkeypatch):
     assert len(mini.media.pushed_samples) == 1
 
 
+def test_play_audio_streaming_has_no_tail_sleep_or_speak_kick(monkeypatch):
+    """Streaming path must not sleep between chunks or re-trigger the speak
+    animation — those are the bugs the one-shot play_audio path caused when
+    used for Realtime deltas."""
+    mini = _FakeMini(sample_rate=16000)
+    controller = RobotController(mini)
+
+    sleep_calls: list[float] = []
+    speak_calls: list[int] = []
+    monkeypatch.setattr(
+        "robot_teacher.time.sleep",
+        lambda duration, *a, **kw: sleep_calls.append(duration),
+    )
+    monkeypatch.setattr(controller, "speak", lambda: speak_calls.append(1))
+    monkeypatch.setattr(controller, "_stop_background", lambda: None)
+
+    # Prime once to isolate the per-chunk sleep budget from the 0.30s
+    # priming sleep (which is a one-time cost, not part of the streaming
+    # critical path).
+    controller.prime_speaker()
+    sleep_calls.clear()
+
+    chunk = np.ones((800, 1), dtype=np.float32) * 0.1
+    controller.play_audio_streaming(chunk)
+    controller.play_audio_streaming(chunk)
+    controller.play_audio_streaming(chunk)
+
+    # All three chunks reach the sink.
+    assert len(mini.media.pushed_samples) == 4  # 1 priming + 3 chunks
+    # Zero per-chunk sleeps: GStreamer paces playback, we don't.
+    assert sleep_calls == []
+    # And no speak() animation kicks from the streaming path — the bridge
+    # owns that transition.
+    assert speak_calls == []
+
+
+def test_flush_output_audio_invokes_backend_flush(monkeypatch):
+    """Barge-in flush must reach the backend's flush primitive so audio
+    already queued in the appsrc is dropped."""
+
+    class _MediaWithClearPlayer:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def get_output_audio_samplerate(self) -> int:
+            return 16000
+
+        def push_audio_sample(self, samples) -> None:  # pragma: no cover
+            pass
+
+        def clear_player(self) -> None:
+            self.clear_calls += 1
+
+    class _MiniWithFlush:
+        def __init__(self) -> None:
+            self.media = _MediaWithClearPlayer()
+
+    mini = _MiniWithFlush()
+    controller = RobotController(mini)
+
+    controller.flush_output_audio()
+
+    assert mini.media.clear_calls == 1
+
+
+def test_flush_output_audio_probes_nested_audio_attr():
+    """MediaManager does not forward clear_player on all SDK versions —
+    the flush probe must also check media.audio.clear_player."""
+
+    class _GStreamerLikeAudio:
+        def __init__(self) -> None:
+            self.clear_calls = 0
+
+        def clear_player(self) -> None:
+            self.clear_calls += 1
+
+    class _MediaManagerLike:
+        def __init__(self) -> None:
+            self.audio = _GStreamerLikeAudio()
+
+        def get_output_audio_samplerate(self) -> int:
+            return 16000
+
+        def push_audio_sample(self, samples) -> None:  # pragma: no cover
+            pass
+
+    class _Mini:
+        def __init__(self) -> None:
+            self.media = _MediaManagerLike()
+
+    mini = _Mini()
+    controller = RobotController(mini)
+
+    controller.flush_output_audio()
+
+    assert mini.media.audio.clear_calls == 1
+
+
+def test_flush_output_audio_is_noop_when_backend_missing_primitive(caplog):
+    """If the backend exposes neither clear_player nor clear_output_buffer,
+    flush_output_audio must degrade silently — it is a best-effort call on
+    the barge-in path and must not raise."""
+
+    class _MediaNoFlush:
+        def get_output_audio_samplerate(self) -> int:
+            return 16000
+
+        def push_audio_sample(self, samples) -> None:  # pragma: no cover
+            pass
+
+    class _Mini:
+        def __init__(self) -> None:
+            self.media = _MediaNoFlush()
+
+    mini = _Mini()
+    controller = RobotController(mini)
+
+    # Must not raise.
+    controller.flush_output_audio()
+
+
 def test_resolve_server_url_supports_cloud_and_local():
     assert resolve_server_url("cloud") == CLOUD_SERVER_URL
     assert resolve_server_url("reachy_local") == LOCAL_SERVER_URL

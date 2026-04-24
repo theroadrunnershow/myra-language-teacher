@@ -804,6 +804,44 @@ class RobotController:
         if not suppress_speak_anim:
             self._stop_background()
 
+    def play_audio_streaming(self, samples: np.ndarray) -> None:
+        """Push one streamed audio chunk without any per-chunk wait.
+
+        Intended for the Realtime (Gemini/OpenAI) path. Unlike play_audio():
+        no tail sleep (push_audio_sample is non-blocking on GStreamer —
+        appsrc queues, sink clock paces), no speak() kick (bridge handles
+        it once per turn), no _stop_background() (bridge manages animation
+        lifecycle via speak/listen transitions). Priming stays idempotent.
+        """
+        self.prime_speaker()
+        self._mini.media.push_audio_sample(samples)
+
+    def flush_output_audio(self) -> None:
+        """Drop any audio already queued in the speaker pipeline.
+
+        Used by barge-in. Clearing the bridge's software deque is not
+        enough: push_audio_sample() is non-blocking and the appsrc may
+        already hold several seconds of audio that have been pushed but not
+        yet played. Probe clear_player (GStreamer: pause → flush → play)
+        first, falling back to the base clear_output_buffer if the backend
+        exposes it under that name.
+        """
+        media = getattr(self._mini, "media", None)
+        if media is None:
+            return
+        flush = (
+            getattr(media, "clear_player", None)
+            or getattr(getattr(media, "audio", None), "clear_player", None)
+            or getattr(media, "clear_output_buffer", None)
+        )
+        if not callable(flush):
+            logger.debug("flush_output_audio: no flush primitive available; skipping")
+            return
+        try:
+            flush()
+        except Exception as exc:
+            logger.warning("flush_output_audio: flush raised: %s", exc)
+
 
 # ── Celebration jingle ─────────────────────────────────────────────────────────
 

@@ -54,6 +54,11 @@ class FakeRobotController:
     def __init__(self) -> None:
         self.calls: List[str] = []
         self.output_sample_rate = 24000
+        self.prime_calls = 0
+        self.streamed_audio = None
+        self.played_audio = None
+        self.suppress_speak_anim: Optional[bool] = None
+        self.flush_calls = 0
 
     def listen(self) -> None:
         self.calls.append("listen")
@@ -64,9 +69,23 @@ class FakeRobotController:
     def idle(self) -> None:
         self.calls.append("idle")
 
+    def prime_speaker(self) -> None:
+        self.prime_calls += 1
+        self.calls.append("prime_speaker")
+
     def play_audio(self, samples, suppress_speak_anim: bool = False) -> None:
+        # Retained for any legacy call-sites; the streaming bridge path
+        # should prefer play_audio_streaming().
         self.played_audio = samples
         self.suppress_speak_anim = suppress_speak_anim
+
+    def play_audio_streaming(self, samples) -> None:
+        self.streamed_audio = samples
+        self.calls.append("play_audio_streaming")
+
+    def flush_output_audio(self) -> None:
+        self.flush_calls += 1
+        self.calls.append("flush_output_audio")
 
 
 class RecordingPlayChunk:
@@ -299,11 +318,76 @@ def test_default_play_chunk_decodes_pcm16_and_resamples(monkeypatch):
         np.array([1000, -1000, 2000], dtype=np.int16),
     )
     assert calls["resample"][1:] == (24000, 16000)
+    # Decoded samples must reach the robot via the STREAMING path so they
+    # concatenate without the 150ms tail sleep imposed by play_audio.
     np.testing.assert_array_equal(
-        robot.played_audio,
+        robot.streamed_audio,
         np.array([[0.25], [-0.25]], dtype=np.float32),
     )
-    assert robot.suppress_speak_anim is True
+    # One-shot play_audio must NOT be used for streaming deltas.
+    assert robot.played_audio is None
+
+
+def test_bridge_start_primes_speaker_eagerly():
+    """Priming at bridge.start() means the first audible delta doesn't pay
+    the ~0.3s warmup cost on the critical path."""
+    hooks, robot, _ = _make_hooks()
+
+    hooks.start()
+    try:
+        assert robot.prime_calls == 1
+    finally:
+        hooks.stop(timeout=1.0)
+
+
+def test_stop_assistant_playback_flushes_speaker_pipeline():
+    """Barge-in must flush audio already queued in the speaker sink, not
+    just the bridge-level deque — otherwise the child hears the tail of
+    the assistant response for several seconds after interrupting."""
+    hooks, robot, _ = _make_hooks()
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.stop_assistant_playback()
+
+    assert robot.flush_calls == 1
+    # Flush must happen before returning to listen so the animation state
+    # transition lines up with actual silence.
+    flush_idx = robot.calls.index("flush_output_audio")
+    listen_idx = robot.calls.index("listen")
+    assert flush_idx < listen_idx
+
+
+def test_stop_assistant_playback_tolerates_controller_without_flush():
+    """Backwards-safe: if a controller (e.g. an older stub) does not
+    expose flush_output_audio, stop_assistant_playback must still return
+    cleanly and still transition to listen."""
+
+    class ControllerWithoutFlush:
+        def __init__(self) -> None:
+            self.calls: List[str] = []
+            self.output_sample_rate = 24000
+
+        def listen(self) -> None:
+            self.calls.append("listen")
+
+        def speak(self) -> None:
+            self.calls.append("speak")
+
+        def prime_speaker(self) -> None:
+            self.calls.append("prime_speaker")
+
+    robot = ControllerWithoutFlush()
+    recorder = RecordingPlayChunk()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        sample_rate=24000,
+        play_chunk=recorder,
+    )
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.stop_assistant_playback()  # must not raise
+
+    assert "listen" in robot.calls
 
 
 # ---------------------------------------------------------------------------

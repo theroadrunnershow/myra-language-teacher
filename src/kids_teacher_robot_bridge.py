@@ -125,6 +125,16 @@ class KidsTeacherRobotHooks:
             return
         self._stop_flag.clear()
         self._chunk_available.clear()
+        # Warm up the speaker now (idempotent) so the first delta is not
+        # delayed by the ~0.3s priming sleep inside play_audio_streaming.
+        prime = getattr(self._robot, "prime_speaker", None)
+        if callable(prime):
+            try:
+                prime()
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] prime_speaker raised: %s", exc
+                )
         self._thread = threading.Thread(
             target=self._playback_loop,
             name="kids-teacher-robot-playback",
@@ -173,12 +183,18 @@ class KidsTeacherRobotHooks:
     def stop_assistant_playback(self) -> None:
         """Flush queued audio and restore the listening animation.
 
-        Called on barge-in. Must not block the caller.
+        Called on barge-in. Must not block the caller. Clears both the
+        bridge-level deque (chunks not yet handed to the sink) AND the
+        speaker pipeline itself (chunks already pushed into the appsrc
+        queue but not yet audible). Without the second step, the child
+        would keep hearing the tail of the assistant response for several
+        seconds after interrupting.
         """
         with self._queue_lock:
             self._queue.clear()
         with self._speaking_lock:
             self._speaking_active = False
+        self._safe_call("flush_output_audio")
         self._safe_call("listen")
 
     def publish_transcript(self, event: KidsTranscriptEvent) -> None:
@@ -278,11 +294,13 @@ class KidsTeacherRobotHooks:
 
 
 def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: int) -> None:
-    """Default playback: decode assistant PCM16 audio and play it on the robot.
+    """Default playback: decode assistant PCM16 audio and push it into the
+    robot's streaming speaker path.
 
-    Import ``robot_teacher`` helpers lazily so this module can be imported in
-    environments where those helpers fail (e.g. missing ``pydub``/``ffmpeg``
-    on a stripped-down test host).
+    Uses ``play_audio_streaming`` (not ``play_audio``) so back-to-back deltas
+    concatenate without the per-chunk tail sleep that one-shot playback
+    imposes. Import ``robot_teacher`` helpers lazily so this module stays
+    importable on stripped-down test hosts (no ``pydub``/``ffmpeg``).
     """
     import numpy as np
 
@@ -297,7 +315,7 @@ def _default_play_chunk(robot_controller: Any, audio_bytes: bytes, sample_rate: 
         sample_rate,
         getattr(robot_controller, "output_sample_rate", sample_rate),
     ).reshape(-1, 1)
-    robot_controller.play_audio(samples, suppress_speak_anim=True)
+    robot_controller.play_audio_streaming(samples)
 
 
 # ----------------------------------------------------------------------
