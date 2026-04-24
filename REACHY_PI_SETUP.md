@@ -92,10 +92,7 @@ This gives you:
 
 - `reachy-mini`
 - `requests`
-- `numpy`
-- `scipy`
-- `pydub`
-- `soundfile`
+- the shared runtime/audio stack from `requirements-common.txt` (`numpy`, `scipy`, `pydub`, `python-dotenv`)
 
 #### `reachy_local`
 

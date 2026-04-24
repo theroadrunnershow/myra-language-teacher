@@ -1,15 +1,14 @@
+-r requirements-common.txt
+
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
 jinja2==3.1.4
 faster-whisper>=1.1.0
 gTTS==2.5.3
-pydub==0.25.1
-python-dotenv==1.0.1
 aiofiles==24.1.0
 rapidfuzz==3.10.1
 noisereduce==3.0.3
-scipy>=1.13.1
 google-cloud-translate==3.15.5
 google-cloud-storage==2.19.0
 indic-transliteration==2.3.64

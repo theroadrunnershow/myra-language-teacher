@@ -103,7 +103,8 @@ pip install -r requirements.txt -r requirements-robot.txt
 
 | File                     | Purpose                                                                                                                                         |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| `requirements-robot.txt` | Reachy Mini SDK (wireless), `soundfile` (WAV I/O), `requests` (HTTP to Myra API). Install **in addition to** `requirements.txt` for robot mode. |
+| `requirements-common.txt` | Shared runtime/audio deps used by both the FastAPI app and the robot scripts (`numpy`, `scipy`, `pydub`, `python-dotenv`). |
+| `requirements-robot.txt` | Reachy Mini SDK + `requests` only. It pulls in `requirements-common.txt`, so `pip install -r requirements-robot.txt` still works for cloud-mode Pi installs. |
 | `src/robot_teacher.py`   | Drives the lesson loop on the Pi: starts the Myra server on port 8765, uses robot mics/speaker, and calls `/api/recognize` and `/api/tts`.      |
 | `tests/test_bridge.py`   | Verifies audio bridge (mic → WAV → API) and TTS without the robot attached. Run with the server already running on port 8765.                   |
 
@@ -286,7 +287,7 @@ Then open **[http://localhost:8000/kids-teacher](http://localhost:8000/kids-teac
 
 #### B. Live session on the Reachy Mini / Pi (headless)
 
-**B1. One-time install on the Pi.** SSH in (`ssh pollen@reachy-mini.local`), clone the repo, then install the full dependency set — kids-teacher needs both files because `requirements.txt` provides `openai` and `requirements-robot.txt` provides the Reachy Mini SDK + audio I/O used by the robot bridge:
+**B1. One-time install on the Pi.** SSH in (`ssh pollen@reachy-mini.local`), clone the repo, then install the full dependency set — `requirements.txt` provides the OpenAI + server-side packages, while `requirements-robot.txt` adds the Reachy-specific layer on top of the shared runtime/audio packages in `requirements-common.txt`:
 
 ```bash
 # On the Pi, inside the repo directory
@@ -562,9 +563,10 @@ myra-language-teacher/
 │       ├── instructions.txt         # Locked preschool persona (required)
 │       ├── tools.txt                # Tool allowlist (empty in V1)
 │       └── voice.txt                # OpenAI Realtime voice name
-├── requirements.txt                 # Includes openai>=1.59.0 for kids-teacher
+├── requirements-common.txt          # Shared runtime/audio deps for app + robot scripts
+├── requirements.txt                 # App/server deps, including openai>=1.59.0 for kids-teacher
 ├── requirements-dev.txt             # Test dependencies (pytest, httpx, anyio)
-├── requirements-robot.txt           # Robot mode deps (Reachy Mini, soundfile, requests)
+├── requirements-robot.txt           # Robot-only overlay (Reachy Mini SDK + requests)
 ├── Dockerfile                       # GCP Cloud Run image (Python 3.11-slim + ffmpeg + pre-cached Whisper model)
 ├── pytest.ini
 ├── templates/

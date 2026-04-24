@@ -1,0 +1,8 @@
+# Shared runtime/audio dependencies used by both the FastAPI app and the
+# Reachy Mini robot scripts.
+
+numpy>=1.24.0
+pydub==0.25.1
+python-dotenv==1.0.1
+scipy>=1.13.1
+audioop-lts>=0.2.1; python_version >= "3.13"
