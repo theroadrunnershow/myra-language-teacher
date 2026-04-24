@@ -9,7 +9,7 @@
    dino: null  sentinel → keep original inline HTML, no swap.
 ═══════════════════════════════════════════════════════ */
 
-const MASCOTS = {
+window.MASCOTS = {
 
   dino: null,   // keep the original inline dino SVG
 

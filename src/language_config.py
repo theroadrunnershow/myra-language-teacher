@@ -20,11 +20,3 @@ ROMANIZATION_KEYS = {
     "tamil": "tam_roman",
     "malayalam": "mal_roman",
 }
-
-LANGUAGE_LABELS = {
-    "telugu": "Telugu",
-    "assamese": "Assamese",
-    "tamil": "Tamil",
-    "malayalam": "Malayalam",
-    "english": "English",
-}
