@@ -90,6 +90,17 @@ REDIRECT_CATEGORIES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Visual-redirect backstop (SR-KID-3): if the assistant verbally names a
+# camera-visible object that is not safe for young children, route to the
+# REDIRECT path. The locked profile already instructs the model to refuse
+# describing these; this set is a defense-in-depth keyword filter on the
+# assistant transcript.
+VISUAL_REDIRECT_KEYWORDS: tuple[str, ...] = (
+    "medication", "alcohol", "weapon", "gun", "knife", "lighter", "matches",
+    "pills",
+)
+
+
 # Family-safe answer copy for each approved category.
 FAMILY_SAFE_TEXT: dict[str, str] = {
     "reproduction": (
