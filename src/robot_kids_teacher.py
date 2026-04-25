@@ -153,17 +153,69 @@ async def _run_session_async(
     robot_controller: Any,
     mic_reader: Callable[[], Optional[bytes]],
     provider: str,
+    camera_worker: Any,
 ) -> None:
     from kids_teacher_flow import build_robot_hooks
 
     hooks = build_robot_hooks(robot_controller)
     backend_factory = _build_backend_factory(provider)
+    video_pump_factory = (
+        _make_video_pump_factory(camera_worker)
+        if camera_worker is not None
+        else None
+    )
     deps = KidsTeacherFlowDeps(
         backend_factory=backend_factory,
         hooks_factory=lambda: hooks,
         mic_pump_factory=_make_mic_pump_factory(mic_reader),
+        video_pump_factory=video_pump_factory,
     )
     await run_kids_teacher_session(config=config, deps=deps)
+
+
+def _make_video_pump_factory(
+    camera_worker: Any,
+) -> Callable[[Any, asyncio.Event], Awaitable[None]]:
+    """Return a coroutine factory that streams JPEG frames at ~1 fps.
+
+    Lifted from Pollen's ``_video_sender_loop``: poll
+    ``camera_worker.get_latest_frame()`` every 1 s, encode via
+    :func:`encode_bgr_frame_as_jpeg`, and forward through
+    ``handler.push_video(...)``. Each tick checks the stop event AND the
+    handler's ``session_active`` so frames are dropped pre-connect and
+    post-teardown. Encode/send failures are debug-logged and swallowed —
+    never fatal (NFR-4 / design §1 "Error handling"). Frames are NEVER
+    written to disk.
+    """
+    from kids_teacher_camera import encode_bgr_frame_as_jpeg
+
+    async def _pump(handler: Any, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                if handler.session_active:
+                    frame = camera_worker.get_latest_frame()
+                    if frame is not None:
+                        try:
+                            jpeg = encode_bgr_frame_as_jpeg(frame)
+                            await handler.push_video(jpeg)
+                        except Exception:
+                            logger.debug(
+                                "[robot_kids_teacher] video send failed",
+                                exc_info=True,
+                            )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.debug(
+                    "[robot_kids_teacher] video sender tick raised",
+                    exc_info=True,
+                )
+            try:
+                await asyncio.sleep(1.0)
+            except asyncio.CancelledError:
+                raise
+
+    return _pump
 
 
 def _build_backend_factory(provider: str) -> Callable[[], Any]:
@@ -248,13 +300,33 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             mini.media.start_playing()
             mini.media.start_recording()
+            # Camera worker is process-lifetime: started before Gemini
+            # connects, stopped in the outer finally. The per-session
+            # video task lives inside run_kids_teacher_session and is
+            # cancelled there. Provider gate (FR-KID-1): no worker spawned
+            # when provider=openai.
+            camera_worker = _maybe_start_camera_worker(mini, provider)
             try:
                 robot_controller = RobotController(mini)
                 mic_reader = _build_mic_reader(mini, mic_rate, target_rate)
                 asyncio.run(
-                    _run_session_async(config, robot_controller, mic_reader, provider)
+                    _run_session_async(
+                        config,
+                        robot_controller,
+                        mic_reader,
+                        provider,
+                        camera_worker,
+                    )
                 )
             finally:
+                if camera_worker is not None:
+                    try:
+                        camera_worker.stop()
+                    except Exception as exc:
+                        logger.warning(
+                            "[robot_kids_teacher] camera_worker.stop: %s",
+                            exc,
+                        )
                 try:
                     mini.media.stop_recording()
                 except Exception as exc:
@@ -271,6 +343,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.info("[robot_kids_teacher] interrupted by user")
         return 0
     return 0
+
+
+def _maybe_start_camera_worker(mini: Any, provider: str) -> Any:
+    """Start :class:`CameraWorker` for ``provider=gemini`` only.
+
+    Returns ``None`` for ``provider=openai`` (FR-KID-1) or when the worker
+    fails to start (NFR-4 — never fatal). On the gemini path we lazy-import
+    the module so the OpenAI path doesn't pay the import cost.
+    """
+    if provider != "gemini":
+        logger.info("[robot_kids_teacher] camera disabled: provider=openai")
+        return None
+    try:
+        from kids_teacher_camera import CameraWorker
+
+        worker = CameraWorker(mini)
+        worker.start()
+        return worker
+    except Exception as exc:
+        logger.warning(
+            "[robot_kids_teacher] camera worker unavailable; "
+            "running audio-only session: %s",
+            exc,
+        )
+        return None
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry

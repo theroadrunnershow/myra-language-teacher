@@ -189,6 +189,11 @@ class KidsTeacherFlowDeps:
     # Headless/test callers leave this as ``None``; the robot entry point
     # wires ``pump_microphone_to_backend``.
     mic_pump_factory: Optional[MicPumpFactory] = None
+    # Optional video pump coroutine factory. Mirrors ``mic_pump_factory``
+    # but pushes JPEG frames into ``handler.push_video(...)`` at ~1 fps.
+    # Wired by the robot entry point for ``provider=gemini`` only — left
+    # ``None`` for OpenAI Realtime (no video channel) and headless tests.
+    video_pump_factory: Optional[MicPumpFactory] = None
 
 
 async def run_kids_teacher_session(
@@ -261,6 +266,13 @@ async def run_kids_teacher_session(
             deps.mic_pump_factory(handler, mic_stop_event)
         )
 
+    video_stop_event = asyncio.Event()
+    video_task: Optional[asyncio.Task] = None
+    if deps.video_pump_factory is not None:
+        video_task = asyncio.create_task(
+            deps.video_pump_factory(handler, video_stop_event)
+        )
+
     try:
         await handler.start()
         run_task = asyncio.create_task(handler.run())
@@ -298,6 +310,15 @@ async def run_kids_teacher_session(
             except (asyncio.CancelledError, Exception) as exc:
                 logger.debug(
                     "[kids_teacher_flow] mic pump ended: %s", exc
+                )
+        video_stop_event.set()
+        if video_task is not None:
+            video_task.cancel()
+            try:
+                await video_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] video pump ended: %s", exc
                 )
         _call_hook_lifecycle(hooks, "stop")
 
