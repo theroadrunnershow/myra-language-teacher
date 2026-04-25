@@ -158,6 +158,26 @@ This section supersedes the older standalone design at `tasks/face-recognition-d
 - `~/.myra/faces.pkl` — runtime-created on first enrollment.
 - `.gitignore` — add `faces/` and `**/.myra/faces.pkl`.
 
+### 2.7 Gaze following — track the primary child
+
+Pollen does generic head-tracking; kids-teacher needs to keep the robot's head pointed at the child it is actually teaching. This is the visible "the robot is paying attention to me" cue that makes a 4-year-old feel heard. The pipeline reuses the dlib HOG detector already pulled in by §2.6 — no new ML, no eye-vector estimation. "Gaze following" here means *the head turns to face the child*, not eye-direction inference.
+
+- **FR-KID-26** **Detection cadence.** Every ~330 ms (3 Hz), run HOG face detection on a downscaled (~480p) copy of the latest `CameraWorker` frame. Bboxes only — no encoding. Independent of §2.6's on-demand face-rec; both share the same `CameraWorker`.
+- **FR-KID-27** **Primary subject selection.** Among detected bboxes, pick the tracked subject in this order:
+  1. **The child of the house.** If exactly one bbox matches the child's enrolled encoding (name learned per `tasks/plan-persistent-memory.md`), pick it. Run the recognition pass only when the candidate set changes; cache the assignment for ≤2 s.
+  2. **Largest bbox by area.** Closest face to the robot is a robust proxy for "who is engaging" when identity is unknown.
+  3. **None.** Emit no target; the motion director resumes idle motion.
+- **FR-KID-28** **Target output.** Publish `(pan_offset, tilt_offset)` in normalized `[-1, 1]` frame coordinates (bbox center vs. frame center) to a `gaze_target` channel consumed by the motion director (`tasks/plan-motion-director.md`). Apply a ±0.05 dead-zone around center to suppress jitter. Never command motors directly from this module — the motion director owns easing and slew limits.
+- **FR-KID-29** **Re-acquire on loss.** If the tracked subject's bbox disappears (occlusion, child turns away), hold the last target for ≤1 s, then fall back to FR-KID-27 step 2, then step 3.
+- **FR-KID-30** **Activation gating.** Active only while the Realtime session is connected and `CameraWorker` is running — per FR-KID-1 / FR-KID-23, that means `provider=gemini` only. On session teardown publish a final `None` target so the motion director returns to idle.
+
+Files to add or touch (gaze-following layer):
+
+- `src/face_tracker.py` (new) — primary-subject selection + target publication. ~80 lines.
+- `src/face_service.py` — expose `detect_face_bboxes(frame, downscale=True)` so the tracker reuses dlib without duplicating calls.
+- `src/robot_kids_teacher.py` — schedule the 3 Hz gaze loop in the per-session `async with`, alongside §2.6's on-demand face-rec loop.
+- Motion director (`tasks/plan-motion-director.md`) — subscribe to `gaze_target`; gaze is one new input source on top of whatever idle/expressive motions already exist.
+
 ---
 
 ## 3. Non-functional requirements
@@ -169,6 +189,7 @@ This section supersedes the older standalone design at `tasks/face-recognition-d
 - **NFR-5** Face-rec CPU budget (Pi 5): session-start sweep ≈ 5 frames × ~150 ms HOG+encode ≈ 750 ms one-time per session. On-demand HOG bbox poll ≈ 50 ms every 10 s ≈ 0.5 % steady-state. Single-frame recognition on new arrivals ≈ 200 ms, capped at one per 5 s. Total steady-state overhead < 2 % CPU. Identification across 30 enrolled people is 30 × 128-D Euclidean distances — sub-millisecond.
 - **NFR-6** Face-rec storage: `faces.pkl` ≤ ~30 KB at full capacity (30 × 8 × 128 × 4 bytes ≈ 122 KB worst-case with float32; typically smaller with default float64 → fewer encodings per name). Negligible.
 - **NFR-7** Face-rec graceful degradation: missing `face_recognition` / dlib → camera + object-rec still work, face-rec is silent no-op with one startup warning. Missing `~/.myra/faces.pkl` → session-start sweep is a no-op; first `remember_face` creates the file.
+- **NFR-8** Gaze-tracking CPU budget (Pi 5): 3 Hz HOG on a 480p downscale ≈ 30 ms per frame ≈ 9 % steady-state. Combined with §2.6's face-rec budget, total face-pipeline overhead stays under ~12 % CPU. Gaze updates are 2 floats at ≤3 Hz — negligible bandwidth on the internal motion bus.
 
 ---
 
@@ -182,6 +203,9 @@ KIDS_TEACHER_FACE_REC_ENABLED   true                    bool; defaults true on g
 KIDS_TEACHER_FACE_TOLERANCE     0.50                    float; dlib distance threshold, 0.4–0.6 sane range
 KIDS_TEACHER_FACE_RECHECK_SEC   10.0                    float; on-demand bbox-poll interval (FR-KID-16)
 MYRA_FACES_FILE                 ~/.myra/faces.pkl       path override; mirrors MYRA_MEMORY_FILE
+KIDS_TEACHER_GAZE_FOLLOW_ENABLED true                   bool; gates §2.7 entirely
+KIDS_TEACHER_GAZE_HZ            3.0                     float; 1.0–5.0, clamped
+KIDS_TEACHER_GAZE_DEAD_ZONE     0.05                    float; normalized, 0.0–0.2
 ```
 
 Not exposed: camera resolution (Pollen doesn't downscale, we won't either), JPEG quality (Pollen's qscale=3 as a constant), face-rec detection model (HOG fixed; CNN model is GPU-only and not on the Pi). If tuning is needed later, add flags then — not speculatively now.
@@ -228,6 +252,20 @@ Face-recognition tests (new):
 | `test_capacity_cap_at_30_names` | 30 names enrolled → 31st `remember_face` is refused with the "ask the parent to prune" message. |
 | `test_present_names_note_omitted_when_no_encodings` | Empty `faces.pkl` → no `You can currently see:` line in `instructions`. |
 
+Gaze-following tests (new):
+
+| Test | Verifies |
+|---|---|
+| `test_gaze_target_picks_enrolled_child_when_present` | Two bboxes, one matches the child's encoding → target is on the child even when the other bbox is larger. |
+| `test_gaze_target_falls_back_to_largest_when_child_absent` | No enrolled match → target is on the largest bbox. |
+| `test_gaze_target_emits_none_when_no_faces` | Empty frame → `gaze_target` published as `None`. |
+| `test_gaze_target_holds_one_second_after_subject_lost` | Subject disappears → last target held for ≤1 s before fallback fires. |
+| `test_gaze_dead_zone_suppresses_centered_target` | Bbox center within ±0.05 normalized → no update published (jitter guard). |
+| `test_gaze_disabled_when_provider_openai` | `provider=openai` → no gaze loop scheduled, no `gaze_target` events. |
+| `test_gaze_disabled_when_camera_worker_absent` | `CameraWorker` not running → loop is a no-op. |
+| `test_gaze_emits_none_on_session_teardown` | Final `gaze_target` after teardown is `None` so the motion director can resume idle. |
+| `test_gaze_recognition_runs_only_on_candidate_set_change` | Stable bbox set across ticks → recognition pass not re-run (cache works). |
+
 All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` is patched at import).
 
 ---
@@ -248,6 +286,9 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
    - Mid-session, a second known person walks in → robot acknowledges *"Oh, Daddy just joined!"* without prompting.
    - Say "forget Aunt Priya" → encoding removed, memory line removed (verify both files).
    - Stranger walks in → robot says something like *"Someone new is here — would you like me to learn who they are?"*; nothing is enrolled until an adult confirms.
+   - Walk slowly across the room while the session is live → the head tracks you smoothly.
+   - Stand still while another adult walks past → with the child enrolled, the head stays on the child; without enrollment, it follows whichever face is largest in frame.
+   - Step out of frame → the head returns to neutral idle motion within ~1 s.
 4. Confirm no frames landed in `data/kids_review.runtime.v1/` or `~/.myra/` even with `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`. Only `faces.pkl` and `memory.md` should appear under `~/.myra/`.
 5. Swap `KIDS_TEACHER_REALTIME_PROVIDER=openai` → logs "camera disabled: provider=openai" **and** "face-rec disabled: provider=openai"; session runs audio-only with no recognition.
 6. Remove the `av` package → one warning at session start; session runs audio-only.
@@ -263,6 +304,7 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
 - **Speaker authority for enrollment (SR-KID-5).** Today's guardrail is prompt-only: the model decides whether the requester sounds like an adult. Hard speaker diarization / age detection is out of scope; revisit only if we observe Myra trying to over-enroll.
 - **Capacity past 30.** If we hit the cap in practice, options are (a) raise the cap (cheap — sub-second identification stays fine to ~1000 names) or (b) build a parent-facing prune UI. Defer until it bites.
 - **Encoding tolerance drift.** A child's face changes meaningfully over months. We're not handling this in v1; if false-negatives rise, the parent re-runs voice enrollment ("Myra, that's still you!") to add a fresh encoding for the same name.
+- **Speech-state-aware gaze.** §2.7 tracks whenever the session is connected. If we observe the head bobbing distractingly during the model's own speech, gate tracking on `child_is_speaking` (silero-VAD already runs upstream) and freeze the head while the assistant talks. Defer until we see it bother Myra.
 
 ---
 
