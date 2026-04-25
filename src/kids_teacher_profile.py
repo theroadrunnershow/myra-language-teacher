@@ -13,6 +13,7 @@ import os
 from typing import Iterable, Optional
 
 from kids_teacher_types import KidsTeacherProfile
+from memory_file import read as read_memory_file
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def load_profile(
     profile_dir: Optional[str] = None,
     *,
     locked: bool = True,
+    memory_file_path: Optional[str] = None,
 ) -> KidsTeacherProfile:
     """Load the locked kids-teacher profile from disk.
 
@@ -76,6 +78,17 @@ def load_profile(
         raise ProfileValidationError(
             f"Instructions file is empty at {instructions_path}"
         )
+    try:
+        memory_text = read_memory_file(memory_file_path)
+    except OSError as exc:
+        logger.warning(
+            "[kids_teacher_profile] memory file unreadable at %s: %s",
+            memory_file_path or "default path",
+            exc,
+        )
+        memory_text = ""
+    if memory_text:
+        instructions = f"{instructions}\n\n{memory_text}"
 
     voice_path = os.path.join(base_dir, _VOICE_FILENAME)
     voice_raw = _read_text_file(voice_path)

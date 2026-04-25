@@ -27,6 +27,7 @@ Translation responsibilities kept in this file:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any, AsyncIterator, Callable, Optional
@@ -34,6 +35,7 @@ from typing import Any, AsyncIterator, Callable, Optional
 from env_loader import load_project_dotenv
 from kids_teacher_backend import BackendConfigError
 from kids_teacher_types import ALLOWED_GEMINI_MODELS
+from memory_file import append as append_memory_file
 
 load_project_dotenv()
 
@@ -70,6 +72,93 @@ _OPENAI_TO_GEMINI_VOICE: dict[str, str] = {
     "verse": "Puck",
 }
 
+_REMEMBER_TOOL_NAME = "remember"
+_REMEMBER_TOOL_PROMPT_APPENDIX = """
+# Memory tool
+- If the child or parent explicitly asks you to remember something about the child, call the `remember` tool with one short, third-person sentence about the child.
+- If the child answers your earlier name question, call `remember` with `Their name is ...`.
+- After calling `remember`, briefly say "Got it, I'll remember!"
+- Never store an address, phone number, school name, password, login info, or medical ID in memory.
+""".strip()
+
+
+def _gemini_model_supports_non_blocking_tools(model: str) -> bool:
+    """Return whether this Gemini Live model supports async function calling."""
+    return model.strip() != "gemini-3.1-flash-live-preview"
+
+
+def _build_remember_tool(types_module: Any, *, non_blocking: bool) -> Any:
+    kwargs: dict[str, Any] = {
+        "name": _REMEMBER_TOOL_NAME,
+        "description": (
+            "Persist a fact the child or parent explicitly asked you to remember. "
+            "fact must be one short, third-person sentence about the child. "
+            "Do not store addresses, phone numbers, school names, passwords, "
+            "login info, or medical IDs."
+        ),
+        "parameters_json_schema": {
+            "type": "object",
+            "properties": {
+                "fact": {
+                    "type": "string",
+                    "description": (
+                        "One short, third-person sentence about the child, "
+                        "for example 'Their favourite colour is blue'."
+                    ),
+                }
+            },
+            "required": ["fact"],
+            "additionalProperties": False,
+        },
+    }
+    if non_blocking:
+        kwargs["behavior"] = "NON_BLOCKING"
+    declaration = types_module.FunctionDeclaration(**kwargs)
+    return types_module.Tool(function_declarations=[declaration])
+
+
+def _append_remember_tool_instructions(instructions: str) -> str:
+    base = (instructions or "").strip()
+    if not base:
+        return _REMEMBER_TOOL_PROMPT_APPENDIX
+    return f"{base}\n\n{_REMEMBER_TOOL_PROMPT_APPENDIX}"
+
+
+def _extract_remember_fact(function_call: Any) -> Optional[str]:
+    args = _attr(function_call, "args")
+    if args is None:
+        args = _attr(function_call, "arguments")
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(args, dict):
+        return None
+    fact = args.get("fact")
+    if not isinstance(fact, str):
+        return None
+    normalized = " ".join(fact.strip().split())
+    return normalized or None
+
+
+def _build_function_response(
+    types_module: Any,
+    *,
+    call_id: Any,
+    name: str,
+    response: dict[str, Any],
+    non_blocking: bool,
+) -> Any:
+    kwargs: dict[str, Any] = {
+        "id": call_id,
+        "name": name,
+        "response": response,
+    }
+    if non_blocking:
+        kwargs["scheduling"] = "SILENT"
+    return types_module.FunctionResponse(**kwargs)
+
 
 def resolve_gemini_model(env_value: Optional[str] = None) -> str:
     """Return the Gemini Live model id from env, defaulting to the GA model.
@@ -105,7 +194,12 @@ def map_openai_voice_to_gemini(voice: Optional[str]) -> str:
     return _OPENAI_TO_GEMINI_VOICE.get(voice.strip().lower(), _DEFAULT_GEMINI_VOICE)
 
 
-def build_gemini_live_config(session_payload: dict, types_module: Any) -> Any:
+def build_gemini_live_config(
+    session_payload: dict,
+    types_module: Any,
+    *,
+    model: str = DEFAULT_GEMINI_MODEL,
+) -> Any:
     """Translate the OpenAI-shaped ``session_payload`` into ``LiveConnectConfig``.
 
     ``types_module`` is the imported ``google.genai.types`` module, passed
@@ -126,6 +220,7 @@ def build_gemini_live_config(session_payload: dict, types_module: Any) -> Any:
     voice_name = map_openai_voice_to_gemini(session_payload.get("voice"))
     modalities_raw = session_payload.get("modalities") or ["audio"]
     response_modalities = [m.upper() for m in modalities_raw if m.lower() == "audio"] or ["AUDIO"]
+    tool_supports_non_blocking = _gemini_model_supports_non_blocking_tools(model)
 
     speech_config = types_module.SpeechConfig(
         voice_config=types_module.VoiceConfig(
@@ -137,10 +232,13 @@ def build_gemini_live_config(session_payload: dict, types_module: Any) -> Any:
 
     return types_module.LiveConnectConfig(
         response_modalities=response_modalities,
-        system_instruction=session_payload.get("instructions") or "",
+        system_instruction=_append_remember_tool_instructions(
+            session_payload.get("instructions") or ""
+        ),
         speech_config=speech_config,
         input_audio_transcription=types_module.AudioTranscriptionConfig(),
         output_audio_transcription=types_module.AudioTranscriptionConfig(),
+        tools=[_build_remember_tool(types_module, non_blocking=tool_supports_non_blocking)],
     )
 
 
@@ -164,16 +262,21 @@ class GeminiRealtimeBackend:
         model: Optional[str] = None,
         client_factory: Optional[Callable[[], Any]] = None,
         types_module: Optional[Any] = None,
+        memory_file_path: Optional[str] = None,
+        memory_append: Optional[Callable[[str, Optional[str]], None]] = None,
     ) -> None:
         self._model = model or resolve_gemini_model()
         self._client_factory = client_factory
         self._types_module = types_module
+        self._memory_file_path = memory_file_path
+        self._memory_append = memory_append or append_memory_file
         self._client: Any = None
         self._connection_cm: Any = None
         self._session: Any = None
         self._closed = False
         self._event_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
+        self._background_tasks: set[asyncio.Task] = set()
         # Turn-level state for VAD-style input.speech_started/stopped
         # synthesis. Gemini Live does not publish explicit start/stop
         # events; we emit them around input_transcription arrivals so the
@@ -219,7 +322,11 @@ class GeminiRealtimeBackend:
         self._client = client_factory()
         self._types_module = types_module
 
-        live_config = build_gemini_live_config(session_payload, types_module)
+        live_config = build_gemini_live_config(
+            session_payload,
+            types_module,
+            model=self._model,
+        )
         self._connection_cm = self._client.aio.live.connect(
             model=self._model, config=live_config
         )
@@ -250,6 +357,7 @@ class GeminiRealtimeBackend:
         try:
             while not self._closed:
                 async for raw_message in self._session.receive():
+                    await self._handle_tool_call_message(raw_message)
                     for normalized in self._normalize_message(raw_message):
                         await self._event_queue.put(normalized)
                 # receive() exited — turn ended. Loop back to receive()
@@ -277,6 +385,97 @@ class GeminiRealtimeBackend:
                 "[kids_teacher_gemini_backend] reader loop ended cleanly (close() called)"
             )
 
+    async def _handle_tool_call_message(self, raw_message: Any) -> None:
+        tool_call = _attr(raw_message, "tool_call")
+        if tool_call is None or self._session is None or self._types_module is None:
+            return
+
+        function_calls = _attr(tool_call, "function_calls") or []
+        if not function_calls:
+            logger.warning("[kids_teacher_gemini_backend] tool_call without function_calls")
+            return
+
+        non_blocking = _gemini_model_supports_non_blocking_tools(self._model)
+        function_responses: list[Any] = []
+        facts_to_persist: list[str] = []
+
+        for function_call in function_calls:
+            name = _attr(function_call, "name") or ""
+            call_id = _attr(function_call, "id")
+            if name != _REMEMBER_TOOL_NAME:
+                logger.warning(
+                    "[kids_teacher_gemini_backend] unknown tool call name=%r ignored",
+                    name,
+                )
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name or _REMEMBER_TOOL_NAME,
+                        response={"output": {"status": "ignored"}},
+                        non_blocking=non_blocking,
+                    )
+                )
+                continue
+
+            fact = _extract_remember_fact(function_call)
+            if not fact:
+                logger.warning(
+                    "[kids_teacher_gemini_backend] remember tool call missing usable fact"
+                )
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response={"output": {"status": "ignored"}},
+                        non_blocking=non_blocking,
+                    )
+                )
+                continue
+
+            function_responses.append(
+                _build_function_response(
+                    self._types_module,
+                    call_id=call_id,
+                    name=name,
+                    response={"output": {"status": "scheduled"}},
+                    non_blocking=non_blocking,
+                )
+            )
+            facts_to_persist.append(fact)
+
+        try:
+            await self._session.send_tool_response(
+                function_responses=function_responses
+            )
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_gemini_backend] send_tool_response failed: %s", exc
+            )
+        finally:
+            for fact in facts_to_persist:
+                self._schedule_memory_append(fact)
+
+    def _schedule_memory_append(self, fact: str) -> None:
+        task = asyncio.create_task(self._append_memory_fact_async(fact))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _append_memory_fact_async(self, fact: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self._memory_append,
+                fact,
+                self._memory_file_path,
+            )
+        except Exception:
+            logger.warning(
+                "[kids_teacher_gemini_backend] remember write failed for fact=%r",
+                fact,
+                exc_info=True,
+            )
+
     def _normalize_message(self, raw_message: Any) -> list[dict]:
         """Map one raw ``LiveServerMessage`` to zero-or-more normalized events.
 
@@ -287,6 +486,22 @@ class GeminiRealtimeBackend:
         events: list[dict] = []
         server_content = _attr(raw_message, "server_content")
         if server_content is None:
+            tool_call = _attr(raw_message, "tool_call")
+            if tool_call is not None:
+                function_calls = _attr(tool_call, "function_calls") or []
+                logger.info(
+                    "[kids_teacher_gemini_backend] tool_call received (%d function call(s))",
+                    len(function_calls),
+                )
+                return events
+            tool_call_cancellation = _attr(raw_message, "tool_call_cancellation")
+            if tool_call_cancellation is not None:
+                ids = _attr(tool_call_cancellation, "ids")
+                logger.info(
+                    "[kids_teacher_gemini_backend] tool_call_cancellation received ids=%r",
+                    ids,
+                )
+                return events
             # Log non-server_content messages with per-type detail so we
             # can see the actual contents of session_resumption_update
             # (new_handle, resumable) and go_away (time_left) — these
@@ -522,6 +737,8 @@ class GeminiRealtimeBackend:
                 await self._reader_task
             except (asyncio.CancelledError, Exception):
                 pass
+        if self._background_tasks:
+            await asyncio.gather(*tuple(self._background_tasks), return_exceptions=True)
         if self._connection_cm is not None:
             try:
                 await self._connection_cm.__aexit__(None, None, None)

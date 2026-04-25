@@ -310,6 +310,35 @@ KIDS_TEACHER_GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 
 > **Model-id gotcha.** Google exposes Gemini Live on two separate endpoints with **different** model ids for the same capability. If you use an AI Studio API key (the `api_key` path), you must use an AI Studio model id. The Vertex GA id (`gemini-live-2.5-flash-native-audio`) will fail with `1008 models/... not found for API version v1beta` on the AI Studio endpoint. The defaults in this repo target AI Studio; Vertex users should override `KIDS_TEACHER_GEMINI_MODEL` explicitly.
 
+### Persistent memory
+
+Kids-teacher now supports a small markdown-backed memory file that is loaded into the system prompt at session start:
+
+```bash
+~/.myra/memory.md
+```
+
+Override it with:
+
+```bash
+export MYRA_MEMORY_FILE=/custom/path/memory.md
+```
+
+How it works:
+- If the file is missing, startup still works; the session just starts with no persistent memory.
+- On any provider, the robot asks the child "What should I call you?" if it does not yet know their name.
+- On the **Gemini** path, if the child or parent explicitly asks the robot to remember something, Gemini can persist that fact mid-session into `memory.md`.
+- On the **OpenAI** path, memory is currently read-only: the robot can use pre-seeded memory and the spoken name for the current session, but it will not write new facts yet.
+
+You can pre-seed the file manually before a session:
+
+```markdown
+# Things to remember about the child
+
+- Their name is Aanya _(2026-04-24)_
+- They love tigers _(2026-04-24)_
+```
+
 ### Run a kids-teacher session
 
 There are two startup paths: a FastAPI dashboard that runs on your dev laptop, and a headless CLI that runs the live realtime conversation on the Reachy Mini / Pi. The dashboard does **not** start a conversation — it only surfaces config and review state. They are independent processes; start whichever one(s) you need.
@@ -377,6 +406,7 @@ Provider + backend model:
 | `KIDS_TEACHER_REALTIME_MODEL`      | `gpt-realtime`                            | OpenAI model name. Only `gpt-realtime` and `gpt-realtime-mini` are accepted |
 | `GEMINI_API_KEY`                   | _(required when provider=gemini)_         | Google AI Studio API key — https://aistudio.google.com/apikey |
 | `KIDS_TEACHER_GEMINI_MODEL`        | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini Live model. Accepted: `gemini-2.5-flash-native-audio-preview-12-2025` + `gemini-3.1-flash-live-preview` on AI Studio, `gemini-live-2.5-flash-native-audio` on Vertex. The Vertex id will 404 on the AI Studio endpoint |
+| `MYRA_MEMORY_FILE`                 | `~/.myra/memory.md`                       | Optional override for the persistent kids-teacher memory markdown file |
 
 Review storage (both default **OFF**; enable explicitly per deployment):
 
@@ -399,7 +429,7 @@ Three plain-text files drive the locked persona. Edit them without touching code
 | File              | Purpose |
 | ----------------- | ------- |
 | `instructions.txt`| The full system prompt. Preschool tone, safe/disallowed/restricted topic lists, multilingual guidance, clarification behavior, output constraints. Missing or empty = startup error |
-| `tools.txt`       | One tool name per line; `#` comments and blank lines are skipped. V1 ships with this **empty** (no tool calls from the model) |
+| `tools.txt`       | One tool name per line; `#` comments and blank lines are skipped. Profile-owned tools still ship **empty** by default. Gemini's internal `remember` memory tool is backend-owned and is **not** listed here |
 | `voice.txt`       | Single line: OpenAI Realtime voice name. V1 default is `alloy`. Options include `ash`, `ballad`, `coral`, `echo`, `sage`, `shimmer`, `verse`, `marin`, `cedar` |
 
 The profile is treated as **locked by default** (`KidsTeacherProfile.locked=True`). Change requires a code edit and review, not a runtime flag.

@@ -126,9 +126,11 @@ def build_session_payload(
 ) -> dict:
     """Build the JSON-serializable ``session.update`` payload.
 
-    Pulls instructions, voice, and the tool allowlist out of
-    ``config.profile``. V1 uses server-side VAD and OpenAI's
-    ``gpt-4o-mini-transcribe`` for input transcripts.
+    Pulls instructions, voice, and the profile-owned tool allowlist out
+    of ``config.profile``. Provider backends may still append their own
+    internal tools (for example Gemini's persistent-memory helper)
+    during provider-specific config translation. V1 uses server-side VAD
+    and OpenAI's ``gpt-4o-mini-transcribe`` for input transcripts.
     """
     profile = config.profile
     tools = [

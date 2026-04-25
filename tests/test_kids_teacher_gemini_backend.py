@@ -11,11 +11,13 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import threading
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import memory_file
 from kids_teacher_backend import BackendConfigError
 from kids_teacher_gemini_backend import (
     DEFAULT_GEMINI_MODEL,
@@ -48,9 +50,12 @@ class _FakeTypes:
     Blob = _Record
     Content = _Record
     Part = _Record
+    FunctionDeclaration = _Record
+    FunctionResponse = _Record
     PrebuiltVoiceConfig = _Record
     VoiceConfig = _Record
     SpeechConfig = _Record
+    Tool = _Record
     AudioTranscriptionConfig = _Record
     LiveConnectConfig = _Record
 
@@ -135,7 +140,8 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
 
     config = build_gemini_live_config(payload, _FakeTypes)
 
-    assert config.system_instruction == "Only safe preschool topics."
+    assert "Only safe preschool topics." in config.system_instruction
+    assert "remember" in config.system_instruction
     # Only audio modality survives — text-only replies would break the robot.
     assert config.response_modalities == ["AUDIO"]
     # Voice translated to Gemini name.
@@ -144,6 +150,10 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     # directions so the safety layer keeps working.
     assert config.input_audio_transcription is not None
     assert config.output_audio_transcription is not None
+    assert len(config.tools) == 1
+    declaration = config.tools[0].function_declarations[0]
+    assert declaration.name == "remember"
+    assert declaration.behavior == "NON_BLOCKING"
 
 
 def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
@@ -152,10 +162,21 @@ def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
     assert config.response_modalities == ["AUDIO"]
 
 
-def test_build_live_config_empty_instructions_is_empty_string() -> None:
+def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() -> None:
     payload = {"voice": "alloy"}
     config = build_gemini_live_config(payload, _FakeTypes)
-    assert config.system_instruction == ""
+    assert "remember" in config.system_instruction
+
+
+def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
+    payload = {"instructions": "hi", "voice": "alloy"}
+    config = build_gemini_live_config(
+        payload,
+        _FakeTypes,
+        model="gemini-3.1-flash-live-preview",
+    )
+    declaration = config.tools[0].function_declarations[0]
+    assert getattr(declaration, "behavior", None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +223,7 @@ class _FakeSession:
         self.sent_audio: list[Any] = []
         self.sent_text: list[Any] = []
         self.cancelled_with: list[bool] = []
+        self.tool_responses: list[Any] = []
 
     async def receive(self):
         for msg in self._messages:
@@ -220,6 +242,9 @@ class _FakeSession:
 
     async def send_client_content(self, *, turns: Any, turn_complete: bool) -> None:
         self.sent_text.append((turns, turn_complete))
+
+    async def send_tool_response(self, *, function_responses: Any) -> None:
+        self.tool_responses.append(function_responses)
 
 
 class _FakeConnectionCM:
@@ -252,6 +277,7 @@ class _MultiTurnFakeSession:
         self.sent_audio: list[Any] = []
         self.sent_text: list[Any] = []
         self.cancelled_with: list[bool] = []
+        self.tool_responses: list[Any] = []
         self.receive_calls: int = 0
 
     async def receive(self):
@@ -278,6 +304,9 @@ class _MultiTurnFakeSession:
 
     async def send_client_content(self, *, turns: Any, turn_complete: bool) -> None:
         self.sent_text.append((turns, turn_complete))
+
+    async def send_tool_response(self, *, function_responses: Any) -> None:
+        self.tool_responses.append(function_responses)
 
 
 class _FakeLive:
@@ -331,6 +360,23 @@ def _build_server_message(
     if turn_complete:
         server_content["turn_complete"] = True
     return SimpleNamespace(server_content=server_content)
+
+
+def _build_tool_call_message(*, fact: Any, call_id: str = "call-1") -> Any:
+    function_call = SimpleNamespace(
+        id=call_id,
+        name="remember",
+        args={"fact": fact} if fact is not None else {},
+    )
+    return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+
+
+async def _wait_until(predicate, *, timeout: float = 1.0) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition not met before timeout")
+        await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
@@ -685,3 +731,104 @@ async def test_reader_loop_handles_multiple_turns_on_single_session() -> None:
     assert manager.entered is True
     assert manager.exited is True
     assert len(client._live.connect_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_call_sends_tool_response_before_background_write_finishes() -> None:
+    write_started = threading.Event()
+    allow_finish = threading.Event()
+    write_finished = threading.Event()
+
+    def slow_append(fact: str, path: str | None) -> None:
+        assert fact == "Their name is Aanya"
+        write_started.set()
+        allow_finish.wait(timeout=1.0)
+        write_finished.set()
+
+    session = _MultiTurnFakeSession(
+        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        memory_append=slow_append,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(session.tool_responses))
+        assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
+        assert write_started.is_set() is True
+        assert write_finished.is_set() is False
+    finally:
+        allow_finish.set()
+        await _wait_until(write_finished.is_set)
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_persists_memory_file_after_background_write(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+    target = tmp_path / "memory.md"
+    session = _MultiTurnFakeSession(
+        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: "Their name is Aanya" in memory_file.read(target))
+        assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_logs_warning_when_background_write_fails(
+    caplog,
+) -> None:
+    def failing_append(fact: str, path: str | None) -> None:
+        raise OSError("disk full")
+
+    session = _MultiTurnFakeSession(
+        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        memory_append=failing_append,
+    )
+
+    with caplog.at_level("WARNING"):
+        await backend.connect({"instructions": "hi", "voice": "alloy"})
+        gen = backend.events()
+        try:
+            event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert event["type"] == "response.done"
+            await _wait_until(lambda: any("remember write failed" in r.message for r in caplog.records))
+        finally:
+            await backend.close()
+
+    assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}

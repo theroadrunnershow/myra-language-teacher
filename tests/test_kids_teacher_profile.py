@@ -99,6 +99,22 @@ def test_missing_tools_file_yields_empty_allowlist(tmp_path) -> None:
     assert profile.allowed_tools == ()
 
 
+def test_load_profile_appends_memory_markdown_to_instructions(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    memory_path = tmp_path / "memory.md"
+    _write(
+        memory_path,
+        "# Things to remember about the child\n\n- Her name is Aanya",
+    )
+
+    profile = load_profile(str(tmp_path), memory_file_path=str(memory_path))
+
+    assert profile.instructions == (
+        "Be kind.\n\n"
+        "# Things to remember about the child\n\n- Her name is Aanya"
+    )
+
+
 def test_validate_tool_names_accepts_known() -> None:
     assert validate_tool_names(["wave"], {"wave", "nod"}) == ["wave"]
 

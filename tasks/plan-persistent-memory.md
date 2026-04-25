@@ -10,8 +10,10 @@ restart.
 
 The robot doesn't ship knowing whom it's talking to. On a fresh device
 the memory file is empty; the kids-teacher flow asks the child for
-their name in the first turn and persists it through the same memory
-mechanism as everything else (see "Capturing the child's name" below).
+their name in the first turn. In **v1** that name is only used for the
+current live session unless the parent pre-seeds `memory.md`. Automatic
+persistence of the spoken answer lands in **v2** for Gemini-backed
+sessions (see "Capturing the child's name" below).
 
 ## The smallest thing that works
 
@@ -49,7 +51,8 @@ spaced-repetition machinery, no LLM-written recaps, no admin routes.
 ## Capturing the child's name
 
 The child's name is not configured anywhere — it's learned from the
-child themself and persisted in `memory.md` like any other fact.
+child themself and, when the runtime supports writes, persisted in
+`memory.md` like any other fact.
 
 - On a fresh device, `memory.md` is missing or empty. The robot has no
   name to greet with.
@@ -60,11 +63,13 @@ child themself and persisted in `memory.md` like any other fact.
   - **v1 (parent-curated):** the parent can pre-seed `memory.md` with
     `- Her name is Aanya` so the robot is ready on first run. No prompt
     nudge needed if the line is already there.
-  - **v2 (on-demand tool call):** when the child first introduces
-    themself, the Live model invokes the `remember` tool with
-    `Her/His/Their name is …`, the bullet is appended to `memory.md`
-    mid-session, and the name is used from the next turn onward.
-    Subsequent sessions read it from `memory.md` via the v1 path.
+  - **v2 (Gemini-backed sessions only):** when the child first
+    introduces themself, the Gemini Live model invokes the internal
+    `remember` tool with `Their name is …`, the bullet is appended to
+    `memory.md` mid-session, and later sessions read it via the v1 path.
+  - **OpenAI-backed sessions:** still ask and use the name for the rest
+    of the current session, but remain read-only until an OpenAI tool
+    loop exists.
 - The name lives in the same file as everything else; no separate
   `child_name` field, no extra schema. Keeps the "one markdown file"
   invariant intact.
@@ -118,59 +123,73 @@ existing Live model. Genuinely useful on its own: a parent can seed
 the file with "her name is Aanya, her brother is Rohan, she loves
 tigers" and the robot will reference those naturally for weeks.
 
-**v2 — on-demand tool calls from the Live model.**
-The Gemini Live session declares one tool — `remember(fact: str)` —
-and the model invokes it mid-conversation when the child or parent
-asks it to. The Live model itself produces the cleaned, third-person
-fact text inside the tool call, so there is no separate summarizer
-LLM and no second vendor on the transcript path.
+**v2 — on-demand tool calls from the Gemini Live model.**
+Gemini Live declares one internal tool — `remember(fact: str)` — and
+the model invokes it mid-conversation when the child or parent asks it
+to. The Live model itself produces the cleaned, third-person fact text
+inside the tool call, so there is no separate summarizer LLM and no
+second vendor on the transcript path.
+
+The tool is **backend-owned**, not profile-owned:
+- It is **not** listed in `profiles/kids_teacher/tools.txt`.
+- It is **not** surfaced through the shared `RealtimeBackend` protocol.
+- The Gemini backend registers it and handles its responses internally,
+  because `session.send_tool_response(...)` is SDK-specific and does not
+  belong in the provider-agnostic realtime handler.
+- `instructions.txt` carries only the provider-agnostic behavior
+  ("ask the child's name if unknown"). The Gemini backend appends the
+  tool-specific prompt lines only when it actually registers `remember`.
 
 Mechanism:
 
-1. **Declare the tool on the Live config.** Extend `_build_live_config`
-   in `kids_teacher_gemini_backend.py` (around line 138) to set
-   `tools=[…]` on the returned `LiveConnectConfig` with one
-   `FunctionDeclaration`:
+1. **Declare the tool on the Gemini Live config.** Extend
+   `_build_live_config` in `kids_teacher_gemini_backend.py` (around
+   line 138) to set `tools=[…]` on the returned `LiveConnectConfig`
+   with one `FunctionDeclaration`:
    - `remember(fact: str)` — "Persist a fact the child or parent
      asked you to remember. `fact` should be a single, third-person
      sentence about the child (e.g. 'Her favourite colour is blue').
      Skip facts already covered by existing memory."
 
+   On Gemini 2.5 Live / native-audio models, declare the function with
+   `behavior="NON_BLOCKING"` so the model can keep talking while the
+   persistence work finishes. On Gemini 3.1 Flash Live Preview, omit
+   that flag because the docs say asynchronous function calling is not
+   supported there.
+
    Forgetting/removing facts is intentionally out of scope: the
    parent edits `~/.myra/memory.md` directly. Voice-driven
    `forget` would add tool-description bloat that risks hurting
    `remember` accuracy, with little payoff for a 4-year-old's flow.
-2. **Instruct the model** in `instructions.txt` to use the tool
-   eagerly:
-   > If the child or parent asks you to remember something, call the
-   > `remember` tool with a clean, third-person sentence about the
-   > child, then say "Got it, I'll remember!" If you don't yet know
-   > the child's name, gently ask in the first turn ("What should I
-   > call you?"); once they tell you, call `remember` with
-   > "Her/His/Their name is …" and use the name from then on.
-3. **Handle `tool_call` events asynchronously** in the realtime
-   layer. Gemini Live already surfaces `tool_call` and
-   `tool_call_cancellation` at the top level of the message envelope
-   (see `_TOP_LEVEL_LIVE_MESSAGE_FIELDS` at
+2. **Append Gemini-only prompt guidance** when the tool is registered:
+   > If the child or parent explicitly asks you to remember something
+   > about the child, call the `remember` tool with a clean,
+   > third-person sentence about the child. If the child answers your
+   > earlier name question, call `remember` with "Their name is …".
+   > After calling `remember`, briefly say "Got it, I'll remember!"
+3. **Handle `tool_call` events inside the Gemini backend**. Gemini Live
+   surfaces `tool_call` and `tool_call_cancellation` at the top level
+   of the message envelope (see `_TOP_LEVEL_LIVE_MESSAGE_FIELDS` at
    `kids_teacher_gemini_backend.py:542`); the reader task currently
-   ignores them. The handler must **not block the conversation** on
-   disk I/O — the child should never hear a pause while the file is
-   written. Concretely:
-   - On receiving a `tool_call`, immediately send a synthetic
-     `tool_response` of `{"status": "scheduled"}` back to the Live
-     session so the model is unblocked and the next conversational
-     turn proceeds without delay.
-   - Spawn a background `asyncio.Task` that calls
-     `memory_file.append(fact)` — including the `fcntl.flock`
-     acquisition and atomic tempfile-rename — entirely off the
-     realtime read path.
+   ignores them. The write path must **not block the event loop**.
+   Concretely:
+   - On receiving a `tool_call`, immediately respond through the real
+     SDK method `session.send_tool_response(...)` with one
+     `FunctionResponse` per call.
+   - For Gemini 2.5 non-blocking calls, send that `FunctionResponse`
+     with `scheduling="SILENT"` so the model does not verbalize the
+     tool result.
+   - Kick the actual markdown append onto a worker thread with
+     `asyncio.to_thread(memory_file.append, fact, path)` so `flock`,
+     temp-file write, and `os.replace` never block the websocket read
+     loop.
    - If the background append raises, just `log.warning(...,
      exc_info=True)`. No event emission, no retry, no verbal
-     correction to the child. The verbal "Got it, I'll remember!"
-     is a soft commitment from the model, decoupled from the actual
-     write; on a Pi with a healthy SD card, write failures are rare
-     enough that quietly logging is the right tradeoff. Parent
-     notices by inspecting `memory.md` or the log.
+     correction to the child. The verbal "Got it, I'll remember!" is a
+     soft commitment from the model, decoupled from the actual write;
+     on a Pi with a healthy SD card, write failures are rare enough
+     that quietly logging is the right tradeoff. Parent notices by
+     inspecting `memory.md` or the log.
 4. **No re-load mid-session.** Gemini Live's `system_instruction` is
    fixed for the connection, but the newly remembered fact is already
    in the model's working context (it just produced it), so
@@ -195,8 +214,10 @@ Why on-demand, not end-of-session:
 
 Why async (non-blocking) tool dispatch:
 - The child must never experience dead air while the file is written.
-  Replying "scheduled" to the Live session immediately keeps
-  turn-taking smooth.
+  Sending the tool response immediately keeps turn-taking smooth.
+- `asyncio.create_task(memory_file.append(...))` is **not sufficient**,
+  because the synchronous file work would still block the event loop.
+  `asyncio.to_thread(...)` is the actual non-blocking primitive here.
 - File I/O on Reachy's SD card is fast in the common case but not
   guaranteed (flock contention, transient errors). Decoupling the
   conversation from disk means a slow write degrades observability,
@@ -210,9 +231,9 @@ just log and move on):
 - Tool call malformed (missing `fact`, empty string) → log a
   warning, no file change. Model already said "Got it"; accept the
   small lie rather than derail a 4-year-old's conversation.
-- Tool call duplicates an existing line → `memory_file.append` does
-  a case-insensitive substring check and skips silently. Logged at
-  debug.
+- Tool call duplicates an existing line → `memory_file.append` compares
+  normalized bullet bodies exactly (ignoring case, extra spaces, and the
+  date suffix) and skips silently. Logged at debug.
 - File write error (disk full, permission) → logged as a warning
   with `exc_info`. Parent investigates via the log or by inspecting
   `memory.md`.
@@ -243,22 +264,26 @@ v1:
 v2 (only when v1 has shipped and is in use):
 - `src/kids_teacher_gemini_backend.py` — declare the `remember` tool
   on the Live config (`_build_live_config`); on incoming `tool_call`,
-  immediately reply with `{"status": "scheduled"}` and spawn a
-  background `asyncio.Task` that calls `memory_file.append` (logging
-  any exception). Existing event names already include `tool_call` /
-  `tool_call_cancellation` (see line 542) so the realtime layer will
-  surface them; we just have to handle them.
-- One paragraph in `instructions.txt` (the wording above).
+  immediately send `session.send_tool_response(...)`, then schedule
+  `memory_file.append` on a worker thread (logging any exception).
+  Existing event names already include `tool_call` /
+  `tool_call_cancellation` (see line 542); the Gemini backend just has
+  to stop ignoring them.
+- One provider-agnostic line in `instructions.txt` for asking the
+  child's name. Gemini-specific tool guidance is appended at runtime
+  only when the tool is registered.
 - Tests:
   - The `remember` declaration appears on the assembled
     `LiveConnectConfig`.
-  - Tool-call round-trip with a fake backend: synthetic `tool_call`
-    event in → synthetic `tool_response` (`scheduled`) sent back
-    *before* the background task is awaited; once awaited,
-    `memory_file` contains the new line. The "before" assertion is
-    the non-blocking guarantee.
-  - Slow-write simulation: a `memory_file.append` that sleeps for
-    500ms does not delay the `tool_response` send.
+  - The default Gemini 2.5 config marks `remember` as
+    `behavior="NON_BLOCKING"`; Gemini 3.1 config omits that flag.
+  - Tool-call round-trip with a fake Gemini session: synthetic
+    `tool_call` event in → real `send_tool_response(...)` recorded
+    before the background write finishes; once awaited, `memory_file`
+    contains the new line. The "before" assertion is the non-blocking
+    guarantee.
+  - Slow-write simulation: a `memory_file.append` that blocks in a
+    worker thread does not delay the `send_tool_response(...)` call.
   - Failing-write simulation: `memory_file.append` raising
     `OSError` results in a logged warning and no crash.
 
@@ -271,6 +296,10 @@ v2 (only when v1 has shipped and is in use):
   use `fcntl.flock` on append for safety.
 - **Atomicity on remove.** Read into memory, filter, write to
   `memory.md.tmp`, `os.replace` over the original.
+- **Matching semantics.** Duplicate detection and removal are **exact**
+  on normalized bullet bodies (case-insensitive, whitespace-normalized,
+  date suffix ignored). No substring matching. If we later need a
+  richer "forget by name" flow, that feature gets its own parser.
 - **Missing file.** Treat as empty. Don't auto-create until the first
   successful write.
 - **Reinstall survival.** Lives at `~/.myra/memory.md` — outside any
