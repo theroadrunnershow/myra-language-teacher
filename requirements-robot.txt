@@ -11,3 +11,8 @@ reachy-mini>=1.2.0
 
 # Synchronous HTTP client for robot scripts
 requests>=2.31.0
+
+# Local face recognition (kids-teacher §2.6). dlib (its native dep) builds from
+# source on first install — ~10 minutes on a Pi 5, then cached. numpy comes via
+# requirements-common.txt.
+face_recognition>=1.3.0
