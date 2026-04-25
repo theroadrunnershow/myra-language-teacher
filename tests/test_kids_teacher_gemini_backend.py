@@ -141,7 +141,8 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     config = build_gemini_live_config(payload, _FakeTypes)
 
     assert "Only safe preschool topics." in config.system_instruction
-    assert "remember" in config.system_instruction
+    assert "set_about" in config.system_instruction
+    assert "add_note" in config.system_instruction
     # Only audio modality survives — text-only replies would break the robot.
     assert config.response_modalities == ["AUDIO"]
     # Voice translated to Gemini name.
@@ -151,9 +152,11 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     assert config.input_audio_transcription is not None
     assert config.output_audio_transcription is not None
     assert len(config.tools) == 1
-    declaration = config.tools[0].function_declarations[0]
-    assert declaration.name == "remember"
-    assert declaration.behavior == "NON_BLOCKING"
+    declarations = config.tools[0].function_declarations
+    names = [d.name for d in declarations]
+    assert names == ["set_about", "add_note"]
+    for d in declarations:
+        assert d.behavior == "NON_BLOCKING"
 
 
 def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
@@ -165,7 +168,8 @@ def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
 def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() -> None:
     payload = {"voice": "alloy"}
     config = build_gemini_live_config(payload, _FakeTypes)
-    assert "remember" in config.system_instruction
+    assert "set_about" in config.system_instruction
+    assert "add_note" in config.system_instruction
 
 
 def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
@@ -175,8 +179,8 @@ def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
         _FakeTypes,
         model="gemini-3.1-flash-live-preview",
     )
-    declaration = config.tools[0].function_declarations[0]
-    assert getattr(declaration, "behavior", None) is None
+    for d in config.tools[0].function_declarations:
+        assert getattr(d, "behavior", None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -362,11 +366,22 @@ def _build_server_message(
     return SimpleNamespace(server_content=server_content)
 
 
-def _build_tool_call_message(*, fact: Any, call_id: str = "call-1") -> Any:
+def _build_set_about_call(
+    *, key: str, value: str, call_id: str = "call-1"
+) -> Any:
     function_call = SimpleNamespace(
         id=call_id,
-        name="remember",
-        args={"fact": fact} if fact is not None else {},
+        name="set_about",
+        args={"key": key, "value": value},
+    )
+    return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+
+
+def _build_add_note_call(*, text: str, call_id: str = "call-1") -> Any:
+    function_call = SimpleNamespace(
+        id=call_id,
+        name="add_note",
+        args={"text": text},
     )
     return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
 
@@ -734,19 +749,23 @@ async def test_reader_loop_handles_multiple_turns_on_single_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_call_sends_tool_response_before_background_write_finishes() -> None:
+async def test_set_about_tool_response_sent_before_background_write_finishes() -> None:
     write_started = threading.Event()
     allow_finish = threading.Event()
     write_finished = threading.Event()
 
-    def slow_append(fact: str, path: str | None) -> None:
-        assert fact == "Their name is Aanya"
+    def slow_set_key(key: str, value: str, path: str | None) -> None:
+        assert key == "name"
+        assert value == "Aanya"
         write_started.set()
         allow_finish.wait(timeout=1.0)
         write_finished.set()
 
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -754,7 +773,7 @@ async def test_tool_call_sends_tool_response_before_background_write_finishes() 
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=slow_append,
+        set_key_fn=slow_set_key,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -773,14 +792,17 @@ async def test_tool_call_sends_tool_response_before_background_write_finishes() 
 
 
 @pytest.mark.asyncio
-async def test_tool_call_persists_memory_file_after_background_write(
+async def test_set_about_persists_to_memory_file(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-25")
     target = tmp_path / "memory.md"
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -796,21 +818,26 @@ async def test_tool_call_persists_memory_file_after_background_write(
     try:
         event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert event["type"] == "response.done"
-        await _wait_until(lambda: "Their name is Aanya" in memory_file.read(target))
+        await _wait_until(lambda: "name: Aanya" in memory_file.read_raw(target))
         assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
     finally:
         await backend.close()
 
 
 @pytest.mark.asyncio
-async def test_tool_call_logs_warning_when_background_write_fails(
-    caplog,
-) -> None:
-    def failing_append(fact: str, path: str | None) -> None:
-        raise OSError("disk full")
+async def test_add_note_routes_through_injected_handler(tmp_path) -> None:
+    captured: list[tuple[str, str | None]] = []
 
+    def fake_add_note(text: str, *, path: str | None = None, **_: Any) -> str:
+        captured.append((text, path))
+        return "appended"
+
+    target = tmp_path / "memory.md"
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_add_note_call(text="She loves dinosaurs"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -818,7 +845,39 @@ async def test_tool_call_logs_warning_when_background_write_fails(
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=failing_append,
+        memory_file_path=str(target),
+        add_note_fn=fake_add_note,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(captured))
+        assert captured[0] == ("She loves dinosaurs", str(target))
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_set_about_logs_warning_when_background_write_fails(caplog) -> None:
+    def failing_set_key(key: str, value: str, path: str | None) -> None:
+        raise OSError("disk full")
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        set_key_fn=failing_set_key,
     )
 
     with caplog.at_level("WARNING"):
@@ -827,25 +886,26 @@ async def test_tool_call_logs_warning_when_background_write_fails(
         try:
             event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
             assert event["type"] == "response.done"
-            await _wait_until(lambda: any("remember write failed" in r.message for r in caplog.records))
+            await _wait_until(
+                lambda: any("set_about write failed" in r.message for r in caplog.records)
+            )
         finally:
             await backend.close()
 
     assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
-    assert not any(
-        "remember write succeeded" in r.message for r in caplog.records
-    )
+    assert not any("set_about write succeeded" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_tool_call_logs_info_when_background_write_succeeds(
-    caplog,
-) -> None:
-    def ok_append(fact: str, path: str | None) -> None:
+async def test_set_about_logs_info_when_background_write_succeeds(caplog) -> None:
+    def ok_set_key(key: str, value: str, path: str | None) -> None:
         return None
 
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -853,7 +913,7 @@ async def test_tool_call_logs_info_when_background_write_succeeds(
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=ok_append,
+        set_key_fn=ok_set_key,
     )
 
     with caplog.at_level("INFO"):
@@ -864,14 +924,49 @@ async def test_tool_call_logs_info_when_background_write_succeeds(
             assert event["type"] == "response.done"
             await _wait_until(
                 lambda: any(
-                    "remember write succeeded" in r.message
-                    and "Their name is Aanya" in r.message
+                    "set_about write succeeded" in r.message
+                    and "name" in r.message
+                    and "Aanya" in r.message
                     for r in caplog.records
                 )
             )
         finally:
             await backend.close()
 
-    assert not any(
-        "remember write failed" in r.message for r in caplog.records
+    assert not any("set_about write failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_set_about_with_unknown_key_is_rejected(caplog) -> None:
+    calls: list[tuple] = []
+
+    def spy_set_key(key: str, value: str, path: str | None) -> None:
+        calls.append((key, value))
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_set_about_call(key="ssn", value="123-45-6789"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        set_key_fn=spy_set_key,
+    )
+
+    with caplog.at_level("WARNING"):
+        await backend.connect({"instructions": "hi", "voice": "alloy"})
+        gen = backend.events()
+        try:
+            event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert event["type"] == "response.done"
+        finally:
+            await backend.close()
+
+    assert calls == []
+    assert session.tool_responses[0][0].response == {"output": {"status": "ignored"}}
+    assert any("set_about call rejected" in r.message for r in caplog.records)

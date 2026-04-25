@@ -13,3 +13,4 @@ google-cloud-storage==2.19.0
 indic-transliteration==2.3.64
 openai>=1.59.0
 google-genai>=1.0.0
+ollama>=0.4.0

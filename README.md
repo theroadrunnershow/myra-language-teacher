@@ -312,30 +312,89 @@ KIDS_TEACHER_GEMINI_MODEL=gemini-2.5-flash-native-audio-preview-12-2025
 
 ### Persistent memory
 
-Kids-teacher now supports a small markdown-backed memory file that is loaded into the system prompt at session start:
+Kids-teacher keeps a small sectioned markdown file that is loaded into the system prompt at session start:
 
 ```bash
-~/.myra/memory.md
+~/.myra/memory.md      # default; override via MYRA_MEMORY_FILE
 ```
 
-Override it with:
-
-```bash
-export MYRA_MEMORY_FILE=/custom/path/memory.md
-```
-
-How it works:
-- If the file is missing, startup still works; the session just starts with no persistent memory.
-- On any provider, the robot asks the child "What should I call you?" if it does not yet know their name.
-- On the **Gemini** path, if the child or parent explicitly asks the robot to remember something, Gemini can persist that fact mid-session into `memory.md`.
-- On the **OpenAI** path, memory is currently read-only: the robot can use pre-seeded memory and the spoken name for the current session, but it will not write new facts yet.
-
-You can pre-seed the file manually before a session:
+The file has three sections:
 
 ```markdown
 # Things to remember about the child
 
-- Their name is Aanya _(2026-04-24)_
+## Current
+- name: Aanya _(2026-04-25)_
+- mom_name: Diya _(2026-04-25)_
+- favourite_colour: blue _(2026-04-25)_
+
+## Notes
+- She loves dinosaurs _(2026-04-24)_
+- She is afraid of vacuum cleaners _(2026-04-24)_
+
+## History
+- name: Abi _(2026-04-24 → 2026-04-25)_
+```
+
+Only **`## Current`** and **`## Notes`** are injected into the system instruction; **`## History`** is a parent-facing audit log and never enters the model context (re-injecting superseded values would put contradictions back in front of the model).
+
+If the file is missing, startup still works — the session just starts with no persistent memory. On any provider, the robot asks "What should I call you?" if it does not yet know the child's name.
+
+#### Memory tools (Gemini path)
+
+When the child or parent explicitly asks the robot to remember something, Gemini calls one of two tools:
+
+- `set_about(key, value)` — single-valued slots. Allowed keys:
+  `name`, `age`, `pronouns`, `mom_name`, `dad_name`, `favourite_colour`,
+  `favourite_animal`, `favourite_food`, `favourite_book`. Setting a key supersedes the previous value into `## History`.
+- `add_note(text)` — free-form observations. Routed through a relevance-filtered reconciler before persisting.
+
+On the OpenAI path memory is currently read-only — the robot uses pre-seeded memory but does not write new facts.
+
+#### Note reconciler (LLM-assisted dedup)
+
+When `add_note` runs and there are already ≥ 3 existing notes, the reconciler:
+
+1. Picks the top-K most-similar existing notes via rapidfuzz `token_set_ratio`.
+2. Sends only those K + the new note to a small text LLM (Ollama by default).
+3. The LLM returns one of: `skip` (already covered) | `append` (new info) | `merge` (combine with existing) | `replace` (supersede existing).
+4. Replaced/merged notes flow into `## History`.
+
+LLM failures (network, malformed JSON, missing SDK) fall back to a plain append. The realtime session never blocks — reconciler writes run on a background task on the Gemini path.
+
+#### Reconciler prerequisites
+
+Default provider is **Ollama** (local on the robot, or remote via `OLLAMA_HOST`). The `ollama` Python SDK is in `requirements.txt` (`pip install -r requirements.txt`). For the default you also need an Ollama server reachable from the host running kids-teacher:
+
+```bash
+# On whichever host runs Ollama
+ollama pull llama3.2:3b
+ollama serve &                            # if not already running
+
+# Or point at a remote Ollama:
+export OLLAMA_HOST=http://10.0.0.5:11434
+```
+
+Switch providers via env (no reinstall — `openai` and `google-genai` are already in `requirements.txt`):
+
+| Variable                  | Default       | Notes |
+|---------------------------|---------------|-------|
+| `MYRA_TEXT_LLM_PROVIDER`  | `ollama`      | `ollama` \| `gemini` \| `openai` |
+| `MYRA_TEXT_LLM_MODEL`     | per-provider  | Default: `llama3.2:3b` (ollama), `gemini-2.5-flash` (gemini), `gpt-4o-mini` (openai) |
+
+`gemini` reuses `GEMINI_API_KEY`; `openai` reuses `OPENAI_API_KEY`.
+
+#### Pre-seeding the memory file
+
+You can write `## Current` and `## Notes` by hand before a session — the bullet format is the same one the robot writes:
+
+```markdown
+# Things to remember about the child
+
+## Current
+- name: Aanya _(2026-04-24)_
+
+## Notes
 - They love tigers _(2026-04-24)_
 ```
 
@@ -407,6 +466,9 @@ Provider + backend model:
 | `GEMINI_API_KEY`                   | _(required when provider=gemini)_         | Google AI Studio API key — https://aistudio.google.com/apikey |
 | `KIDS_TEACHER_GEMINI_MODEL`        | `gemini-2.5-flash-native-audio-preview-12-2025` | Gemini Live model. Accepted: `gemini-2.5-flash-native-audio-preview-12-2025` + `gemini-3.1-flash-live-preview` on AI Studio, `gemini-live-2.5-flash-native-audio` on Vertex. The Vertex id will 404 on the AI Studio endpoint |
 | `MYRA_MEMORY_FILE`                 | `~/.myra/memory.md`                       | Optional override for the persistent kids-teacher memory markdown file |
+| `MYRA_TEXT_LLM_PROVIDER`           | `ollama`                                  | Provider for the note reconciler: `ollama` \| `gemini` \| `openai` |
+| `MYRA_TEXT_LLM_MODEL`              | `llama3.2:3b`                             | Reconciler model id (per-provider default applied when blank) |
+| `OLLAMA_HOST`                      | _(local)_                                 | Optional remote Ollama endpoint (e.g. `http://10.0.0.5:11434`) |
 
 Review storage (both default **OFF**; enable explicitly per deployment):
 
@@ -641,7 +703,10 @@ myra-language-teacher/
 │   ├── kids_teacher_flow.py         # Orchestrator; wires safety + review around the handler
 │   ├── kids_teacher_routes.py       # FastAPI router for kids-teacher status + review endpoints
 │   ├── kids_teacher_robot_bridge.py # Robot audio bridge (playback thread + mic pump)
-│   └── robot_kids_teacher.py        # Kids-teacher CLI entry (headless runtime)
+│   ├── robot_kids_teacher.py        # Kids-teacher CLI entry (headless runtime)
+│   ├── memory_file.py               # Sectioned markdown memory store (Current / Notes / History)
+│   ├── memory_reconciler.py         # rapidfuzz relevance filter + LLM-assisted note dedup
+│   └── text_llm.py                  # Provider-agnostic text completion (ollama default; gemini/openai)
 ├── profiles/
 │   └── kids_teacher/
 │       ├── instructions.txt         # Locked preschool persona (required)
@@ -682,7 +747,10 @@ myra-language-teacher/
 │   ├── test_kids_review_store.py
 │   ├── test_kids_teacher_flow.py
 │   ├── test_api_kids_teacher.py
-│   └── test_robot_kids_teacher.py
+│   ├── test_robot_kids_teacher.py
+│   ├── test_memory_file.py
+│   ├── test_memory_reconciler.py
+│   └── test_text_llm.py
 ├── infra/                       # Terraform — GCP Cloud Run infrastructure
 │   ├── providers.tf
 │   ├── cloud_run.tf
