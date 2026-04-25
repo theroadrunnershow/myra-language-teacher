@@ -50,3 +50,7 @@ tools/*_metrics.json
 gcp_metrics.json
 *.wav
 data/custom_words.runtime.v1.json
+
+# Local face-rec encodings (biometric data — never commit)
+faces/
+**/.myra/faces.pkl
