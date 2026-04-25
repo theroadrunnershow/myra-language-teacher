@@ -200,6 +200,11 @@ class KidsTeacherFlowDeps:
     # motion director, when it ships). Wired only for ``provider=gemini``
     # with a running camera worker. Left ``None`` otherwise.
     gaze_loop_factory: Optional[MicPumpFactory] = None
+    # Optional face-rec on-demand re-check coroutine factory (FR-KID-16).
+    # Polls bbox count every N seconds and announces new arrivals via
+    # ``handler.push_text(...)``. Wired by the robot entry point on
+    # ``provider=gemini`` only when ``face_recognition`` is available.
+    face_rec_loop_factory: Optional[MicPumpFactory] = None
 
 
 async def run_kids_teacher_session(
@@ -286,6 +291,13 @@ async def run_kids_teacher_session(
             deps.gaze_loop_factory(handler, gaze_stop_event)
         )
 
+    face_rec_stop_event = asyncio.Event()
+    face_rec_task: Optional[asyncio.Task] = None
+    if deps.face_rec_loop_factory is not None:
+        face_rec_task = asyncio.create_task(
+            deps.face_rec_loop_factory(handler, face_rec_stop_event)
+        )
+
     try:
         await handler.start()
         run_task = asyncio.create_task(handler.run())
@@ -341,6 +353,15 @@ async def run_kids_teacher_session(
             except (asyncio.CancelledError, Exception) as exc:
                 logger.debug(
                     "[kids_teacher_flow] gaze loop ended: %s", exc
+                )
+        face_rec_stop_event.set()
+        if face_rec_task is not None:
+            face_rec_task.cancel()
+            try:
+                await face_rec_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] face-rec loop ended: %s", exc
                 )
         _call_hook_lifecycle(hooks, "stop")
 
