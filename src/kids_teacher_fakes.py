@@ -40,6 +40,7 @@ class FakeRealtimeBackend:
         # Call recorders for assertions.
         self.connect_calls: List[dict] = []
         self.audio_chunks: List[bytes] = []
+        self.video_chunks: List[bytes] = []
         self.text_messages: List[str] = []
         self.cancel_calls: int = 0
         self.close_calls: int = 0
@@ -55,6 +56,9 @@ class FakeRealtimeBackend:
 
     async def send_audio(self, chunk: bytes) -> None:
         self.audio_chunks.append(chunk)
+
+    async def send_video(self, jpeg_bytes: bytes) -> None:
+        self.video_chunks.append(jpeg_bytes)
 
     async def send_text(self, text: str) -> None:
         self.text_messages.append(text)

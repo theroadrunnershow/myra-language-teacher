@@ -189,6 +189,22 @@ class KidsTeacherFlowDeps:
     # Headless/test callers leave this as ``None``; the robot entry point
     # wires ``pump_microphone_to_backend``.
     mic_pump_factory: Optional[MicPumpFactory] = None
+    # Optional video pump coroutine factory. Mirrors ``mic_pump_factory``
+    # but pushes JPEG frames into ``handler.push_video(...)`` at ~1 fps.
+    # Wired by the robot entry point for ``provider=gemini`` only — left
+    # ``None`` for OpenAI Realtime (no video channel) and headless tests.
+    video_pump_factory: Optional[MicPumpFactory] = None
+    # Optional gaze-tracking loop factory (Chunk H, FR-KID-26..30). Receives
+    # the live handler and a stop event; runs the FaceTracker tick loop
+    # which publishes ``(pan, tilt)`` targets to its own subscribers (the
+    # motion director, when it ships). Wired only for ``provider=gemini``
+    # with a running camera worker. Left ``None`` otherwise.
+    gaze_loop_factory: Optional[MicPumpFactory] = None
+    # Optional face-rec on-demand re-check coroutine factory (FR-KID-16).
+    # Polls bbox count every N seconds and announces new arrivals via
+    # ``handler.push_text(...)``. Wired by the robot entry point on
+    # ``provider=gemini`` only when ``face_recognition`` is available.
+    face_rec_loop_factory: Optional[MicPumpFactory] = None
 
 
 async def run_kids_teacher_session(
@@ -261,6 +277,27 @@ async def run_kids_teacher_session(
             deps.mic_pump_factory(handler, mic_stop_event)
         )
 
+    video_stop_event = asyncio.Event()
+    video_task: Optional[asyncio.Task] = None
+    if deps.video_pump_factory is not None:
+        video_task = asyncio.create_task(
+            deps.video_pump_factory(handler, video_stop_event)
+        )
+
+    gaze_stop_event = asyncio.Event()
+    gaze_task: Optional[asyncio.Task] = None
+    if deps.gaze_loop_factory is not None:
+        gaze_task = asyncio.create_task(
+            deps.gaze_loop_factory(handler, gaze_stop_event)
+        )
+
+    face_rec_stop_event = asyncio.Event()
+    face_rec_task: Optional[asyncio.Task] = None
+    if deps.face_rec_loop_factory is not None:
+        face_rec_task = asyncio.create_task(
+            deps.face_rec_loop_factory(handler, face_rec_stop_event)
+        )
+
     try:
         await handler.start()
         run_task = asyncio.create_task(handler.run())
@@ -298,6 +335,33 @@ async def run_kids_teacher_session(
             except (asyncio.CancelledError, Exception) as exc:
                 logger.debug(
                     "[kids_teacher_flow] mic pump ended: %s", exc
+                )
+        video_stop_event.set()
+        if video_task is not None:
+            video_task.cancel()
+            try:
+                await video_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] video pump ended: %s", exc
+                )
+        gaze_stop_event.set()
+        if gaze_task is not None:
+            gaze_task.cancel()
+            try:
+                await gaze_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] gaze loop ended: %s", exc
+                )
+        face_rec_stop_event.set()
+        if face_rec_task is not None:
+            face_rec_task.cancel()
+            try:
+                await face_rec_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] face-rec loop ended: %s", exc
                 )
         _call_hook_lifecycle(hooks, "stop")
 

@@ -151,11 +151,14 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     # directions so the safety layer keeps working.
     assert config.input_audio_transcription is not None
     assert config.output_audio_transcription is not None
-    assert len(config.tools) == 1
-    declarations = config.tools[0].function_declarations
-    names = [d.name for d in declarations]
-    assert names == ["set_about", "add_note"]
-    for d in declarations:
+    # Memory tool exposes two FunctionDeclarations (set_about + add_note);
+    # face tools (remember_face, forget_face) are separate Tool entries
+    # asserted in their own test below.
+    assert len(config.tools) == 3
+    memory_decls = config.tools[0].function_declarations
+    memory_names = [d.name for d in memory_decls]
+    assert memory_names == ["set_about", "add_note"]
+    for d in memory_decls:
         assert d.behavior == "NON_BLOCKING"
 
 
@@ -970,3 +973,604 @@ async def test_set_about_with_unknown_key_is_rejected(caplog) -> None:
     assert calls == []
     assert session.tool_responses[0][0].response == {"output": {"status": "ignored"}}
     assert any("set_about call rejected" in r.message for r in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Chunk G: remember_face / forget_face tool calls
+# ---------------------------------------------------------------------------
+
+
+def _build_face_tool_call_message(
+    *,
+    name: str,
+    args: dict[str, Any],
+    call_id: str = "call-face-1",
+) -> Any:
+    function_call = SimpleNamespace(id=call_id, name=name, args=args)
+    return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_encoding_with_one_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    enroll_calls: list[tuple[str, Any, Any]] = []
+
+    def fake_enroll(name: str, frame: Any, relationship: Any = None) -> Any:
+        enroll_calls.append((name, frame, relationship))
+        return face_service.EnrollResult.OK
+
+    monkeypatch.setattr(face_service, "enroll_from_frame", fake_enroll)
+
+    note_appends: list[tuple[str, Any]] = []
+
+    def append_note(text: str, path: Any) -> None:
+        note_appends.append((text, path))
+
+    fake_frame = object()
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya", "relationship": "is Myra's aunt"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: fake_frame,
+        append_note_fn=append_note,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_appends))
+    finally:
+        await backend.close()
+
+    assert enroll_calls == [("Aunt Priya", fake_frame, "is Myra's aunt")]
+    assert note_appends[0][0] == "Aunt Priya is Myra's aunt"
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "ok"}}
+
+
+@pytest.mark.asyncio
+async def test_remember_face_refuses_when_zero_faces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.NO_FACE,
+    )
+
+    note_appends: list[Any] = []
+
+    def append_note(text: str, path: Any) -> None:
+        note_appends.append(text)
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        append_note_fn=append_note,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "no_face"}}
+    assert note_appends == []
+
+
+@pytest.mark.asyncio
+async def test_remember_face_refuses_when_multiple_faces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.MULTIPLE_FACES,
+    )
+
+    note_appends: list[Any] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        append_note_fn=lambda text, path: note_appends.append(text),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "multiple_faces"}}
+    assert note_appends == []
+
+
+@pytest.mark.asyncio
+async def test_remember_face_refuses_when_capacity_exceeded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.CAPACITY_EXCEEDED,
+    )
+
+    note_appends: list[Any] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        append_note_fn=lambda text, path: note_appends.append(text),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "capacity"}}
+    assert note_appends == []
+
+
+@pytest.mark.asyncio
+async def test_remember_face_refuses_when_library_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.LIBRARY_MISSING,
+    )
+
+    note_appends: list[Any] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        append_note_fn=lambda text, path: note_appends.append(text),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "unavailable"}}
+    assert note_appends == []
+
+
+@pytest.mark.asyncio
+async def test_remember_face_refuses_when_no_camera(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When face_frame_provider is None (camera unavailable / OpenAI), the
+    handler must short-circuit with a no_face refusal and never call
+    face_service.enroll_from_frame.
+    """
+    import face_service
+
+    enroll_calls: list[Any] = []
+
+    def fake_enroll(*a: Any, **kw: Any) -> Any:
+        enroll_calls.append((a, kw))
+        return face_service.EnrollResult.OK
+
+    monkeypatch.setattr(face_service, "enroll_from_frame", fake_enroll)
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=None,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response["output"]["status"] == "no_face"
+    assert enroll_calls == []
+
+
+@pytest.mark.asyncio
+async def test_forget_face_removes_encoding_and_memory_line(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    forget_calls: list[str] = []
+
+    def fake_forget(name: str) -> bool:
+        forget_calls.append(name)
+        return True
+
+    monkeypatch.setattr(face_service, "forget", fake_forget)
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "## Notes\n"
+        "- Aunt Priya is Myra's aunt _(2026-04-24)_\n"
+        "- Their name is Aanya _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    assert forget_calls == ["Aunt Priya"]
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "ok"}}
+    # The relationship note is removed from ``## Notes``. It may resurface
+    # in ``## History`` (replace_notes archives removed entries there);
+    # only ``## Notes`` content feeds the system instruction, so a check
+    # against the Notes section is what matters.
+    notes = memory_file.list_notes(target)
+    assert all("Aunt Priya" not in note for note in notes)
+    assert any("Their name is Aanya" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_forget_face_returns_not_found_when_unknown(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(face_service, "forget", lambda name: False)
+
+    # A memory file that does NOT contain the queried name — the helper
+    # must therefore not modify it.
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "## Notes\n"
+        "- Their name is Aanya _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+    original = target.read_text(encoding="utf-8")
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Stranger"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "not_found"}}
+    assert target.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.asyncio
+async def test_forget_face_does_not_wipe_substring_collisions(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """merged_bug_003: ``forget_face('Sam')`` must not delete unrelated lines.
+
+    Bullets like ``"Their name is Samira"``, ``"Their favourite character
+    is Sam"``, and ``"Sam is Myra's friend"`` all contain the substring
+    'sam'. Only the line that *starts* with the name token (the one
+    written by ``remember_face``) should be removed.
+    """
+    import face_service
+
+    monkeypatch.setattr(face_service, "forget", lambda name: True)
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "## Notes\n"
+        "- Their name is Samira _(2026-04-24)_\n"
+        "- Their favourite character is Sam _(2026-04-24)_\n"
+        "- Sam is Myra's friend _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Sam"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    notes = memory_file.list_notes(target)
+    # The relationship note ("Sam is Myra's friend") starts with the name
+    # token and is the legitimate target — that one MUST be gone from Notes.
+    # (replace_notes archives it under History, but History never feeds the
+    # system instruction so it's effectively forgotten.)
+    assert all("Sam is Myra's friend" not in note for note in notes)
+    # The two collision cases must survive in Notes.
+    assert any("Their name is Samira" in note for note in notes)
+    assert any("Their favourite character is Sam" in note for note in notes)
+
+
+@pytest.mark.asyncio
+async def test_forget_face_continues_memory_cleanup_when_face_forget_raises(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """merged_bug_003: face_service.forget exception must not abort memory cleanup.
+
+    The asymmetric pre-fix behavior was: log + early-return ``not_found`` —
+    leaving the relationship line in memory.md AND lying to the parent.
+    The fix logs + continues so memory.md still gets cleaned, and the
+    response reflects what actually happened.
+    """
+    import face_service
+
+    def boom(name: str) -> bool:
+        raise OSError("simulated faces.pkl corruption")
+
+    monkeypatch.setattr(face_service, "forget", boom)
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "## Notes\n"
+        "- Aunt Priya is Myra's aunt _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    # Memory cleanup ran and removed the note; status reports the truth.
+    assert response == {"output": {"status": "ok"}}
+    notes = memory_file.list_notes(target)
+    assert all("Aunt Priya" not in note for note in notes)
+
+
+def test_face_tools_not_registered_on_openai_backend() -> None:
+    """The OpenAI backend builds its session payload from the profile's
+    allowed_tools list. ``remember_face`` / ``forget_face`` are Gemini-only
+    (FR-KID-23); they must not appear there. The locked kids-teacher
+    profile ships an empty tools allowlist so the OpenAI session payload
+    cannot accidentally surface them.
+    """
+    from kids_teacher_profile import load_profile
+
+    profile = load_profile(present_names=[])
+    assert "remember_face" not in profile.allowed_tools
+    assert "forget_face" not in profile.allowed_tools
+
+
+def test_remember_face_tool_declaration_present_on_gemini() -> None:
+    """The Gemini live config must register the memory tools (set_about /
+    add_note) alongside the face tools (remember_face / forget_face). The
+    face tools are Gemini-only — they live in their own FunctionDeclaration
+    Tool entries, not bundled into the memory Tool.
+    """
+    config = build_gemini_live_config(
+        {"instructions": "hi", "voice": "alloy"}, _FakeTypes
+    )
+    declared_names: set[str] = set()
+    for tool in config.tools:
+        for decl in tool.function_declarations:
+            declared_names.add(decl.name)
+    assert "set_about" in declared_names
+    assert "add_note" in declared_names
+    assert "remember_face" in declared_names
+    assert "forget_face" in declared_names

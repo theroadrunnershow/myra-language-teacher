@@ -59,16 +59,16 @@ Pollen's prompt is general-purpose. Myra is 4. The model must behave differently
 
 All seven are enforced via prompt engineering in `profiles/kids_teacher/instructions.txt`. No runtime code.
 
-### 2.2A Adult-directed visual commands (prompt-only in v1)
+### 2.2A Requested visual tasks (prompt-only in v1)
 
-The default camera behavior is child-led (§2.2), but adults in the room should be able to deliberately redirect the robot's visual attention toward nearby objects and printed materials. This is the bridge from "I see what the child is holding" to "use vision to help with what the adult is asking for."
+The default camera behavior is child-led (§2.2), but **either the child or an adult** in the room should be able to deliberately redirect the robot's visual attention toward nearby objects and printed materials. This is the bridge from "I see what the child is holding" to "use vision to help with what is being asked for." A 4-year-old will not reliably distinguish "find a book" from "read **this** book" — both phrasings are valid invitations from either speaker. SR-KID-2's blocklist still catches dangerous-object prompts regardless of who asked.
 
-- **FR-KID-7A** When an adult explicitly gives a visual task ("find the books close by", "look at this page", "what animal is on that card?"), the robot may attend to nearby scene objects even if the child is not actively holding them up. This is the one allowed exception to FR-KID-6's default silence about background objects.
-- **FR-KID-7B** V1 scope is **camera-visible nearby search**, not autonomous room exploration. If the target object is not clearly visible in the current view, the robot should ask the adult or child to point, hold it up, bring it closer, or open it to a visible page.
-- **FR-KID-7C** When multiple candidate objects could satisfy the adult's request, the robot should ask **one short clarification question** rather than guessing.
+- **FR-KID-7A** When the child or an adult explicitly gives a visual task ("read me this book", "find the books close by", "look at this page", "what animal is on that card?"), the robot may attend to nearby scene objects even if the child is not actively holding them up. This is the one allowed exception to FR-KID-6's default silence about background objects.
+- **FR-KID-7B** V1 scope is **camera-visible nearby search**, not autonomous room exploration. If the target object is not clearly visible in the current view, the robot should ask the speaker to point, hold it up, bring it closer, or open it to a visible page.
+- **FR-KID-7C** When multiple candidate objects could satisfy the request, the robot should ask **one short clarification question** rather than guessing.
 - **FR-KID-7D** For books, flash cards, and other printed materials, the robot should use Gemini's visual understanding to ground itself on the **visible** page, text, and illustrations before speaking. It must not pretend to know unreadable text or unseen pages.
 - **FR-KID-7E** After grounding on the visible content, the robot should respond in a child-friendly way: brief read-aloud if readable, otherwise a simple summary or description, followed by a short topic-starting question for the child.
-- **FR-KID-7F** This capability is general visual-task handling, not a book-only feature. Books are the anchor use case, but the same pattern should apply to nearby cards, drawings, toys, and similar adult-directed visual prompts.
+- **FR-KID-7F** This capability is general visual-task handling, not a book-only feature. Books are the anchor use case, but the same pattern should apply to nearby cards, drawings, toys, and similar visual prompts from either the child or an adult.
 
 Still prompt-only in v1. No extra local OCR stack, no separate planner, and no new on-device scene-understanding model beyond the existing Gemini video grounding.
 
@@ -105,11 +105,13 @@ objects the child is holding up or pointing at.
   about it. Wait for their answer before continuing.
 - Only one object at a time. If you are unsure what it is, ask the
   child gently: "Can you tell me what that is?"
-- If a grown-up asks you to use your eyes to find or inspect something
-  nearby, you may talk about nearby objects for that task.
+- If the child or a grown-up asks you to use your eyes to find or
+  inspect something nearby ("read me this book", "find the books",
+  "look at this card"), you may talk about nearby objects for that
+  task.
 - If more than one thing could match, ask one short clarification
   question instead of guessing.
-- If a grown-up asks you to read a book or page, first look at the
+- If anyone asks you to read a book or page, first look at the
   visible page and only talk about what you can actually see. If you
   need a better view, ask them to hold it closer or open the page.
 - After you understand a visible page, give a short age-appropriate
@@ -247,7 +249,7 @@ The follow-up implementation only needs **new** tests for the child-specific lay
 | `test_safety_visual_redirect_keywords_trigger_redirect` | Assistant transcript mentioning "medicine" → REDIRECT category fires. |
 | `test_review_store_never_contains_frames` | End-to-end: run a mocked session with video, assert `data/kids_review.runtime.v1/` has no image files even with `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`. |
 | `test_instructions_contains_vision_section` | Locked profile loader exposes the "# When you can see the child" section (regression guard — a future prompt edit must not silently drop it). |
-| `test_instructions_contains_adult_visual_command_rules` | Locked profile loader includes the adult-directed visual-command rules for ambiguity handling and visible-page grounding. |
+| `test_instructions_contains_visual_command_rules` | Locked profile loader includes the requested-visual-task rules (child or adult speaker, ambiguity handling, visible-page grounding). |
 
 Light sanity tests for the lifted code (not redundant with Pollen's tests, but enough to catch our adaptation errors):
 
@@ -303,6 +305,7 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
    - Hold up a medicine bottle → robot redirects calmly to a safe topic.
    - Hold up nothing / cover the camera → robot continues normal audio conversation, does **not** mention not seeing.
    - Adult says "Find the books close by and read that to the child" with one clear book in view → robot grounds on the visible page or cover, gives a short age-appropriate read-aloud / summary, and asks the child a simple follow-up question.
+   - **Child** says "read me this book" with the book on the table (not held up) → robot engages on the visible book, same grounding + read-aloud + follow-up flow as the adult-initiated path. Regression guard for the FR-KID-7A loosening.
    - Same command with multiple plausible books in view → robot asks one short clarification question instead of choosing randomly.
    - Adult asks for a book read-aloud when the page is closed, too small, or not readable → robot asks for a closer / clearer / opened view instead of hallucinating unseen story content.
 3. Face recognition (with another adult in frame):
@@ -327,7 +330,7 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
 - **Gemini free-tier quota** — ~900 frames per 15-min session at 1 fps. Confirm during implementation; if the quota is tight, drop default to 0.5 fps. Single-knob change via `KIDS_TEACHER_CAMERA_FPS`.
 - **How long is "a few seconds"?** Prompt-engineering judgment call. Start with the wording above; adjust after observing Myra-in-the-loop if the robot over- or under-reacts.
 - **How much autonomous visual search is enough?** V1 scopes adult-directed commands to the current camera-visible scene plus a clarification prompt. If that feels too passive in practice, the next step would be a bounded head-scan behavior owned by the motion director rather than free-form room search inside the prompt.
-- **Tool-call plumbing sequencing.** `remember_face` / `forget_face` (FR-KID-10/11) and persistent-memory v2 (`remember` / `forget`) share the same Gemini Live tool-call wiring. Whoever lands first builds it; the other reuses. CLI face enrollment ships independently (FR-KID-12).
+- **Tool-call plumbing sequencing.** Persistent-memory v2's `remember` tool has already shipped (`kids_teacher_gemini_backend.py`); `remember_face` reuses the same `FunctionDeclaration` / `tool_call` / `send_tool_response` pattern. The companion `forget` tool was deliberately removed for simplicity (commit `fed006c`). `forget_face` (FR-KID-11) intentionally re-introduces the forget pattern for face-rec, where parent-driven removal is a stronger UX requirement (a wrong face encoding silently breaks greeting); the implementation should mirror the original `remember` pattern for the tool-call mechanics. CLI face enrollment ships independently (FR-KID-12).
 - **Speaker authority for enrollment (SR-KID-5).** Today's guardrail is prompt-only: the model decides whether the requester sounds like an adult. Hard speaker diarization / age detection is out of scope; revisit only if we observe Myra trying to over-enroll.
 - **Capacity past 30.** If we hit the cap in practice, options are (a) raise the cap (cheap — sub-second identification stays fine to ~1000 names) or (b) build a parent-facing prune UI. Defer until it bites.
 - **Encoding tolerance drift.** A child's face changes meaningfully over months. We're not handling this in v1; if false-negatives rise, the parent re-runs voice enrollment ("Myra, that's still you!") to add a fresh encoding for the same name.
@@ -337,4 +340,6 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
 
 ## What happens next
 
-This document is the requirements + design. It does **not** contain code changes, env-var changes, or dependency changes. Implementation (port Pollen's camera + encoder + sender, add child-specific prompt/safety/gate, add tests) is a **separate follow-up task** gated by the user.
+This document is the requirements + design. Implementation landed on `feat/camera-object-recognition` across nine chunks (A–I) — camera worker + encoder, Gemini video sender + provider gate, locked-profile vision section + visual-redirect keywords, `face_service` module, CLI enrollment, face-rec session lifecycle (sweep + recheck), gaze following, voice-driven `remember_face`/`forget_face` tools, and end-to-end retention regression tests. **88 new automated tests** added; full suite green at 629 passes.
+
+§6 manual verification (Pi 5 with Gemini API key + a second person in frame) remains the user's pre-merge step — automated tests can't exercise the real camera, dlib HOG, or motor-less head response. Open the umbrella PR for review when ready.

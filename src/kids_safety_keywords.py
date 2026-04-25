@@ -90,6 +90,21 @@ REDIRECT_CATEGORIES: dict[str, tuple[str, ...]] = {
 }
 
 
+# Visual-redirect backstop (SR-KID-3): if the assistant verbally names a
+# camera-visible object that is not safe for young children, route to the
+# REDIRECT path. The locked profile already instructs the model to refuse
+# describing these; this set is a defense-in-depth keyword filter on the
+# assistant transcript. Standalone "matches" and "lighter" were intentionally
+# dropped — they false-positive on benign preschool speech ("this matches your
+# shirt", "feathers are lighter than rocks") and SR-KID-2 already gates them
+# at the prompt level. The multi-word forms ("box of matches", "lighter
+# fluid") use ``_contains_term``'s tighter substring path.
+VISUAL_REDIRECT_KEYWORDS: tuple[str, ...] = (
+    "medication", "alcohol", "weapon", "gun", "knife", "pills",
+    "box of matches", "lighter fluid",
+)
+
+
 # Family-safe answer copy for each approved category.
 FAMILY_SAFE_TEXT: dict[str, str] = {
     "reproduction": (

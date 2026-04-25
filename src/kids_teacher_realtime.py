@@ -104,6 +104,39 @@ class KidsTeacherRealtimeHandler:
             return
         await self._backend.send_audio(chunk)
 
+    async def push_video(self, jpeg_bytes: bytes) -> None:
+        """Forward one JPEG video frame to the backend.
+
+        Pre-session and post-teardown frames are dropped silently so the
+        video sender loop never has to know the handler's lifecycle state.
+        Mirrors :meth:`push_audio`.
+        """
+        if not self.session_active:
+            return
+        await self._backend.send_video(jpeg_bytes)
+
+    async def push_text(self, text: str) -> None:
+        """Inject a system-style text turn mid-session.
+
+        Used by the on-demand face-rec loop to announce new arrivals
+        (FR-KID-16) without waiting for the next session boot. Pre-connect
+        and post-teardown messages are dropped silently — same lifecycle
+        gating as :meth:`push_video`.
+        """
+        if not self.session_active or not text:
+            return
+        await self._backend.send_text(text)
+
+    @property
+    def session_active(self) -> bool:
+        """True between a successful ``start()`` and ``stop()``.
+
+        The video sender loop polls this every tick so frames are only
+        sent while the backend session is open. Pre-connect, post-teardown,
+        and connect-failed states all evaluate to False.
+        """
+        return self._started and not self._stopped and not self._connect_failed
+
     async def interrupt(self) -> None:
         """User-initiated barge-in: flush assistant audio and cancel response."""
         await self._cancel_active_response(reason="external_interrupt")

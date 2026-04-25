@@ -224,6 +224,41 @@ def replace_notes(
 # ---------------------------------------------------------------------------
 
 
+def remove_notes_starting_with(
+    name: str,
+    path: str | os.PathLike[str] | None = None,
+) -> int:
+    """Drop ``## Notes`` entries whose body starts with ``name + " "`` or equals ``name``.
+
+    Used by ``forget_face`` to clean the relationship sentence
+    ``remember_face`` wrote (always shaped ``f"{name} {relationship}"``,
+    e.g. ``"Aunt Priya is Myra's aunt"``). We anchor on the start of the
+    note body so unrelated notes that merely mention the name are spared
+    (``forget_face("Sam")`` must NOT delete ``"Their name is Samira"`` or
+    ``"Their favourite character is Sam"``). Matches case-insensitively on
+    the note body (date suffix stripped). Removed notes flow into
+    ``## History`` via the existing :func:`replace_notes` machinery.
+
+    Returns the count of notes removed.
+    """
+    needle = _normalize(name).casefold()
+    if not needle:
+        return 0
+    target = resolve_memory_file_path(path)
+    if not target.exists():
+        return 0
+    state = _parse(read_raw(target))
+    indices = [
+        idx
+        for idx, (body, _) in enumerate(state.notes)
+        if body.casefold() == needle or body.casefold().startswith(needle + " ")
+    ]
+    if not indices:
+        return 0
+    replace_notes(removed_indices=indices, new_text=None, path=path)
+    return len(indices)
+
+
 def _today_iso() -> str:
     return _dt.date.today().isoformat()
 

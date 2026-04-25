@@ -23,6 +23,15 @@ if "faster_whisper" not in sys.modules:
 if "noisereduce" not in sys.modules:
     sys.modules["noisereduce"] = MagicMock()
 
+# ---------------------------------------------------------------------------
+# face_recognition (dlib) takes ~10 minutes to build from source on first
+# install and is robot-only. Stub it in sys.modules so face_service imports
+# cleanly on a dev laptop. Tests that exercise the recognition path patch the
+# stub's attributes directly.
+# ---------------------------------------------------------------------------
+if "face_recognition" not in sys.modules:
+    sys.modules["face_recognition"] = MagicMock()
+
 
 import speech_service  # noqa: E402 – imported after stubs are in place
 

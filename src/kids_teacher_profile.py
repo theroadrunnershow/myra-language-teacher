@@ -58,12 +58,19 @@ def load_profile(
     *,
     locked: bool = True,
     memory_file_path: Optional[str] = None,
+    present_names: Optional[list[str]] = None,
 ) -> KidsTeacherProfile:
     """Load the locked kids-teacher profile from disk.
 
     Raises ``ProfileValidationError`` if ``instructions.txt`` is missing or
     empty. Missing ``voice.txt`` falls back to ``DEFAULT_VOICE`` with a
     warning. Missing ``tools.txt`` is treated as an empty allowlist.
+
+    ``present_names`` is the deduped list of people the face-rec session-start
+    sweep just confirmed in the camera frame (FR-KID-15 / FR-KID-22). When
+    non-empty, a one-line note is appended after ``memory.md`` so the model
+    can greet by name. When ``None`` or empty, the section is omitted
+    entirely (FR-KID-18 / FR-KID-25).
     """
     base_dir = profile_dir or DEFAULT_PROFILE_DIR
 
@@ -89,6 +96,17 @@ def load_profile(
         memory_text = ""
     if memory_text:
         instructions = f"{instructions}\n\n{memory_text}"
+
+    if present_names:
+        # Stable order so logs and tests are deterministic across runs.
+        ordered = sorted({name.strip() for name in present_names if name and name.strip()})
+        if ordered:
+            joined = ", ".join(ordered)
+            instructions = (
+                f"{instructions}\n\n"
+                f"# People you can currently see\n"
+                f"You can currently see: {joined}."
+            )
 
     voice_path = os.path.join(base_dir, _VOICE_FILENAME)
     voice_raw = _read_text_file(voice_path)

@@ -36,6 +36,7 @@ from kids_safety_keywords import (
     REFUSAL_TEXT,
     SHORT_PHRASES,
     SOFT_FALLBACK,
+    VISUAL_REDIRECT_KEYWORDS,
 )
 from kids_teacher_types import KidsTeacherAdminPolicy, LanguageDetection
 
@@ -122,6 +123,21 @@ def classify_topic(
         category, matches = redirect
         return _apply_admin_policy(
             TopicClassification(TopicDecision.REDIRECT, category, tuple(matches)),
+            lowered,
+            admin_policy,
+        )
+
+    # SR-KID-3: visual-redirect backstop for assistant transcripts that name
+    # an unsafe nearby object (medicine, lighter, etc.). Runs after the
+    # disallowed/family-safe/redirect categories so existing decisions win.
+    visual_matches = _find_matches(lowered, VISUAL_REDIRECT_KEYWORDS)
+    if visual_matches:
+        return _apply_admin_policy(
+            TopicClassification(
+                TopicDecision.REDIRECT,
+                "visual_redirect",
+                tuple(visual_matches),
+            ),
             lowered,
             admin_policy,
         )
@@ -309,12 +325,18 @@ def _contains_refuse_keyword(text_lower: str) -> bool:
     return False
 
 
+def _contains_visual_redirect_keyword(text_lower: str) -> bool:
+    """SR-KID-3: assistant slip naming an unsafe camera-visible object."""
+    return bool(_find_matches(text_lower, VISUAL_REDIRECT_KEYWORDS))
+
+
 def validate_output(text: str, *, language: str = "english") -> tuple[str, bool]:
     """Validate assistant output before it is streamed.
 
     Replaces the text with a soft fallback when the output is empty, too
-    long, too many sentences, or contains disallowed-content keywords. Emits
-    a warning log on replacement so operators can audit.
+    long, too many sentences, contains disallowed-content keywords, or
+    names an unsafe camera-visible object (SR-KID-3 backstop). Emits a
+    warning log on replacement so operators can audit.
     """
     if text is None or not text.strip():
         logger.warning("[kids_safety] empty assistant output replaced with fallback")
@@ -334,9 +356,16 @@ def validate_output(text: str, *, language: str = "english") -> tuple[str, bool]
         )
         return (SOFT_FALLBACK, True)
 
-    if _contains_refuse_keyword(stripped.lower()):
+    lowered = stripped.lower()
+    if _contains_refuse_keyword(lowered):
         logger.warning(
             "[kids_safety] assistant output contained a REFUSE keyword; replacing"
+        )
+        return (SOFT_FALLBACK, True)
+
+    if _contains_visual_redirect_keyword(lowered):
+        logger.warning(
+            "[kids_safety] assistant output named an unsafe visual object; replacing"
         )
         return (SOFT_FALLBACK, True)
 

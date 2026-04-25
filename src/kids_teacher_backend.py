@@ -163,6 +163,8 @@ class RealtimeBackend(Protocol):
 
     async def send_audio(self, chunk: bytes) -> None: ...
 
+    async def send_video(self, jpeg_bytes: bytes) -> None: ...
+
     async def send_text(self, text: str) -> None: ...
 
     async def cancel_response(self) -> None: ...
@@ -214,6 +216,10 @@ class OpenAIRealtimeBackend:
         self._closed = False
         self._event_queue: asyncio.Queue[dict] = asyncio.Queue()
         self._reader_task: Optional[asyncio.Task] = None
+        # Set the first time send_video is called so we log "camera
+        # disabled: provider=openai" exactly once per session, not per
+        # frame. OpenAI Realtime does not accept video input.
+        self._send_video_logged = False
 
     @property
     def model(self) -> str:
@@ -361,6 +367,20 @@ class OpenAIRealtimeBackend:
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_backend] send_audio failed: %s", exc)
             await self._event_queue.put({"type": "error", "message": str(exc)})
+
+    async def send_video(self, jpeg_bytes: bytes) -> None:
+        """Defense-in-depth no-op for FR-KID-1.
+
+        OpenAI Realtime does not accept video on the live channel. The
+        robot orchestration is responsible for not even constructing a
+        :class:`CameraWorker` when ``provider=openai``; this method exists
+        so any leaked frame is dropped silently rather than reaching the
+        network. Logs once per session so the absence of vision is visible.
+        """
+        if not self._send_video_logged:
+            self._send_video_logged = True
+            logger.info("[kids_teacher_backend] camera disabled: provider=openai")
+        return
 
     async def send_text(self, text: str) -> None:
         if self._connection is None:
