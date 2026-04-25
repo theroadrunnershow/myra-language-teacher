@@ -194,6 +194,12 @@ class KidsTeacherFlowDeps:
     # Wired by the robot entry point for ``provider=gemini`` only — left
     # ``None`` for OpenAI Realtime (no video channel) and headless tests.
     video_pump_factory: Optional[MicPumpFactory] = None
+    # Optional gaze-tracking loop factory (Chunk H, FR-KID-26..30). Receives
+    # the live handler and a stop event; runs the FaceTracker tick loop
+    # which publishes ``(pan, tilt)`` targets to its own subscribers (the
+    # motion director, when it ships). Wired only for ``provider=gemini``
+    # with a running camera worker. Left ``None`` otherwise.
+    gaze_loop_factory: Optional[MicPumpFactory] = None
 
 
 async def run_kids_teacher_session(
@@ -273,6 +279,13 @@ async def run_kids_teacher_session(
             deps.video_pump_factory(handler, video_stop_event)
         )
 
+    gaze_stop_event = asyncio.Event()
+    gaze_task: Optional[asyncio.Task] = None
+    if deps.gaze_loop_factory is not None:
+        gaze_task = asyncio.create_task(
+            deps.gaze_loop_factory(handler, gaze_stop_event)
+        )
+
     try:
         await handler.start()
         run_task = asyncio.create_task(handler.run())
@@ -319,6 +332,15 @@ async def run_kids_teacher_session(
             except (asyncio.CancelledError, Exception) as exc:
                 logger.debug(
                     "[kids_teacher_flow] video pump ended: %s", exc
+                )
+        gaze_stop_event.set()
+        if gaze_task is not None:
+            gaze_task.cancel()
+            try:
+                await gaze_task
+            except (asyncio.CancelledError, Exception) as exc:
+                logger.debug(
+                    "[kids_teacher_flow] gaze loop ended: %s", exc
                 )
         _call_hook_lifecycle(hooks, "stop")
 

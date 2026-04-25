@@ -164,11 +164,13 @@ async def _run_session_async(
         if camera_worker is not None
         else None
     )
+    gaze_loop_factory = _maybe_make_gaze_loop_factory(camera_worker, provider)
     deps = KidsTeacherFlowDeps(
         backend_factory=backend_factory,
         hooks_factory=lambda: hooks,
         mic_pump_factory=_make_mic_pump_factory(mic_reader),
         video_pump_factory=video_pump_factory,
+        gaze_loop_factory=gaze_loop_factory,
     )
     await run_kids_teacher_session(config=config, deps=deps)
 
@@ -216,6 +218,97 @@ def _make_video_pump_factory(
                 raise
 
     return _pump
+
+
+_GAZE_FOLLOW_ENABLED_ENV_VAR = "KIDS_TEACHER_GAZE_FOLLOW_ENABLED"
+
+
+def _gaze_follow_enabled() -> bool:
+    """Read ``KIDS_TEACHER_GAZE_FOLLOW_ENABLED`` (default true)."""
+    raw = os.environ.get(_GAZE_FOLLOW_ENABLED_ENV_VAR, "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return True
+
+
+def _maybe_make_gaze_loop_factory(
+    camera_worker: Any, provider: str
+) -> Optional[Callable[[Any, asyncio.Event], Awaitable[None]]]:
+    """Return a gaze-loop factory for ``provider=gemini`` only.
+
+    Provider gate (FR-KID-30): no FaceTracker is constructed when
+    ``provider=openai`` — the loop relies on the same camera worker that
+    Chunk B's video pump uses, and that worker is itself off on OpenAI.
+    Returns ``None`` (with a single info log) when:
+
+    - ``provider != "gemini"`` — no gaze.
+    - ``camera_worker is None`` — gemini's camera probe failed (NFR-4)
+      or never got started; gaze has no input.
+    - ``KIDS_TEACHER_GAZE_FOLLOW_ENABLED`` is set to a falsey string —
+      operator kill-switch.
+
+    Also logs a single warning when ``face_service.HAS_FACE_REC`` is
+    False; the FaceTracker still constructs but every tick will publish
+    ``None`` because :func:`face_service.detect_face_bboxes` short-circuits
+    to ``[]`` (FR-KID-24 / NFR-7).
+    """
+    if provider != "gemini":
+        logger.info("[robot_kids_teacher] gaze disabled: provider=openai")
+        return None
+    if camera_worker is None:
+        logger.info("[robot_kids_teacher] gaze disabled: camera worker absent")
+        return None
+    if not _gaze_follow_enabled():
+        logger.info(
+            "[robot_kids_teacher] gaze disabled: %s=false",
+            _GAZE_FOLLOW_ENABLED_ENV_VAR,
+        )
+        return None
+
+    import face_service
+
+    if not face_service.HAS_FACE_REC:
+        logger.warning(
+            "[robot_kids_teacher] gaze loop running without face_recognition; "
+            "no targets will be published until dlib is installed"
+        )
+
+    return _make_gaze_loop_factory(camera_worker)
+
+
+def _make_gaze_loop_factory(
+    camera_worker: Any,
+) -> Callable[[Any, asyncio.Event], Awaitable[None]]:
+    """Return a coroutine factory that runs the FaceTracker loop.
+
+    A default debug-level logging subscriber is attached so the
+    ``gaze_target`` channel is observable even before the motion director
+    ships. The motion director will register its own subscriber through
+    ``FaceTracker.subscribe`` when it lands; this factory does not import
+    or depend on it.
+    """
+    from face_tracker import FaceTracker
+
+    child_name = os.environ.get("KIDS_TEACHER_CHILD_NAME", "").strip() or None
+
+    async def _loop(handler: Any, stop_event: asyncio.Event) -> None:
+        tracker = FaceTracker(camera_worker, child_name=child_name)
+
+        def _log_target(target: Optional[tuple[float, float]]) -> None:
+            if target is None:
+                logger.debug("[face_tracker] gaze_target=None")
+            else:
+                logger.debug(
+                    "[face_tracker] gaze_target=(%.3f, %.3f)", target[0], target[1]
+                )
+
+        tracker.subscribe(_log_target)
+        try:
+            await tracker.run(stop_event)
+        finally:
+            await tracker.stop()
+
+    return _loop
 
 
 def _build_backend_factory(provider: str) -> Callable[[], Any]:
