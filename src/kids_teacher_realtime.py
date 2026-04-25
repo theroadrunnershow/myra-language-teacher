@@ -115,6 +115,18 @@ class KidsTeacherRealtimeHandler:
             return
         await self._backend.send_video(jpeg_bytes)
 
+    async def push_text(self, text: str) -> None:
+        """Inject a system-style text turn mid-session.
+
+        Used by the on-demand face-rec loop to announce new arrivals
+        (FR-KID-16) without waiting for the next session boot. Pre-connect
+        and post-teardown messages are dropped silently — same lifecycle
+        gating as :meth:`push_video`.
+        """
+        if not self.session_active or not text:
+            return
+        await self._backend.send_text(text)
+
     @property
     def session_active(self) -> bool:
         """True between a successful ``start()`` and ``stop()``.
