@@ -107,14 +107,19 @@ def enroll_from_frame(
 ) -> EnrollResult:
     """Detect faces in ``frame`` and append the encoding under ``name``.
 
-    Caller (Chunk G) decides what verbal response to produce and owns any
-    ``memory.md`` writes; this module only persists the biometric encoding.
+    ``frame`` is the BGR numpy array produced by ``CameraWorker``. dlib's
+    HOG detector and CNN encoder were trained on RGB, so we swap channels
+    before calling ``face_recognition`` — same idiom as
+    :func:`encode_bgr_frame_as_jpeg`. Caller (Chunk G) decides what verbal
+    response to produce and owns any ``memory.md`` writes; this module
+    only persists the biometric encoding.
     """
     del relationship  # accepted for API parity with the tool-call layer; unused here.
     if not HAS_FACE_REC:
         return EnrollResult.LIBRARY_MISSING
 
-    locations = face_recognition.face_locations(frame, model="hog")
+    rgb = np.ascontiguousarray(frame[..., ::-1])
+    locations = face_recognition.face_locations(rgb, model="hog")
     if len(locations) == 0:
         return EnrollResult.NO_FACE
     if len(locations) > 1:
@@ -124,7 +129,7 @@ def enroll_from_frame(
     if name not in encodings and len(encodings) >= MAX_NAMES:
         return EnrollResult.CAPACITY_EXCEEDED
 
-    face_encs = face_recognition.face_encodings(frame, locations)
+    face_encs = face_recognition.face_encodings(rgb, locations)
     if not face_encs:
         # Detector saw a face but encoder couldn't compute it (rare blur/angle case).
         return EnrollResult.NO_FACE
@@ -143,7 +148,11 @@ def identify_in_frame(
     frame: np.ndarray,
     tolerance: float | None = None,
 ) -> list[str]:
-    """Return deduped names of recognized faces in ``frame`` (distance ≤ tolerance)."""
+    """Return deduped names of recognized faces in ``frame`` (distance ≤ tolerance).
+
+    ``frame`` is the BGR numpy array from ``CameraWorker``; we swap to RGB
+    before calling ``face_recognition`` (see :func:`enroll_from_frame`).
+    """
     if not HAS_FACE_REC:
         return []
 
@@ -158,10 +167,11 @@ def identify_in_frame(
             known_names.append(name)
             known_encs.append(enc)
 
-    locations = face_recognition.face_locations(frame, model="hog")
+    rgb = np.ascontiguousarray(frame[..., ::-1])
+    locations = face_recognition.face_locations(rgb, model="hog")
     if not locations:
         return []
-    face_encs = face_recognition.face_encodings(frame, locations)
+    face_encs = face_recognition.face_encodings(rgb, locations)
 
     threshold = _resolve_tolerance(tolerance)
     seen: list[str] = []
@@ -195,21 +205,25 @@ def detect_face_bboxes(
 ) -> list[tuple[int, int, int, int]]:
     """HOG bbox detection only (no encoding). Used by the gaze tracker (Chunk H).
 
-    When ``downscale`` is True, run detection on a ~480p downscale and rescale
+    ``frame`` is the BGR numpy array from ``CameraWorker``; we swap to RGB
+    before downscaling and detection (see :func:`enroll_from_frame`). When
+    ``downscale`` is True, run detection on a ~480p downscale and rescale
     bboxes back to the original-frame coordinate system.
     """
     if not HAS_FACE_REC:
         return []
 
-    if downscale and frame.shape[0] > DOWNSCALE_HEIGHT:
-        scale = frame.shape[0] / DOWNSCALE_HEIGHT
+    rgb = np.ascontiguousarray(frame[..., ::-1])
+
+    if downscale and rgb.shape[0] > DOWNSCALE_HEIGHT:
+        scale = rgb.shape[0] / DOWNSCALE_HEIGHT
         new_h = DOWNSCALE_HEIGHT
-        new_w = max(1, int(round(frame.shape[1] / scale)))
+        new_w = max(1, int(round(rgb.shape[1] / scale)))
         # Cheap nearest-neighbour resize via numpy slicing — keeps the module
         # free of an OpenCV dep (face_recognition itself uses Pillow internally).
-        ys = (np.linspace(0, frame.shape[0] - 1, new_h)).astype(np.int64)
-        xs = (np.linspace(0, frame.shape[1] - 1, new_w)).astype(np.int64)
-        small = frame[ys][:, xs]
+        ys = (np.linspace(0, rgb.shape[0] - 1, new_h)).astype(np.int64)
+        xs = (np.linspace(0, rgb.shape[1] - 1, new_w)).astype(np.int64)
+        small = rgb[ys][:, xs]
         locations = face_recognition.face_locations(small, model="hog")
         return [
             (
@@ -221,5 +235,5 @@ def detect_face_bboxes(
             for (top, right, bottom, left) in locations
         ]
 
-    locations = face_recognition.face_locations(frame, model="hog")
+    locations = face_recognition.face_locations(rgb, model="hog")
     return [(int(t), int(r), int(b), int(l)) for (t, r, b, l) in locations]

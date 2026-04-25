@@ -316,6 +316,177 @@ def test_on_demand_recheck_throttled_to_5s(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
+# merged_bug_004: known re-entry must not trigger the unknown-arrival prompt
+# ---------------------------------------------------------------------------
+
+
+def test_known_reentry_does_not_fire_unknown_prompt(monkeypatch) -> None:
+    """Daddy steps out and walks back in → no "Someone new is here" prompt.
+
+    Pre-fix behavior: when bbox count grew and ``identify_in_frame``
+    returned only already-known names, ``_announce`` fell through to the
+    else branch and pushed the unknown-arrival prompt. Fix: gate the
+    unknown branch on ``bbox_count > len(seen)`` (an actually
+    unidentified face is present), not ``new_names == []``.
+    """
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    bbox_iter = iter([[(0, 0, 0, 0)], [(0, 0, 0, 0), (1, 1, 1, 1)]])
+    monkeypatch.setattr(
+        face_service,
+        "detect_face_bboxes",
+        lambda frame, downscale=True: next(bbox_iter, []),
+    )
+    # Only Daddy is ever recognized — even on the second tick when the
+    # bbox count is 2, identify still returns just ["Daddy"]. Pre-fix
+    # this would fire the unknown prompt; post-fix it should be silent.
+    monkeypatch.setattr(
+        face_service,
+        "identify_in_frame",
+        lambda frame, tolerance=None: ["Daddy"],
+    )
+
+    factory = robot_kids_teacher._make_face_rec_loop_factory(
+        _FrameSourceWorker(),
+        initial_names=["Daddy"],
+        interval_sec=0.0,
+    )
+    handler = _RecordingHandler()
+    stop = asyncio.Event()
+
+    async def driver() -> None:
+        task = asyncio.create_task(factory(handler, stop))
+        for _ in range(20):
+            await asyncio.sleep(0)
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(driver())
+    assert robot_kids_teacher._FACE_UNKNOWN_ARRIVAL_NOTE not in handler.texts
+
+
+def test_unidentified_face_among_known_still_fires_unknown_prompt(monkeypatch) -> None:
+    """Known + stranger growing together → unknown prompt still fires.
+
+    The fix must not silence the legitimate stranger case: bbox count
+    grew to 2 but identify only matched 1 known name → there IS a face
+    we couldn't identify.
+    """
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    bbox_iter = iter([[], [(0, 0, 0, 0), (1, 1, 1, 1)]])
+    monkeypatch.setattr(
+        face_service,
+        "detect_face_bboxes",
+        lambda frame, downscale=True: next(bbox_iter, []),
+    )
+    # 2 bboxes detected, only 1 (Daddy) recognized — the other is a
+    # stranger we should announce.
+    monkeypatch.setattr(
+        face_service,
+        "identify_in_frame",
+        lambda frame, tolerance=None: ["Daddy"],
+    )
+
+    factory = robot_kids_teacher._make_face_rec_loop_factory(
+        _FrameSourceWorker(),
+        initial_names=["Daddy"],
+        interval_sec=0.0,
+    )
+    handler = _RecordingHandler()
+    stop = asyncio.Event()
+
+    async def driver() -> None:
+        task = asyncio.create_task(factory(handler, stop))
+        for _ in range(20):
+            await asyncio.sleep(0)
+            if handler.texts:
+                break
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(driver())
+    assert robot_kids_teacher._FACE_UNKNOWN_ARRIVAL_NOTE in handler.texts
+
+
+def test_throttled_arrival_announced_after_cooldown(monkeypatch) -> None:
+    """merged_bug_004: a person arriving during cooldown must not be lost.
+
+    Pre-fix the loop updated ``prev_bbox_count`` even on throttled growth
+    ticks, so once cooldown cleared the high-water mark already covered
+    the second arrival and no announcement ever fired. Fix: only advance
+    ``prev_bbox_count`` when an announcement actually went out.
+    """
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    bbox_state = {"count": 0}
+    monkeypatch.setattr(
+        face_service,
+        "detect_face_bboxes",
+        lambda frame, downscale=True: [(0, 0, 0, 0)] * bbox_state["count"],
+    )
+    monkeypatch.setattr(
+        face_service, "identify_in_frame", lambda frame, tolerance=None: []
+    )
+
+    clock = {"t": 1.0}
+
+    factory = robot_kids_teacher._make_face_rec_loop_factory(
+        _FrameSourceWorker(),
+        initial_names=[],
+        interval_sec=0.0,
+        monotonic=lambda: clock["t"],
+    )
+    handler = _RecordingHandler()
+    stop = asyncio.Event()
+
+    async def yield_a_few():
+        for _ in range(20):
+            await asyncio.sleep(0)
+
+    async def driver() -> int:
+        task = asyncio.create_task(factory(handler, stop))
+        # Daddy enters at t=1: announce.
+        bbox_state["count"] = 1
+        await yield_a_few()
+        first = len(handler.texts)
+        # Aunt Priya enters at t=1.5 (within cooldown): throttled.
+        clock["t"] = 1.5
+        bbox_state["count"] = 2
+        await yield_a_few()
+        mid = len(handler.texts)
+        # Cooldown clears at t=10. Bbox count is unchanged (still 2).
+        # Pre-fix: prev_bbox_count was bumped to 2 during the throttled
+        # tick, so 2>2 is False → silence. Aunt Priya is lost.
+        # Post-fix: prev_bbox_count is still 1, so 2>1 fires.
+        clock["t"] = 10.0
+        await yield_a_few()
+        final = len(handler.texts)
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        return first, mid, final
+
+    first, mid, final = asyncio.run(driver())
+    assert first == 1, "first arrival should announce immediately"
+    assert mid == 1, "second arrival inside cooldown should be throttled"
+    assert final == 2, (
+        f"throttled arrival should announce after cooldown clears; got {handler.texts}"
+    )
+
+
+# ---------------------------------------------------------------------------
 # 3. Provider gate + graceful degradation
 # ---------------------------------------------------------------------------
 

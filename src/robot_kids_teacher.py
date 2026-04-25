@@ -480,7 +480,9 @@ def _make_face_rec_loop_factory(
         except Exception:
             logger.debug("[robot_kids_teacher] push_text failed", exc_info=True)
 
-    async def _announce(handler: Any, frame: Any, known_names: set[str]) -> None:
+    async def _announce(
+        handler: Any, frame: Any, known_names: set[str], bbox_count: int
+    ) -> None:
         try:
             seen = face_service.identify_in_frame(frame)
         except Exception:
@@ -496,11 +498,24 @@ def _make_face_rec_loop_factory(
                     "[robot_kids_teacher] face-rec announce arrival: %s", name
                 )
                 await _push(handler, f"{name} just joined.")
-        else:
+            return
+        # No new recognized names. Only fire the unknown-arrival prompt when
+        # the recognizer matched fewer faces than the detector saw — i.e.
+        # there is a face we couldn't identify. A known person stepping out
+        # and walking back in (bbox count dipped then recovered) shows up
+        # here as ``seen=[<known>], bbox_count==len(seen)``; staying silent
+        # in that case avoids the false "Someone new is here" prompt the
+        # ultrareview flagged (merged_bug_004).
+        if bbox_count > len(seen):
             logger.info(
                 "[robot_kids_teacher] face-rec announce unknown arrival"
             )
             await _push(handler, _FACE_UNKNOWN_ARRIVAL_NOTE)
+        else:
+            logger.debug(
+                "[robot_kids_teacher] face-rec known re-entry, no announcement: %s",
+                seen,
+            )
 
     async def _loop(handler: Any, stop_event: asyncio.Event) -> None:
         if not face_service.HAS_FACE_REC:
@@ -514,10 +529,6 @@ def _make_face_rec_loop_factory(
                 if frame is not None:
                     bboxes = face_service.detect_face_bboxes(frame)
                     if len(bboxes) > prev_bbox_count:
-                        # Throttle: skip if a recent announcement is still
-                        # within the cool-down window. ``prev_bbox_count``
-                        # is updated below regardless so we don't fire on
-                        # the next tick for the same arrival.
                         now = monotonic()
                         within_cooldown = (
                             last_announcement_ts is not None
@@ -525,9 +536,15 @@ def _make_face_rec_loop_factory(
                             < _FACE_ARRIVAL_THROTTLE_SEC
                         )
                         if not within_cooldown:
-                            await _announce(handler, frame, known_names)
+                            await _announce(
+                                handler, frame, known_names, len(bboxes)
+                            )
                             last_announcement_ts = now
-                    prev_bbox_count = len(bboxes)
+                            # Only advance the high-water mark when we
+                            # actually announced. Updating during cooldown
+                            # would silently drop arrivals that landed
+                            # while we were quiet (merged_bug_004).
+                            prev_bbox_count = len(bboxes)
             except asyncio.CancelledError:
                 raise
             except Exception:

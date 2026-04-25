@@ -290,6 +290,71 @@ def test_detect_face_bboxes_no_downscale_passes_through(monkeypatch) -> None:
     assert bboxes == [(5, 6, 7, 8)]
 
 
+# ---------------------------------------------------------------------------
+# bug_001 regression: BGR frames must be swapped to RGB before reaching dlib
+# ---------------------------------------------------------------------------
+
+
+def _bgr_frame_with_marker() -> np.ndarray:
+    """Make a frame whose first pixel has distinguishable B and R channels.
+
+    BGR pixel (10, 20, 30) means B=10, G=20, R=30. After channel-swap to RGB
+    the first pixel must read (30, 20, 10). The regression tests use this
+    to assert face_service is passing RGB to dlib, not raw BGR.
+    """
+    frame = np.zeros((100, 100, 3), dtype=np.uint8)
+    frame[0, 0] = (10, 20, 30)  # BGR
+    return frame
+
+
+def test_enroll_from_frame_passes_rgb_to_face_recognition(monkeypatch) -> None:
+    enc = np.arange(128, dtype=np.float64)
+    _patch_detector(
+        monkeypatch,
+        locations=[(0, 100, 100, 0)],
+        encodings=[enc],
+    )
+    fr = sys.modules["face_recognition"]
+
+    face_service.enroll_from_frame("X", _bgr_frame_with_marker())
+
+    # Both face_locations and face_encodings should receive the RGB frame.
+    for call in (fr.face_locations.call_args, fr.face_encodings.call_args):
+        passed = call.args[0]
+        assert tuple(passed[0, 0]) == (30, 20, 10), (
+            "face_service should swap BGR→RGB before calling dlib (bug_001)"
+        )
+
+
+def test_identify_in_frame_passes_rgb_to_face_recognition(monkeypatch) -> None:
+    _patch_detector(
+        monkeypatch,
+        locations=[(0, 100, 100, 0)],
+        encodings=[np.zeros(128, dtype=np.float64)],
+        distances=np.array([0.1]),
+    )
+    fr = sys.modules["face_recognition"]
+    # Pre-seed encodings so identify actually proceeds to face_locations.
+    face_service.save_encodings({"Known": [np.zeros(128, dtype=np.float64)]})
+
+    face_service.identify_in_frame(_bgr_frame_with_marker())
+
+    passed = fr.face_locations.call_args.args[0]
+    assert tuple(passed[0, 0]) == (30, 20, 10)
+
+
+def test_detect_face_bboxes_passes_rgb_to_face_recognition(monkeypatch) -> None:
+    fr = sys.modules["face_recognition"]
+    fr.face_locations = MagicMock(return_value=[(5, 6, 7, 8)])
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    face_service.detect_face_bboxes(_bgr_frame_with_marker(), downscale=False)
+
+    passed = fr.face_locations.call_args.args[0]
+    assert tuple(passed[0, 0]) == (30, 20, 10)
+
+
 def test_no_frames_persisted_during_face_rec(monkeypatch, tmp_path) -> None:
     """FR-KID-21: enrollment + recognition must not leave images on disk.
 

@@ -1311,6 +1311,132 @@ async def test_forget_face_returns_not_found_when_unknown(
     assert target.read_text(encoding="utf-8") == original
 
 
+@pytest.mark.asyncio
+async def test_forget_face_does_not_wipe_substring_collisions(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """merged_bug_003: ``forget_face('Sam')`` must not delete unrelated lines.
+
+    Bullets like ``"Their name is Samira"``, ``"Their favourite character
+    is Sam"``, and ``"Sam is Myra's friend"`` all contain the substring
+    'sam'. Only the line that *starts* with the name token (the one
+    written by ``remember_face``) should be removed.
+    """
+    import face_service
+
+    monkeypatch.setattr(face_service, "forget", lambda name: True)
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "- Their name is Samira _(2026-04-24)_\n"
+        "- Their favourite character is Sam _(2026-04-24)_\n"
+        "- Sam is Myra's friend _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Sam"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    text = target.read_text(encoding="utf-8")
+    # The relationship line ("Sam is Myra's friend") starts with the name
+    # token and is the legitimate target — that one MUST be gone.
+    assert "Sam is Myra's friend" not in text
+    # The two collision cases must survive.
+    assert "Their name is Samira" in text
+    assert "Their favourite character is Sam" in text
+
+
+@pytest.mark.asyncio
+async def test_forget_face_continues_memory_cleanup_when_face_forget_raises(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """merged_bug_003: face_service.forget exception must not abort memory cleanup.
+
+    The asymmetric pre-fix behavior was: log + early-return ``not_found`` —
+    leaving the relationship line in memory.md AND lying to the parent.
+    The fix logs + continues so memory.md still gets cleaned, and the
+    response reflects what actually happened.
+    """
+    import face_service
+
+    def boom(name: str) -> bool:
+        raise OSError("simulated faces.pkl corruption")
+
+    monkeypatch.setattr(face_service, "forget", boom)
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+
+    target = tmp_path / "memory.md"
+    target.write_text(
+        "# Things to remember about the child\n\n"
+        "- Aunt Priya is Myra's aunt _(2026-04-24)_\n",
+        encoding="utf-8",
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="forget_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        memory_file_path=str(target),
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    # Memory cleanup ran and removed the line; status reports the truth.
+    assert response == {"output": {"status": "ok"}}
+    assert "Aunt Priya" not in target.read_text(encoding="utf-8")
+
+
 def test_face_tools_not_registered_on_openai_backend() -> None:
     """The OpenAI backend builds its session payload from the profile's
     allowed_tools list. ``remember_face`` / ``forget_face`` are Gemini-only

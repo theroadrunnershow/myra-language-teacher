@@ -638,12 +638,17 @@ class GeminiRealtimeBackend:
         try:
             removed_face = await asyncio.to_thread(face_service.forget, name)
         except Exception:
+            # Symmetric with the memory branch below: log + continue so
+            # memory.md still gets cleaned even when faces.pkl is corrupt
+            # or unreadable. Returning ``not_found`` here would skip the
+            # memory cleanup AND mislead the parent ("I don't think I
+            # remembered her") when in fact cleanup failed mid-flight.
             logger.warning(
-                "[kids_teacher_gemini_backend] forget_face failed for name=%r",
+                "[kids_teacher_gemini_backend] forget_face faces.pkl failed for name=%r",
                 name,
                 exc_info=True,
             )
-            return {"output": {"status": "not_found"}}
+            removed_face = False
         try:
             removed_lines = await asyncio.to_thread(
                 memory_remove_substring, name, self._memory_file_path

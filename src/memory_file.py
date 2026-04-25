@@ -115,10 +115,16 @@ def remove_lines_matching_substring(
     substring: str,
     path: str | os.PathLike[str] | None = None,
 ) -> int:
-    """Delete bullet lines whose body contains ``substring``. Returns count removed.
+    """Delete bullet lines whose body STARTS with ``substring``. Returns count removed.
 
-    Used by ``forget_face`` to drop the relationship line for a name. Matches
-    on the bullet body (date suffix stripped), case-insensitive.
+    Used by ``forget_face`` to drop the relationship line for a name. The
+    relationship lines written by ``remember_face`` always have the shape
+    ``f"{name} {relationship}"`` (e.g. ``"Aunt Priya is Myra's aunt"``), so
+    we anchor on the start of the bullet body to avoid wiping unrelated
+    facts that happen to mention the name (``forget_face("Sam")`` must NOT
+    delete ``"Their name is Samira"`` or ``"Their favourite character is
+    Sam"``). Matches case-insensitively on the bullet body (date suffix
+    stripped).
     """
     needle = _normalize_fact(substring).casefold()
     if not needle:
@@ -134,7 +140,8 @@ def remove_lines_matching_substring(
         removed = 0
         for line in current.splitlines():
             body = _entry_body(line)
-            if body and needle in body.casefold():
+            body_cf = body.casefold() if body else ""
+            if body_cf == needle or body_cf.startswith(needle + " "):
                 removed += 1
                 continue
             kept.append(line)
