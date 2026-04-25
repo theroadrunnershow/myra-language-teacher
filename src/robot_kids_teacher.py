@@ -196,7 +196,7 @@ async def _run_session_async(
     )
 
     hooks = build_robot_hooks(robot_controller)
-    backend_factory = _build_backend_factory(provider)
+    backend_factory = _build_backend_factory(provider, camera_worker)
     video_pump_factory = (
         _make_video_pump_factory(camera_worker)
         if camera_worker is not None
@@ -542,16 +542,27 @@ def _make_face_rec_loop_factory(
     return _loop
 
 
-def _build_backend_factory(provider: str) -> Callable[[], Any]:
+def _build_backend_factory(
+    provider: str, camera_worker: Any = None
+) -> Callable[[], Any]:
     """Return a zero-arg factory for the active realtime backend.
 
     Isolated so tests can assert which provider was selected without
     running a real session. Lazy-imports the provider-specific module.
+    The Gemini factory threads ``camera_worker.get_latest_frame`` through
+    as ``face_frame_provider`` so the ``remember_face`` tool handler can
+    grab the latest frame at tool-call time. ``camera_worker is None``
+    leaves the provider unset and the tool returns a polite refusal.
     """
     if provider == "gemini":
         from kids_teacher_gemini_backend import GeminiRealtimeBackend
 
-        return lambda: GeminiRealtimeBackend()
+        face_frame_provider = (
+            camera_worker.get_latest_frame if camera_worker is not None else None
+        )
+        return lambda: GeminiRealtimeBackend(
+            face_frame_provider=face_frame_provider
+        )
     from kids_teacher_backend import OpenAIRealtimeBackend
 
     return lambda: OpenAIRealtimeBackend()

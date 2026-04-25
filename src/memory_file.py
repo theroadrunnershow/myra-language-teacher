@@ -111,6 +111,42 @@ def remove(
         return True
 
 
+def remove_lines_matching_substring(
+    substring: str,
+    path: str | os.PathLike[str] | None = None,
+) -> int:
+    """Delete bullet lines whose body contains ``substring``. Returns count removed.
+
+    Used by ``forget_face`` to drop the relationship line for a name. Matches
+    on the bullet body (date suffix stripped), case-insensitive.
+    """
+    needle = _normalize_fact(substring).casefold()
+    if not needle:
+        return 0
+    target = resolve_memory_file_path(path)
+    if not target.exists():
+        return 0
+    with _locked(target):
+        current = read(target)
+        if not current:
+            return 0
+        kept: list[str] = []
+        removed = 0
+        for line in current.splitlines():
+            body = _entry_body(line)
+            if body and needle in body.casefold():
+                removed += 1
+                continue
+            kept.append(line)
+        if not removed:
+            return 0
+        new_text = "\n".join(kept).strip()
+        if new_text:
+            new_text = f"{new_text}\n"
+        _atomic_write(target, new_text)
+        return removed
+
+
 def _today_iso() -> str:
     return _dt.date.today().isoformat()
 
