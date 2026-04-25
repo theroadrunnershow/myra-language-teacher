@@ -288,3 +288,32 @@ def test_detect_face_bboxes_no_downscale_passes_through(monkeypatch) -> None:
 
     bboxes = face_service.detect_face_bboxes(_frame(h=400, w=600), downscale=False)
     assert bboxes == [(5, 6, 7, 8)]
+
+
+def test_no_frames_persisted_during_face_rec(monkeypatch, tmp_path) -> None:
+    """FR-KID-21: enrollment + recognition must not leave images on disk.
+
+    The ``~/.myra/`` directory should contain only ``faces.pkl`` after a
+    full enroll-then-identify cycle. No JPEG/PNG/raw frame artifacts.
+    """
+    myra_dir = tmp_path / ".myra"
+    myra_dir.mkdir()
+    monkeypatch.setenv("MYRA_FACES_FILE", str(myra_dir / "faces.pkl"))
+
+    enc = np.arange(128, dtype=np.float64)
+    _patch_detector(
+        monkeypatch,
+        locations=[(0, 100, 100, 0)],
+        encodings=[enc],
+        distances=np.array([0.1]),
+    )
+
+    assert face_service.enroll_from_frame("Aunt Priya", _frame()) is EnrollResult.OK
+    assert face_service.identify_in_frame(_frame()) == ["Aunt Priya"]
+
+    image_suffixes = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".raw"}
+    leaked = [
+        p for p in myra_dir.rglob("*") if p.is_file() and p.suffix.lower() in image_suffixes
+    ]
+    assert leaked == [], f"frames leaked to disk: {leaked}"
+    assert {p.name for p in myra_dir.iterdir()} == {"faces.pkl"}

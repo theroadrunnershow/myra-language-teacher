@@ -340,4 +340,6 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
 
 ## What happens next
 
-This document is the requirements + design. It does **not** contain code changes, env-var changes, or dependency changes. Implementation (port Pollen's camera + encoder + sender, add child-specific prompt/safety/gate, add tests) is a **separate follow-up task** gated by the user.
+This document is the requirements + design. Implementation landed on `feat/camera-object-recognition` across nine chunks (A–I) — camera worker + encoder, Gemini video sender + provider gate, locked-profile vision section + visual-redirect keywords, `face_service` module, CLI enrollment, face-rec session lifecycle (sweep + recheck), gaze following, voice-driven `remember_face`/`forget_face` tools, and end-to-end retention regression tests. **88 new automated tests** added; full suite green at 629 passes.
+
+§6 manual verification (Pi 5 with Gemini API key + a second person in frame) remains the user's pre-merge step — automated tests can't exercise the real camera, dlib HOG, or motor-less head response. Open the umbrella PR for review when ready.
