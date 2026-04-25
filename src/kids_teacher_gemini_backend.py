@@ -677,6 +677,28 @@ class GeminiRealtimeBackend:
                 )
             await self._event_queue.put({"type": "error", "message": str(exc)})
 
+    async def send_video(self, jpeg_bytes: bytes) -> None:
+        """Forward one JPEG frame to Gemini Live's video channel.
+
+        Mirrors :meth:`send_audio`: silently no-ops if the session is not
+        yet open (or already torn down). Send failures are debug-logged
+        and swallowed — never fatal — per design §1 "Error handling".
+        Frames are NEVER persisted (FR-KID-8 / §2.4).
+        """
+        if self._session is None or not jpeg_bytes:
+            return
+        assert self._types_module is not None
+        try:
+            await self._session.send_realtime_input(
+                video=self._types_module.Blob(
+                    data=jpeg_bytes, mime_type="image/jpeg"
+                )
+            )
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.debug(
+                "[kids_teacher_gemini_backend] send_video failed: %s", exc
+            )
+
     async def send_text(self, text: str) -> None:
         """Send a user text turn.
 
