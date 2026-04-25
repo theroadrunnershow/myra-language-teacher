@@ -59,6 +59,19 @@ Pollen's prompt is general-purpose. Myra is 4. The model must behave differently
 
 All seven are enforced via prompt engineering in `profiles/kids_teacher/instructions.txt`. No runtime code.
 
+### 2.2A Adult-directed visual commands (prompt-only in v1)
+
+The default camera behavior is child-led (§2.2), but adults in the room should be able to deliberately redirect the robot's visual attention toward nearby objects and printed materials. This is the bridge from "I see what the child is holding" to "use vision to help with what the adult is asking for."
+
+- **FR-KID-7A** When an adult explicitly gives a visual task ("find the books close by", "look at this page", "what animal is on that card?"), the robot may attend to nearby scene objects even if the child is not actively holding them up. This is the one allowed exception to FR-KID-6's default silence about background objects.
+- **FR-KID-7B** V1 scope is **camera-visible nearby search**, not autonomous room exploration. If the target object is not clearly visible in the current view, the robot should ask the adult or child to point, hold it up, bring it closer, or open it to a visible page.
+- **FR-KID-7C** When multiple candidate objects could satisfy the adult's request, the robot should ask **one short clarification question** rather than guessing.
+- **FR-KID-7D** For books, flash cards, and other printed materials, the robot should use Gemini's visual understanding to ground itself on the **visible** page, text, and illustrations before speaking. It must not pretend to know unreadable text or unseen pages.
+- **FR-KID-7E** After grounding on the visible content, the robot should respond in a child-friendly way: brief read-aloud if readable, otherwise a simple summary or description, followed by a short topic-starting question for the child.
+- **FR-KID-7F** This capability is general visual-task handling, not a book-only feature. Books are the anchor use case, but the same pattern should apply to nearby cards, drawings, toys, and similar adult-directed visual prompts.
+
+Still prompt-only in v1. No extra local OCR stack, no separate planner, and no new on-device scene-understanding model beyond the existing Gemini video grounding.
+
 ### 2.3 Safety — visual redirect
 
 Pollen has no safety layer. Kids-teacher already has one (`kids_safety.py::classify_topic`) that scans **assistant transcripts** for disallowed topics and routes to REDIRECT. Extending it for vision requires no new pipeline — the model's verbal description of what it sees is the choke point.
@@ -78,7 +91,7 @@ Pollen has no retention concerns. Kids-teacher has `KidsReviewStore` (audio/tran
 
 The kids-teacher profile (`profiles/kids_teacher/instructions.txt`) is locked/immutable — admins can only make it stricter, never laxer. Adding vision behavior means editing the locked prompt itself.
 
-- **FR-KID-9** Append one section to `instructions.txt` ("# When you can see the child"). Under 20 lines. Encodes FR-KID-3 through FR-KID-7, SR-KID-1, SR-KID-2. Stays locked.
+- **FR-KID-9** Append one section to `instructions.txt` ("# When you can see the child"). Keep it compact (~20 lines). Encodes the camera-behavior rules in §2.2 and §2.2A plus SR-KID-1 and SR-KID-2. Stays locked.
 
 Draft wording (final during implementation):
 
@@ -92,6 +105,15 @@ objects the child is holding up or pointing at.
   about it. Wait for their answer before continuing.
 - Only one object at a time. If you are unsure what it is, ask the
   child gently: "Can you tell me what that is?"
+- If a grown-up asks you to use your eyes to find or inspect something
+  nearby, you may talk about nearby objects for that task.
+- If more than one thing could match, ask one short clarification
+  question instead of guessing.
+- If a grown-up asks you to read a book or page, first look at the
+  visible page and only talk about what you can actually see. If you
+  need a better view, ask them to hold it closer or open the page.
+- After you understand a visible page, give a short age-appropriate
+  read-aloud or summary, then ask the child one simple question.
 - Do not describe the child's body, face, clothes, or hair.
 - Do not describe other people's faces, clothes, or hair either.
   You may greet enrolled people by name (you will be told who is
@@ -225,6 +247,7 @@ The follow-up implementation only needs **new** tests for the child-specific lay
 | `test_safety_visual_redirect_keywords_trigger_redirect` | Assistant transcript mentioning "medicine" → REDIRECT category fires. |
 | `test_review_store_never_contains_frames` | End-to-end: run a mocked session with video, assert `data/kids_review.runtime.v1/` has no image files even with `KIDS_REVIEW_TRANSCRIPTS_ENABLED=true`. |
 | `test_instructions_contains_vision_section` | Locked profile loader exposes the "# When you can see the child" section (regression guard — a future prompt edit must not silently drop it). |
+| `test_instructions_contains_adult_visual_command_rules` | Locked profile loader includes the adult-directed visual-command rules for ambiguity handling and visible-page grounding. |
 
 Light sanity tests for the lifted code (not redundant with Pollen's tests, but enough to catch our adaptation errors):
 
@@ -279,6 +302,9 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
    - Say "no" → robot says "Okay!" and stays silent about visuals until something new appears.
    - Hold up a medicine bottle → robot redirects calmly to a safe topic.
    - Hold up nothing / cover the camera → robot continues normal audio conversation, does **not** mention not seeing.
+   - Adult says "Find the books close by and read that to the child" with one clear book in view → robot grounds on the visible page or cover, gives a short age-appropriate read-aloud / summary, and asks the child a simple follow-up question.
+   - Same command with multiple plausible books in view → robot asks one short clarification question instead of choosing randomly.
+   - Adult asks for a book read-aloud when the page is closed, too small, or not readable → robot asks for a closer / clearer / opened view instead of hallucinating unseen story content.
 3. Face recognition (with another adult in frame):
    - Adult says "Myra, this is Aunt Priya. She's your mom's sister." → robot replies *"Got it — I'll remember Aunt Priya next time!"*
    - Confirm `~/.myra/faces.pkl` exists with one entry; confirm `~/.myra/memory.md` gained a line *"Aunt Priya is Myra's mom's sister"*.
@@ -300,6 +326,7 @@ All mocked. No real camera, Gemini, dlib, or robot required (`face_recognition` 
 
 - **Gemini free-tier quota** — ~900 frames per 15-min session at 1 fps. Confirm during implementation; if the quota is tight, drop default to 0.5 fps. Single-knob change via `KIDS_TEACHER_CAMERA_FPS`.
 - **How long is "a few seconds"?** Prompt-engineering judgment call. Start with the wording above; adjust after observing Myra-in-the-loop if the robot over- or under-reacts.
+- **How much autonomous visual search is enough?** V1 scopes adult-directed commands to the current camera-visible scene plus a clarification prompt. If that feels too passive in practice, the next step would be a bounded head-scan behavior owned by the motion director rather than free-form room search inside the prompt.
 - **Tool-call plumbing sequencing.** `remember_face` / `forget_face` (FR-KID-10/11) and persistent-memory v2 (`remember` / `forget`) share the same Gemini Live tool-call wiring. Whoever lands first builds it; the other reuses. CLI face enrollment ships independently (FR-KID-12).
 - **Speaker authority for enrollment (SR-KID-5).** Today's guardrail is prompt-only: the model decides whether the requester sounds like an adult. Hard speaker diarization / age detection is out of scope; revisit only if we observe Myra trying to over-enroll.
 - **Capacity past 30.** If we hit the cap in practice, options are (a) raise the cap (cheap — sub-second identification stays fine to ~1000 names) or (b) build a parent-facing prune UI. Defer until it bites.
