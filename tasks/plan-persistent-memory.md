@@ -60,10 +60,11 @@ child themself and persisted in `memory.md` like any other fact.
   - **v1 (parent-curated):** the parent can pre-seed `memory.md` with
     `- Her name is Aanya` so the robot is ready on first run. No prompt
     nudge needed if the line is already there.
-  - **v2 (auto-enrich):** the end-of-session summarizer treats the name
-    introduction as a "remember this" moment and appends a `Her/His/
-    Their name is …` bullet. Subsequent sessions read it from
-    `memory.md` and use it.
+  - **v2 (on-demand tool call):** when the child first introduces
+    themself, the Live model invokes the `remember` tool with
+    `Her/His/Their name is …`, the bullet is appended to `memory.md`
+    mid-session, and the name is used from the next turn onward.
+    Subsequent sessions read it from `memory.md` via the v1 path.
 - The name lives in the same file as everything else; no separate
   `child_name` field, no extra schema. Keeps the "one markdown file"
   invariant intact.
@@ -101,132 +102,130 @@ That's the entire v1 hot path.
 ## Writes
 
 The user's framing: memory is enriched only when the child or parent
-*asks* the robot to remember (e.g. "remember I love tigers"). A raw
-utterance isn't a clean memory entry — it needs deduping, filler-word
-stripping, third-person rewriting, and date-stamping. That conversion
-step uses a lightweight LLM. Three phases:
+*asks* the robot to remember (e.g. "remember I love tigers"), and the
+write happens **on demand, in-session** — not at the end of the
+session. This mirrors Claude Code's memory flow: saying "remember X"
+triggers an immediate append to the memory file via a tool call, and
+the new fact is usable on the very next turn. The voice surface is
+the only thing that changes; the mechanism is the same.
+
+Two phases:
 
 **v1 — read-only / parent-curated.**
 The parent edits `~/.myra/memory.md` directly. The robot reads it on
-every session start. Ships immediately, no LLM conversion needed. This
-is genuinely useful on its own: a parent can seed the file with "her
-name is Aanya, her brother is Rohan, she loves tigers" and the robot
-will reference those naturally for weeks.
+every session start. Ships immediately, no LLM machinery beyond the
+existing Live model. Genuinely useful on its own: a parent can seed
+the file with "her name is Aanya, her brother is Rohan, she loves
+tigers" and the robot will reference those naturally for weeks.
 
-**v2 — end-of-session conversion via Ollama Cloud.**
-Once v1 is in use, add automatic enrichment. Mechanism:
+**v2 — on-demand tool calls from the Live model.**
+The Gemini Live session declares one tool — `remember(fact: str)` —
+and the model invokes it mid-conversation when the child or parent
+asks it to. The Live model itself produces the cleaned, third-person
+fact text inside the tool call, so there is no separate summarizer
+LLM and no second vendor on the transcript path.
 
-1. **Collect** the session transcript. The realtime layer already emits
-   `publish_transcript` events with speaker + final-vs-partial flags
-   (`kids_teacher_realtime.py:319`); a small in-memory collector
-   subscribes for the duration of the session.
-2. **Real-time ack.** Add two sentences to `instructions.txt`:
-   > If the child or parent asks you to remember something, simply say
-   > "Got it, I'll remember!" — you don't need to do anything else.
-   > If you don't yet know the child's name, gently ask in the first
-   > turn ("What should I call you?") and use it once they tell you.
-   The Live model handles conversational confirmation; the actual file
-   write is async.
-3. **At session end**, call the project's text-only LLM abstraction
-   (see "Text-LLM abstraction" below) with:
-   - The current `~/.myra/memory.md` contents
-   - The full session transcript (final lines only, joined as plain
-     `Speaker: text` lines)
-   - A prompt like:
-     > Extract moments where the child or parent asked the robot to
-     > remember something — or where the child told the robot their
-     > name. Return new facts as markdown bullets in the existing
-     > file's style (one fact per bullet, third person about the child,
-     > append `_(YYYY-MM-DD)_`). Skip facts already covered by
-     > existing memory. If nothing was asked to be remembered and no
-     > name was introduced, return exactly `NONE`.
-4. **Append** the returned bullets to `memory.md` via the same atomic
-   write path used by manual edits.
+Mechanism:
 
-Why end-of-session, not real-time per turn:
-- One LLM call per session is cheap and predictable.
-- The trigger detection ("did anyone ask to remember?") and the
-  conversion collapse into one LLM judgement — fewer moving parts
-  than a regex trigger plus a separate conversion call.
-- The child already got real-time acknowledgement from the Live model.
-- Avoids tying memory writes to Gemini Live's tool-calling path, which
-  doesn't exist on this codebase.
+1. **Declare the tool on the Live config.** Extend `_build_live_config`
+   in `kids_teacher_gemini_backend.py` (around line 138) to set
+   `tools=[…]` on the returned `LiveConnectConfig` with one
+   `FunctionDeclaration`:
+   - `remember(fact: str)` — "Persist a fact the child or parent
+     asked you to remember. `fact` should be a single, third-person
+     sentence about the child (e.g. 'Her favourite colour is blue').
+     Skip facts already covered by existing memory."
 
-### Text-LLM abstraction (project-wide)
+   Forgetting/removing facts is intentionally out of scope: the
+   parent edits `~/.myra/memory.md` directly. Voice-driven
+   `forget` would add tool-description bloat that risks hurting
+   `remember` accuracy, with little payoff for a 4-year-old's flow.
+2. **Instruct the model** in `instructions.txt` to use the tool
+   eagerly:
+   > If the child or parent asks you to remember something, call the
+   > `remember` tool with a clean, third-person sentence about the
+   > child, then say "Got it, I'll remember!" If you don't yet know
+   > the child's name, gently ask in the first turn ("What should I
+   > call you?"); once they tell you, call `remember` with
+   > "Her/His/Their name is …" and use the name from then on.
+3. **Handle `tool_call` events asynchronously** in the realtime
+   layer. Gemini Live already surfaces `tool_call` and
+   `tool_call_cancellation` at the top level of the message envelope
+   (see `_TOP_LEVEL_LIVE_MESSAGE_FIELDS` at
+   `kids_teacher_gemini_backend.py:542`); the reader task currently
+   ignores them. The handler must **not block the conversation** on
+   disk I/O — the child should never hear a pause while the file is
+   written. Concretely:
+   - On receiving a `tool_call`, immediately send a synthetic
+     `tool_response` of `{"status": "scheduled"}` back to the Live
+     session so the model is unblocked and the next conversational
+     turn proceeds without delay.
+   - Spawn a background `asyncio.Task` that calls
+     `memory_file.append(fact)` — including the `fcntl.flock`
+     acquisition and atomic tempfile-rename — entirely off the
+     realtime read path.
+   - If the background append raises, just `log.warning(...,
+     exc_info=True)`. No event emission, no retry, no verbal
+     correction to the child. The verbal "Got it, I'll remember!"
+     is a soft commitment from the model, decoupled from the actual
+     write; on a Pi with a healthy SD card, write failures are rare
+     enough that quietly logging is the right tradeoff. Parent
+     notices by inspecting `memory.md` or the log.
+4. **No re-load mid-session.** Gemini Live's `system_instruction` is
+   fixed for the connection, but the newly remembered fact is already
+   in the model's working context (it just produced it), so
+   in-session continuity is automatic — and conveniently independent
+   of whether the background write has finished yet. Subsequent
+   sessions pick up the appended line via the v1 read path.
 
-Project policy: any text-only (non-vision, non-audio, non-Live-API)
-LLM call routes through a single configurable abstraction. Three
-supported providers: **Ollama** (cloud), **OpenAI**, and **Gemini /
-Google**. Cloud-only for v1 — no local-on-Pi fallback yet.
+Why on-demand, not end-of-session:
+- The child or parent gets immediate, verifiable persistence — they
+  can `cat ~/.myra/memory.md` mid-session and see the line appear
+  within a second of the request.
+- A follow-up turn in the same session can already reference the new
+  fact ("you said you love tigers — what's a tiger's roar sound
+  like?"), which a session-end pass cannot do.
+- One LLM (the Live model) handles both detection and formatting. No
+  separate text-LLM provider, no extra API key, no second vendor to
+  ship transcripts to.
+- The previous design's end-of-session summarizer + project-wide
+  text-LLM abstraction (Ollama / OpenAI / Gemini dispatcher,
+  `src/text_llm.py`, `src/memory_summarizer.py`) all drop out. Net
+  reduction in moving parts.
 
-New module `src/text_llm.py`. Minimal public surface:
+Why async (non-blocking) tool dispatch:
+- The child must never experience dead air while the file is written.
+  Replying "scheduled" to the Live session immediately keeps
+  turn-taking smooth.
+- File I/O on Reachy's SD card is fast in the common case but not
+  guaranteed (flock contention, transient errors). Decoupling the
+  conversation from disk means a slow write degrades observability,
+  not UX.
+- The model's working context already holds the fact; the file write
+  is for *future* sessions. There is no in-session correctness reason
+  to wait for the write to land before continuing.
 
-```python
-def complete(*, system: str, user: str, temperature: float = 0.0) -> str:
-    """Single-shot text completion. Provider + model from env."""
-```
-
-No streaming, no tools, no images, no message history — that's all
-out of scope. If a future caller needs more, extend then.
-
-Configuration via env (project-wide, not kids-teacher-scoped):
-
-| Env var                  | Values / Notes |
-|--------------------------|---|
-| `MYRA_TEXT_LLM_PROVIDER` | `ollama` \| `openai` \| `gemini` |
-| `MYRA_TEXT_LLM_MODEL`    | provider-specific model id |
-| `OLLAMA_API_KEY`         | required when provider=ollama |
-| `OLLAMA_HOST`            | optional, defaults to `https://ollama.com` |
-| `OPENAI_API_KEY`         | required when provider=openai (already used by realtime path) |
-| `GEMINI_API_KEY`         | required when provider=gemini (already used by realtime path) |
-
-Implementation notes:
-- Each provider gets a thin adapter function inside `text_llm.py`
-  (`_complete_ollama`, `_complete_openai`, `_complete_gemini`); the
-  public `complete()` dispatches on `MYRA_TEXT_LLM_PROVIDER`.
-- Lazy-import the SDKs inside their adapter to keep import cost down
-  and so missing-SDK errors only fire when that provider is selected.
-- `ollama` is the only new dependency — add to `requirements.txt`.
-  `openai` and `google-genai` are already present.
-- Document defaults and the three provider options in `.env.example`.
-  Don't hard-code a default `MYRA_TEXT_LLM_MODEL`; require explicit
-  selection so the choice is visible in config.
-- Tests: one fake-client test per provider plus a dispatcher test for
-  unknown / missing provider strings.
-
-Memory summarizer wiring:
-
-- `src/memory_summarizer.py` — single public function
-  `summarize_session_to_memory(transcript: str, existing_memory: str)
-  -> str` that returns either `"NONE"` or one or more markdown bullet
-  lines. Internally calls `text_llm.complete(...)` — provider-agnostic.
-- v2 is **disabled when `MYRA_TEXT_LLM_PROVIDER` is unset** — v1
-  (parent-edit) keeps working; the system never blocks a session on
-  memory writes.
-
-Privacy note (be explicit):
-Whichever provider is selected becomes a *second* vendor beyond the
-Live API's audio path. Session transcripts (text only, no audio) are
-sent there. Worth confirming the parent is OK with the chosen
-provider before enabling.
-
-Failure modes:
-- `MYRA_TEXT_LLM_PROVIDER` unset → skip v2 entirely, log info once at
-  startup.
-- Provider-specific API key missing → log error once, skip v2.
-- Network error / timeout → log warning, no file change. Acceptable;
-  parent can edit manually.
-- LLM hallucinates a fact → tight prompt + low temperature; parent can
-  delete the bullet from the file.
-- Empty / unremarkable transcript → returns `NONE`, nothing happens.
-
-**v3 — real-time tool-call enrichment.**
-*Only if v2 surfaces a real friction point* (e.g. parent wants to see
-the file update mid-conversation, or session-end conversion frequently
-misses things). Add `remember` / `forget` tools to the Gemini Live
-config; route `tool_call` events back to `memory_file`. This requires
-adding Live tool-use plumbing to the backend — a bounded but real
-change. Not on the v1/v2 path.
+Failure modes (all handled off the conversation path — the rule is
+just log and move on):
+- Tool call malformed (missing `fact`, empty string) → log a
+  warning, no file change. Model already said "Got it"; accept the
+  small lie rather than derail a 4-year-old's conversation.
+- Tool call duplicates an existing line → `memory_file.append` does
+  a case-insensitive substring check and skips silently. Logged at
+  debug.
+- File write error (disk full, permission) → logged as a warning
+  with `exc_info`. Parent investigates via the log or by inspecting
+  `memory.md`.
+- Live session disconnects between tool call dispatch and the
+  background write completing → the background task is anchored to
+  the realtime layer, not the Live socket; it finishes the append
+  regardless. Worst case the process is killed mid-write, which is
+  why the writer uses tempfile + `os.replace` (atomic).
+- Model hallucinates a fact the child didn't actually ask for → tight
+  tool description + the explicit instruction to only call on
+  request; parent can delete the bullet from the file.
+- Parent disagrees with a remembered fact → edit `memory.md`
+  directly, same as v1.
 
 ## Files to add / touch
 
@@ -242,14 +241,26 @@ v1:
   appears in the assembled instructions.
 
 v2 (only when v1 has shipped and is in use):
-- `src/kids_teacher_gemini_backend.py` — declare `remember` / `forget`
-  tools on the Live config; route `tool_call` events back to
-  `memory_file`. Existing event names already include `tool_call` /
+- `src/kids_teacher_gemini_backend.py` — declare the `remember` tool
+  on the Live config (`_build_live_config`); on incoming `tool_call`,
+  immediately reply with `{"status": "scheduled"}` and spawn a
+  background `asyncio.Task` that calls `memory_file.append` (logging
+  any exception). Existing event names already include `tool_call` /
   `tool_call_cancellation` (see line 542) so the realtime layer will
   surface them; we just have to handle them.
-- One nudge sentence in `instructions.txt`.
-- Tests: tool-call round-trip with a fake backend, file mutation
-  asserted.
+- One paragraph in `instructions.txt` (the wording above).
+- Tests:
+  - The `remember` declaration appears on the assembled
+    `LiveConnectConfig`.
+  - Tool-call round-trip with a fake backend: synthetic `tool_call`
+    event in → synthetic `tool_response` (`scheduled`) sent back
+    *before* the background task is awaited; once awaited,
+    `memory_file` contains the new line. The "before" assertion is
+    the non-blocking guarantee.
+  - Slow-write simulation: a `memory_file.append` that sleeps for
+    500ms does not delay the `tool_response` send.
+  - Failing-write simulation: `memory_file.append` raising
+    `OSError` results in a logged warning and no crash.
 
 ## Bounds and edge cases
 
@@ -284,4 +295,5 @@ v2 (only when v1 has shipped and is in use):
 1. v1: read-only, parent-curated. ~half a day with tests.
 2. Use it for a couple of weeks. See whether the parent-edits-the-file
    loop is actually annoying enough to justify v2.
-3. v2 only if v1 surfaces a real friction point.
+3. v2 (on-demand tool calls, async dispatch) once v1 is in use and
+   the parent-edit loop feels like friction.
