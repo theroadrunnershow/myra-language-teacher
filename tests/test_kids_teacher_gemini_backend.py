@@ -832,3 +832,46 @@ async def test_tool_call_logs_warning_when_background_write_fails(
             await backend.close()
 
     assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
+    assert not any(
+        "remember write succeeded" in r.message for r in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_call_logs_info_when_background_write_succeeds(
+    caplog,
+) -> None:
+    def ok_append(fact: str, path: str | None) -> None:
+        return None
+
+    session = _MultiTurnFakeSession(
+        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        memory_append=ok_append,
+    )
+
+    with caplog.at_level("INFO"):
+        await backend.connect({"instructions": "hi", "voice": "alloy"})
+        gen = backend.events()
+        try:
+            event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert event["type"] == "response.done"
+            await _wait_until(
+                lambda: any(
+                    "remember write succeeded" in r.message
+                    and "Their name is Aanya" in r.message
+                    for r in caplog.records
+                )
+            )
+        finally:
+            await backend.close()
+
+    assert not any(
+        "remember write failed" in r.message for r in caplog.records
+    )
