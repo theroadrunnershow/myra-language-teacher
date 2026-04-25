@@ -36,6 +36,7 @@ from kids_safety_keywords import (
     REFUSAL_TEXT,
     SHORT_PHRASES,
     SOFT_FALLBACK,
+    VISUAL_REDIRECT_KEYWORDS,
 )
 from kids_teacher_types import KidsTeacherAdminPolicy, LanguageDetection
 
@@ -122,6 +123,21 @@ def classify_topic(
         category, matches = redirect
         return _apply_admin_policy(
             TopicClassification(TopicDecision.REDIRECT, category, tuple(matches)),
+            lowered,
+            admin_policy,
+        )
+
+    # SR-KID-3: visual-redirect backstop for assistant transcripts that name
+    # an unsafe nearby object (medicine, lighter, etc.). Runs after the
+    # disallowed/family-safe/redirect categories so existing decisions win.
+    visual_matches = _find_matches(lowered, VISUAL_REDIRECT_KEYWORDS)
+    if visual_matches:
+        return _apply_admin_policy(
+            TopicClassification(
+                TopicDecision.REDIRECT,
+                "visual_redirect",
+                tuple(visual_matches),
+            ),
             lowered,
             admin_policy,
         )
