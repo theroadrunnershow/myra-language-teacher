@@ -475,6 +475,11 @@ class GeminiRealtimeBackend:
                 fact,
                 exc_info=True,
             )
+            return
+        logger.info(
+            "[kids_teacher_gemini_backend] remember write succeeded for fact=%r",
+            fact,
+        )
 
     def _normalize_message(self, raw_message: Any) -> list[dict]:
         """Map one raw ``LiveServerMessage`` to zero-or-more normalized events.
