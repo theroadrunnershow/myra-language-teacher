@@ -14,13 +14,18 @@ from __future__ import annotations
 import logging
 import os
 from typing import Callable
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
 PROVIDER_ENV_VAR = "MYRA_TEXT_LLM_PROVIDER"
 MODEL_ENV_VAR = "MYRA_TEXT_LLM_MODEL"
+OLLAMA_HOST_ENV_VAR = "OLLAMA_HOST"
+OLLAMA_API_KEY_ENV_VAR = "OLLAMA_API_KEY"
 
 DEFAULT_PROVIDER = "ollama"
+_OLLAMA_CLOUD_HOST = "https://ollama.com"
+_OLLAMA_CLOUD_HOSTNAMES = frozenset({"ollama.com", "www.ollama.com"})
 
 _DEFAULT_MODEL_BY_PROVIDER = {
     "ollama": "llama3.2:3b",
@@ -48,6 +53,56 @@ def resolve_model(provider: str, env_value: str | None = None) -> str:
     raw = env_value if env_value is not None else os.environ.get(MODEL_ENV_VAR)
     candidate = (raw or "").strip()
     return candidate or _DEFAULT_MODEL_BY_PROVIDER[provider]
+
+
+def _resolve_ollama_host(env_value: str | None = None) -> str | None:
+    raw = env_value if env_value is not None else os.environ.get(OLLAMA_HOST_ENV_VAR)
+    candidate = (raw or "").strip()
+    return candidate or None
+
+
+def _parse_ollama_host(host: str) -> tuple[str, str]:
+    parsed = urlparse(host if "://" in host else f"http://{host}")
+    return parsed.scheme.lower(), (parsed.hostname or "").lower()
+
+
+def _is_official_ollama_cloud_host(host: str) -> bool:
+    _, hostname = _parse_ollama_host(host)
+    return hostname in _OLLAMA_CLOUD_HOSTNAMES
+
+
+def _create_ollama_client(ollama_module, *, timeout_seconds: float):
+    """Build an Ollama client from env without leaking cloud creds to random hosts."""
+    host = _resolve_ollama_host()
+    api_key = (os.environ.get(OLLAMA_API_KEY_ENV_VAR) or "").strip()
+    client_kwargs: dict[str, object] = {"timeout": timeout_seconds}
+
+    if api_key:
+        target_host = host or _OLLAMA_CLOUD_HOST
+        if _is_official_ollama_cloud_host(target_host):
+            scheme, _ = _parse_ollama_host(target_host)
+            if scheme != "https":
+                raise TextLLMError(
+                    f"{OLLAMA_API_KEY_ENV_VAR} requires "
+                    f"{OLLAMA_HOST_ENV_VAR}=https://ollama.com for direct cloud access."
+                )
+            client_kwargs["host"] = target_host
+            client_kwargs["headers"] = {"Authorization": f"Bearer {api_key}"}
+            return ollama_module.Client(**client_kwargs)
+
+        logger.warning(
+            "[text_llm] ignoring %s because %s=%r is not an official Ollama cloud host",
+            OLLAMA_API_KEY_ENV_VAR,
+            OLLAMA_HOST_ENV_VAR,
+            target_host,
+        )
+        if host:
+            client_kwargs["host"] = host
+        return ollama_module.Client(**client_kwargs)
+
+    if host:
+        client_kwargs["host"] = host
+    return ollama_module.Client(**client_kwargs)
 
 
 def complete(
@@ -109,7 +164,7 @@ def _complete_ollama(
     if json_mode:
         kwargs["format"] = "json"
 
-    client = ollama.Client(timeout=timeout_seconds)
+    client = _create_ollama_client(ollama, timeout_seconds=timeout_seconds)
     try:
         response = client.chat(**kwargs)
     except Exception as exc:

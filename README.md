@@ -375,6 +375,8 @@ ollama serve &                            # if not already running
 export OLLAMA_HOST=http://10.0.0.5:11434
 ```
 
+Direct Ollama Cloud API also works for the reconciler. Set `OLLAMA_API_KEY`; when no `OLLAMA_HOST` is set, Myra talks directly to `https://ollama.com`. If you do set `OLLAMA_HOST`, the API key is only forwarded to the official HTTPS cloud host (`https://ollama.com`) and is ignored for arbitrary daemon URLs to avoid credential leakage.
+
 Switch providers via env (no reinstall — `openai` and `google-genai` are already in `requirements.txt`):
 
 | Variable                  | Default       | Notes |

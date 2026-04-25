@@ -12,6 +12,15 @@ import pytest
 import text_llm
 
 
+class _FakeOllamaModule:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def Client(self, **kwargs):
+        self.calls.append(kwargs)
+        return kwargs
+
+
 def test_resolve_provider_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(text_llm.PROVIDER_ENV_VAR, raising=False)
     assert text_llm.resolve_provider() == "ollama"
@@ -45,6 +54,58 @@ def test_resolve_model_uses_provider_default_when_env_unset(
 
 def test_resolve_model_honors_explicit_override() -> None:
     assert text_llm.resolve_model("ollama", env_value="qwen2.5:7b") == "qwen2.5:7b"
+
+
+def test_create_ollama_client_uses_plain_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(text_llm.OLLAMA_HOST_ENV_VAR, raising=False)
+    monkeypatch.delenv(text_llm.OLLAMA_API_KEY_ENV_VAR, raising=False)
+    fake = _FakeOllamaModule()
+
+    client = text_llm._create_ollama_client(fake, timeout_seconds=12.5)
+
+    assert client == {"timeout": 12.5}
+
+
+def test_create_ollama_client_uses_direct_cloud_when_api_key_is_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(text_llm.OLLAMA_HOST_ENV_VAR, raising=False)
+    monkeypatch.setenv(text_llm.OLLAMA_API_KEY_ENV_VAR, "secret-key")
+    fake = _FakeOllamaModule()
+
+    client = text_llm._create_ollama_client(fake, timeout_seconds=3.0)
+
+    assert client["timeout"] == 3.0
+    assert client["host"] == "https://ollama.com"
+    assert client["headers"] == {"Authorization": "Bearer secret-key"}
+
+
+def test_create_ollama_client_preserves_non_cloud_host_and_never_forwards_api_key(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(text_llm.OLLAMA_HOST_ENV_VAR, "http://10.0.0.5:11434")
+    monkeypatch.setenv(text_llm.OLLAMA_API_KEY_ENV_VAR, "secret-key")
+    fake = _FakeOllamaModule()
+
+    with caplog.at_level("WARNING"):
+        client = text_llm._create_ollama_client(fake, timeout_seconds=4.0)
+
+    assert client == {"timeout": 4.0, "host": "http://10.0.0.5:11434"}
+    assert "ignoring OLLAMA_API_KEY" in caplog.text
+
+
+def test_create_ollama_client_rejects_insecure_official_cloud_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(text_llm.OLLAMA_HOST_ENV_VAR, "http://ollama.com")
+    monkeypatch.setenv(text_llm.OLLAMA_API_KEY_ENV_VAR, "secret-key")
+    fake = _FakeOllamaModule()
+
+    with pytest.raises(text_llm.TextLLMError, match="requires OLLAMA_HOST=https://ollama.com"):
+        text_llm._create_ollama_client(fake, timeout_seconds=4.0)
 
 
 def test_complete_dispatches_to_provider_function(
