@@ -36,8 +36,11 @@ import face_service
 from env_loader import load_project_dotenv
 from kids_teacher_backend import BackendConfigError
 from kids_teacher_types import ALLOWED_GEMINI_MODELS
-from memory_file import append as append_memory_file
-from memory_file import remove_lines_matching_substring as memory_remove_substring
+from memory_file import ALLOWED_KEYS as _MEMORY_ALLOWED_KEYS
+from memory_file import append_note as append_memory_note
+from memory_file import remove_notes_starting_with as memory_remove_notes_starting_with
+from memory_file import set_key as set_memory_key
+from memory_reconciler import add_note as reconcile_add_note
 
 load_project_dotenv()
 
@@ -74,16 +77,29 @@ _OPENAI_TO_GEMINI_VOICE: dict[str, str] = {
     "verse": "Puck",
 }
 
-_REMEMBER_TOOL_NAME = "remember"
+_SET_ABOUT_TOOL_NAME = "set_about"
+_ADD_NOTE_TOOL_NAME = "add_note"
 _REMEMBER_FACE_TOOL_NAME = "remember_face"
 _FORGET_FACE_TOOL_NAME = "forget_face"
 
-_REMEMBER_TOOL_PROMPT_APPENDIX = """
-# Memory tool
-- If the child or parent explicitly asks you to remember something about the child, call the `remember` tool with one short, third-person sentence about the child.
-- If the child answers your earlier name question, call `remember` with `Their name is ...`.
-- After calling `remember`, briefly say "Got it, I'll remember!"
-- Never store an address, phone number, school name, password, login info, or medical ID in memory.
+_MEMORY_TOOL_PROMPT_APPENDIX = f"""
+# Memory tools
+You have two tools for remembering things about the child. Use them only when
+the child or parent explicitly asks you to remember something.
+
+- `set_about(key, value)` — for a single-valued fact about the child.
+  Allowed keys: {", ".join(_MEMORY_ALLOWED_KEYS)}.
+  Setting a key replaces any previous value for it.
+  Example: child says "my name is Aanya" → call `set_about(key="name", value="Aanya")`.
+
+- `add_note(text)` — for a free-form observation that doesn't fit a key.
+  Use one short, third-person sentence.
+  Example: parent says "she loves dinosaurs" → call `add_note(text="She loves dinosaurs")`.
+
+After calling either tool, briefly say "Got it, I'll remember!"
+
+Never store an address, phone number, school name, password, login info, or
+medical ID in memory.
 
 # Face tools
 - When a grown-up or the child explicitly introduces someone in the room ("this is Aunt Priya", "remember, this is my friend Sara"), call `remember_face` with their name. Pass an optional `relationship` like "is Myra's aunt" so the relationship is also remembered.
@@ -103,34 +119,63 @@ def _gemini_model_supports_non_blocking_tools(model: str) -> bool:
     return model.strip() != "gemini-3.1-flash-live-preview"
 
 
-def _build_remember_tool(types_module: Any, *, non_blocking: bool) -> Any:
-    kwargs: dict[str, Any] = {
-        "name": _REMEMBER_TOOL_NAME,
+def _build_memory_tool(types_module: Any, *, non_blocking: bool) -> Any:
+    set_about_kwargs: dict[str, Any] = {
+        "name": _SET_ABOUT_TOOL_NAME,
         "description": (
-            "Persist a fact the child or parent explicitly asked you to remember. "
-            "fact must be one short, third-person sentence about the child. "
-            "Do not store addresses, phone numbers, school names, passwords, "
-            "login info, or medical IDs."
+            "Replace a single-valued fact about the child (name, age, parent "
+            "names, favourites). Setting a key supersedes any previous value."
         ),
         "parameters_json_schema": {
             "type": "object",
             "properties": {
-                "fact": {
+                "key": {
+                    "type": "string",
+                    "enum": list(_MEMORY_ALLOWED_KEYS),
+                    "description": "Which fact to set.",
+                },
+                "value": {
                     "type": "string",
                     "description": (
-                        "One short, third-person sentence about the child, "
-                        "for example 'Their favourite colour is blue'."
+                        "The new value, e.g. 'Aanya' for name or 'blue' for "
+                        "favourite_colour."
                     ),
-                }
+                },
             },
-            "required": ["fact"],
+            "required": ["key", "value"],
+            "additionalProperties": False,
+        },
+    }
+    add_note_kwargs: dict[str, Any] = {
+        "name": _ADD_NOTE_TOOL_NAME,
+        "description": (
+            "Append a free-form observation about the child that doesn't fit "
+            "a fixed key. One short, third-person sentence."
+        ),
+        "parameters_json_schema": {
+            "type": "object",
+            "properties": {
+                "text": {
+                    "type": "string",
+                    "description": (
+                        "One short third-person sentence, e.g. 'She loves "
+                        "dinosaurs.'"
+                    ),
+                },
+            },
+            "required": ["text"],
             "additionalProperties": False,
         },
     }
     if non_blocking:
-        kwargs["behavior"] = "NON_BLOCKING"
-    declaration = types_module.FunctionDeclaration(**kwargs)
-    return types_module.Tool(function_declarations=[declaration])
+        set_about_kwargs["behavior"] = "NON_BLOCKING"
+        add_note_kwargs["behavior"] = "NON_BLOCKING"
+    return types_module.Tool(
+        function_declarations=[
+            types_module.FunctionDeclaration(**set_about_kwargs),
+            types_module.FunctionDeclaration(**add_note_kwargs),
+        ]
+    )
 
 
 def _build_remember_face_tool(types_module: Any, *, non_blocking: bool) -> Any:
@@ -140,7 +185,7 @@ def _build_remember_face_tool(types_module: Any, *, non_blocking: bool) -> Any:
             "Persist a face encoding for a person the child or parent introduced. "
             "Call when an adult voice or the child explicitly says 'this is X' or "
             "'remember X'. Pass an optional 'relationship' string like "
-            "'is Myra's aunt' so the relationship is also stored as a memory fact."
+            "'is Myra's aunt' so the relationship is also stored as a memory note."
         ),
         "parameters_json_schema": {
             "type": "object",
@@ -192,32 +237,14 @@ def _build_forget_face_tool(types_module: Any, *, non_blocking: bool) -> Any:
     return types_module.Tool(function_declarations=[declaration])
 
 
-def _append_remember_tool_instructions(instructions: str) -> str:
+def _append_memory_tool_instructions(instructions: str) -> str:
     base = (instructions or "").strip()
     if not base:
-        return _REMEMBER_TOOL_PROMPT_APPENDIX
-    return f"{base}\n\n{_REMEMBER_TOOL_PROMPT_APPENDIX}"
+        return _MEMORY_TOOL_PROMPT_APPENDIX
+    return f"{base}\n\n{_MEMORY_TOOL_PROMPT_APPENDIX}"
 
 
-def _extract_remember_fact(function_call: Any) -> Optional[str]:
-    args = _attr(function_call, "args")
-    if args is None:
-        args = _attr(function_call, "arguments")
-    if isinstance(args, str):
-        try:
-            args = json.loads(args)
-        except json.JSONDecodeError:
-            return None
-    if not isinstance(args, dict):
-        return None
-    fact = args.get("fact")
-    if not isinstance(fact, str):
-        return None
-    normalized = " ".join(fact.strip().split())
-    return normalized or None
-
-
-def _extract_call_args(function_call: Any) -> dict[str, Any]:
+def _extract_args(function_call: Any) -> dict[str, Any]:
     args = _attr(function_call, "args")
     if args is None:
         args = _attr(function_call, "arguments")
@@ -232,7 +259,7 @@ def _extract_call_args(function_call: Any) -> dict[str, Any]:
 
 
 def _extract_remember_face_args(function_call: Any) -> tuple[Optional[str], Optional[str]]:
-    args = _extract_call_args(function_call)
+    args = _extract_args(function_call)
     name = args.get("name")
     relationship = args.get("relationship")
     name_norm = " ".join(name.strip().split()) if isinstance(name, str) else ""
@@ -245,7 +272,7 @@ def _extract_remember_face_args(function_call: Any) -> tuple[Optional[str], Opti
 
 
 def _extract_forget_face_name(function_call: Any) -> Optional[str]:
-    args = _extract_call_args(function_call)
+    args = _extract_args(function_call)
     name = args.get("name")
     if not isinstance(name, str):
         return None
@@ -343,14 +370,14 @@ def build_gemini_live_config(
 
     return types_module.LiveConnectConfig(
         response_modalities=response_modalities,
-        system_instruction=_append_remember_tool_instructions(
+        system_instruction=_append_memory_tool_instructions(
             session_payload.get("instructions") or ""
         ),
         speech_config=speech_config,
         input_audio_transcription=types_module.AudioTranscriptionConfig(),
         output_audio_transcription=types_module.AudioTranscriptionConfig(),
         tools=[
-            _build_remember_tool(types_module, non_blocking=tool_supports_non_blocking),
+            _build_memory_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_remember_face_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_forget_face_tool(types_module, non_blocking=tool_supports_non_blocking),
         ],
@@ -378,14 +405,21 @@ class GeminiRealtimeBackend:
         client_factory: Optional[Callable[[], Any]] = None,
         types_module: Optional[Any] = None,
         memory_file_path: Optional[str] = None,
-        memory_append: Optional[Callable[[str, Optional[str]], None]] = None,
+        set_key_fn: Optional[Callable[[str, str, Optional[str]], None]] = None,
+        add_note_fn: Optional[Callable[..., Any]] = None,
+        append_note_fn: Optional[Callable[[str, Optional[str]], None]] = None,
         face_frame_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._model = model or resolve_gemini_model()
         self._client_factory = client_factory
         self._types_module = types_module
         self._memory_file_path = memory_file_path
-        self._memory_append = memory_append or append_memory_file
+        self._set_key = set_key_fn or set_memory_key
+        self._add_note = add_note_fn or reconcile_add_note
+        # Bypass the LLM reconciler for face-rec relationship sentences:
+        # parent-authored, deterministic, short — append_note's exact-text
+        # dedup is sufficient and we save a round-trip on every introduction.
+        self._append_note = append_note_fn or append_memory_note
         self._face_frame_provider = face_frame_provider
         self._client: Any = None
         self._connection_cm: Any = None
@@ -514,35 +548,116 @@ class GeminiRealtimeBackend:
 
         non_blocking = _gemini_model_supports_non_blocking_tools(self._model)
         function_responses: list[Any] = []
-        facts_to_persist: list[str] = []
+        # ``scheduled_writes`` covers set_about/add_note (LLM-driven memory).
+        # ``relationship_notes`` covers remember_face (parent-authored, bypasses
+        # the reconciler — see :meth:`__init__` docstring).
+        scheduled_writes: list[tuple[str, dict[str, Any]]] = []
+        relationship_notes: list[str] = []
 
         for function_call in function_calls:
             name = _attr(function_call, "name") or ""
             call_id = _attr(function_call, "id")
+            args = _extract_args(function_call)
 
-            if name == _REMEMBER_TOOL_NAME:
-                response, fact = self._handle_remember_call(function_call)
-                if fact is not None:
-                    facts_to_persist.append(fact)
-            elif name == _REMEMBER_FACE_TOOL_NAME:
-                response, fact = await self._handle_remember_face_call(function_call)
-                if fact is not None:
-                    facts_to_persist.append(fact)
-            elif name == _FORGET_FACE_TOOL_NAME:
-                response = await self._handle_forget_face_call(function_call)
-            else:
-                logger.warning(
-                    "[kids_teacher_gemini_backend] unknown tool call name=%r ignored",
-                    name,
+            if name == _SET_ABOUT_TOOL_NAME:
+                key = (args.get("key") or "").strip()
+                value = " ".join((args.get("value") or "").strip().split())
+                if key not in _MEMORY_ALLOWED_KEYS or not value:
+                    logger.warning(
+                        "[kids_teacher_gemini_backend] set_about call rejected: key=%r value=%r",
+                        key,
+                        value,
+                    )
+                    function_responses.append(
+                        _build_function_response(
+                            self._types_module,
+                            call_id=call_id,
+                            name=name,
+                            response={"output": {"status": "ignored"}},
+                            non_blocking=non_blocking,
+                        )
+                    )
+                    continue
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response={"output": {"status": "scheduled"}},
+                        non_blocking=non_blocking,
+                    )
                 )
-                response = {"output": {"status": "ignored"}}
+                scheduled_writes.append((name, {"key": key, "value": value}))
+                continue
 
+            if name == _ADD_NOTE_TOOL_NAME:
+                text = " ".join((args.get("text") or "").strip().split())
+                if not text:
+                    logger.warning(
+                        "[kids_teacher_gemini_backend] add_note call rejected: empty text"
+                    )
+                    function_responses.append(
+                        _build_function_response(
+                            self._types_module,
+                            call_id=call_id,
+                            name=name,
+                            response={"output": {"status": "ignored"}},
+                            non_blocking=non_blocking,
+                        )
+                    )
+                    continue
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response={"output": {"status": "scheduled"}},
+                        non_blocking=non_blocking,
+                    )
+                )
+                scheduled_writes.append((name, {"text": text}))
+                continue
+
+            if name == _REMEMBER_FACE_TOOL_NAME:
+                response, relationship_note = await self._handle_remember_face_call(
+                    function_call
+                )
+                if relationship_note is not None:
+                    relationship_notes.append(relationship_note)
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response=response,
+                        non_blocking=non_blocking,
+                    )
+                )
+                continue
+
+            if name == _FORGET_FACE_TOOL_NAME:
+                response = await self._handle_forget_face_call(function_call)
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response=response,
+                        non_blocking=non_blocking,
+                    )
+                )
+                continue
+
+            logger.warning(
+                "[kids_teacher_gemini_backend] unknown tool call name=%r ignored",
+                name,
+            )
             function_responses.append(
                 _build_function_response(
                     self._types_module,
                     call_id=call_id,
-                    name=name or _REMEMBER_TOOL_NAME,
-                    response=response,
+                    name=name or "unknown",
+                    response={"output": {"status": "ignored"}},
                     non_blocking=non_blocking,
                 )
             )
@@ -556,19 +671,10 @@ class GeminiRealtimeBackend:
                 "[kids_teacher_gemini_backend] send_tool_response failed: %s", exc
             )
         finally:
-            for fact in facts_to_persist:
-                self._schedule_memory_append(fact)
-
-    def _handle_remember_call(
-        self, function_call: Any
-    ) -> tuple[dict[str, Any], Optional[str]]:
-        fact = _extract_remember_fact(function_call)
-        if not fact:
-            logger.warning(
-                "[kids_teacher_gemini_backend] remember tool call missing usable fact"
-            )
-            return {"output": {"status": "ignored"}}, None
-        return {"output": {"status": "scheduled"}}, fact
+            for tool_name, payload in scheduled_writes:
+                self._schedule_memory_write(tool_name, payload)
+            for note_text in relationship_notes:
+                self._schedule_relationship_note(note_text)
 
     async def _handle_remember_face_call(
         self, function_call: Any
@@ -605,7 +711,7 @@ class GeminiRealtimeBackend:
             return {"output": {"status": "unavailable"}}, None
 
         EnrollResult = face_service.EnrollResult  # noqa: N806
-        fact_to_persist: Optional[str] = None
+        relationship_note: Optional[str] = None
         if result == EnrollResult.OK:
             logger.info(
                 "[kids_teacher_gemini_backend] remember_face ok name=%r relationship=%r",
@@ -613,8 +719,8 @@ class GeminiRealtimeBackend:
                 relationship,
             )
             if relationship:
-                fact_to_persist = f"{name} {relationship}"
-            return {"output": {"status": "ok"}}, fact_to_persist
+                relationship_note = f"{name} {relationship}"
+            return {"output": {"status": "ok"}}, relationship_note
         if result == EnrollResult.NO_FACE:
             return {"output": {"status": "no_face"}}, None
         if result == EnrollResult.MULTIPLE_FACES:
@@ -651,7 +757,7 @@ class GeminiRealtimeBackend:
             removed_face = False
         try:
             removed_lines = await asyncio.to_thread(
-                memory_remove_substring, name, self._memory_file_path
+                memory_remove_notes_starting_with, name, self._memory_file_path
             )
         except Exception:
             logger.warning(
@@ -670,28 +776,66 @@ class GeminiRealtimeBackend:
             return {"output": {"status": "ok"}}
         return {"output": {"status": "not_found"}}
 
-    def _schedule_memory_append(self, fact: str) -> None:
-        task = asyncio.create_task(self._append_memory_fact_async(fact))
+    def _schedule_memory_write(self, tool_name: str, payload: dict[str, Any]) -> None:
+        task = asyncio.create_task(self._memory_write_async(tool_name, payload))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
-    async def _append_memory_fact_async(self, fact: str) -> None:
+    async def _memory_write_async(
+        self, tool_name: str, payload: dict[str, Any]
+    ) -> None:
         try:
-            await asyncio.to_thread(
-                self._memory_append,
-                fact,
-                self._memory_file_path,
-            )
+            if tool_name == _SET_ABOUT_TOOL_NAME:
+                await asyncio.to_thread(
+                    self._set_key,
+                    payload["key"],
+                    payload["value"],
+                    self._memory_file_path,
+                )
+            elif tool_name == _ADD_NOTE_TOOL_NAME:
+                await asyncio.to_thread(
+                    self._add_note,
+                    payload["text"],
+                    path=self._memory_file_path,
+                )
+            else:
+                return
         except Exception:
             logger.warning(
-                "[kids_teacher_gemini_backend] remember write failed for fact=%r",
-                fact,
+                "[kids_teacher_gemini_backend] %s write failed for payload=%r",
+                tool_name,
+                payload,
                 exc_info=True,
             )
             return
         logger.info(
-            "[kids_teacher_gemini_backend] remember write succeeded for fact=%r",
-            fact,
+            "[kids_teacher_gemini_backend] %s write succeeded for payload=%r",
+            tool_name,
+            payload,
+        )
+
+    def _schedule_relationship_note(self, text: str) -> None:
+        task = asyncio.create_task(self._append_relationship_note_async(text))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+
+    async def _append_relationship_note_async(self, text: str) -> None:
+        try:
+            await asyncio.to_thread(
+                self._append_note,
+                text,
+                self._memory_file_path,
+            )
+        except Exception:
+            logger.warning(
+                "[kids_teacher_gemini_backend] remember_face note write failed for text=%r",
+                text,
+                exc_info=True,
+            )
+            return
+        logger.info(
+            "[kids_teacher_gemini_backend] remember_face note write succeeded for text=%r",
+            text,
         )
 
     def _normalize_message(self, raw_message: Any) -> list[dict]:

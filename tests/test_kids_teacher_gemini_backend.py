@@ -141,7 +141,8 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     config = build_gemini_live_config(payload, _FakeTypes)
 
     assert "Only safe preschool topics." in config.system_instruction
-    assert "remember" in config.system_instruction
+    assert "set_about" in config.system_instruction
+    assert "add_note" in config.system_instruction
     # Only audio modality survives — text-only replies would break the robot.
     assert config.response_modalities == ["AUDIO"]
     # Voice translated to Gemini name.
@@ -150,13 +151,15 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     # directions so the safety layer keeps working.
     assert config.input_audio_transcription is not None
     assert config.output_audio_transcription is not None
-    # Chunk G: ``remember_face`` and ``forget_face`` were added alongside
-    # ``remember``. The first tool is still the persistent-memory remember
-    # tool; the face tools are asserted separately below.
+    # Memory tool exposes two FunctionDeclarations (set_about + add_note);
+    # face tools (remember_face, forget_face) are separate Tool entries
+    # asserted in their own test below.
     assert len(config.tools) == 3
-    declaration = config.tools[0].function_declarations[0]
-    assert declaration.name == "remember"
-    assert declaration.behavior == "NON_BLOCKING"
+    memory_decls = config.tools[0].function_declarations
+    memory_names = [d.name for d in memory_decls]
+    assert memory_names == ["set_about", "add_note"]
+    for d in memory_decls:
+        assert d.behavior == "NON_BLOCKING"
 
 
 def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
@@ -168,7 +171,8 @@ def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
 def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() -> None:
     payload = {"voice": "alloy"}
     config = build_gemini_live_config(payload, _FakeTypes)
-    assert "remember" in config.system_instruction
+    assert "set_about" in config.system_instruction
+    assert "add_note" in config.system_instruction
 
 
 def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
@@ -178,8 +182,8 @@ def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
         _FakeTypes,
         model="gemini-3.1-flash-live-preview",
     )
-    declaration = config.tools[0].function_declarations[0]
-    assert getattr(declaration, "behavior", None) is None
+    for d in config.tools[0].function_declarations:
+        assert getattr(d, "behavior", None) is None
 
 
 # ---------------------------------------------------------------------------
@@ -365,11 +369,22 @@ def _build_server_message(
     return SimpleNamespace(server_content=server_content)
 
 
-def _build_tool_call_message(*, fact: Any, call_id: str = "call-1") -> Any:
+def _build_set_about_call(
+    *, key: str, value: str, call_id: str = "call-1"
+) -> Any:
     function_call = SimpleNamespace(
         id=call_id,
-        name="remember",
-        args={"fact": fact} if fact is not None else {},
+        name="set_about",
+        args={"key": key, "value": value},
+    )
+    return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+
+
+def _build_add_note_call(*, text: str, call_id: str = "call-1") -> Any:
+    function_call = SimpleNamespace(
+        id=call_id,
+        name="add_note",
+        args={"text": text},
     )
     return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
 
@@ -737,19 +752,23 @@ async def test_reader_loop_handles_multiple_turns_on_single_session() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tool_call_sends_tool_response_before_background_write_finishes() -> None:
+async def test_set_about_tool_response_sent_before_background_write_finishes() -> None:
     write_started = threading.Event()
     allow_finish = threading.Event()
     write_finished = threading.Event()
 
-    def slow_append(fact: str, path: str | None) -> None:
-        assert fact == "Their name is Aanya"
+    def slow_set_key(key: str, value: str, path: str | None) -> None:
+        assert key == "name"
+        assert value == "Aanya"
         write_started.set()
         allow_finish.wait(timeout=1.0)
         write_finished.set()
 
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -757,7 +776,7 @@ async def test_tool_call_sends_tool_response_before_background_write_finishes() 
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=slow_append,
+        set_key_fn=slow_set_key,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -776,14 +795,17 @@ async def test_tool_call_sends_tool_response_before_background_write_finishes() 
 
 
 @pytest.mark.asyncio
-async def test_tool_call_persists_memory_file_after_background_write(
+async def test_set_about_persists_to_memory_file(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-24")
+    monkeypatch.setattr(memory_file, "_today_iso", lambda: "2026-04-25")
     target = tmp_path / "memory.md"
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -799,21 +821,26 @@ async def test_tool_call_persists_memory_file_after_background_write(
     try:
         event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert event["type"] == "response.done"
-        await _wait_until(lambda: "Their name is Aanya" in memory_file.read(target))
+        await _wait_until(lambda: "name: Aanya" in memory_file.read_raw(target))
         assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
     finally:
         await backend.close()
 
 
 @pytest.mark.asyncio
-async def test_tool_call_logs_warning_when_background_write_fails(
-    caplog,
-) -> None:
-    def failing_append(fact: str, path: str | None) -> None:
-        raise OSError("disk full")
+async def test_add_note_routes_through_injected_handler(tmp_path) -> None:
+    captured: list[tuple[str, str | None]] = []
 
+    def fake_add_note(text: str, *, path: str | None = None, **_: Any) -> str:
+        captured.append((text, path))
+        return "appended"
+
+    target = tmp_path / "memory.md"
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_add_note_call(text="She loves dinosaurs"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -821,7 +848,39 @@ async def test_tool_call_logs_warning_when_background_write_fails(
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=failing_append,
+        memory_file_path=str(target),
+        add_note_fn=fake_add_note,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(captured))
+        assert captured[0] == ("She loves dinosaurs", str(target))
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_set_about_logs_warning_when_background_write_fails(caplog) -> None:
+    def failing_set_key(key: str, value: str, path: str | None) -> None:
+        raise OSError("disk full")
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        set_key_fn=failing_set_key,
     )
 
     with caplog.at_level("WARNING"):
@@ -830,25 +889,26 @@ async def test_tool_call_logs_warning_when_background_write_fails(
         try:
             event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
             assert event["type"] == "response.done"
-            await _wait_until(lambda: any("remember write failed" in r.message for r in caplog.records))
+            await _wait_until(
+                lambda: any("set_about write failed" in r.message for r in caplog.records)
+            )
         finally:
             await backend.close()
 
     assert session.tool_responses[0][0].response == {"output": {"status": "scheduled"}}
-    assert not any(
-        "remember write succeeded" in r.message for r in caplog.records
-    )
+    assert not any("set_about write succeeded" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_tool_call_logs_info_when_background_write_succeeds(
-    caplog,
-) -> None:
-    def ok_append(fact: str, path: str | None) -> None:
+async def test_set_about_logs_info_when_background_write_succeeds(caplog) -> None:
+    def ok_set_key(key: str, value: str, path: str | None) -> None:
         return None
 
     session = _MultiTurnFakeSession(
-        turns=[[_build_tool_call_message(fact="Their name is Aanya"), _build_server_message(turn_complete=True)]]
+        turns=[[
+            _build_set_about_call(key="name", value="Aanya"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
     manager = _FakeConnectionCM(session)
     client = _FakeClient(manager)
@@ -856,7 +916,7 @@ async def test_tool_call_logs_info_when_background_write_succeeds(
         model=DEFAULT_GEMINI_MODEL,
         client_factory=lambda: client,
         types_module=_FakeTypes,
-        memory_append=ok_append,
+        set_key_fn=ok_set_key,
     )
 
     with caplog.at_level("INFO"):
@@ -867,17 +927,52 @@ async def test_tool_call_logs_info_when_background_write_succeeds(
             assert event["type"] == "response.done"
             await _wait_until(
                 lambda: any(
-                    "remember write succeeded" in r.message
-                    and "Their name is Aanya" in r.message
+                    "set_about write succeeded" in r.message
+                    and "name" in r.message
+                    and "Aanya" in r.message
                     for r in caplog.records
                 )
             )
         finally:
             await backend.close()
 
-    assert not any(
-        "remember write failed" in r.message for r in caplog.records
+    assert not any("set_about write failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_set_about_with_unknown_key_is_rejected(caplog) -> None:
+    calls: list[tuple] = []
+
+    def spy_set_key(key: str, value: str, path: str | None) -> None:
+        calls.append((key, value))
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_set_about_call(key="ssn", value="123-45-6789"),
+            _build_server_message(turn_complete=True),
+        ]]
     )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        set_key_fn=spy_set_key,
+    )
+
+    with caplog.at_level("WARNING"):
+        await backend.connect({"instructions": "hi", "voice": "alloy"})
+        gen = backend.events()
+        try:
+            event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert event["type"] == "response.done"
+        finally:
+            await backend.close()
+
+    assert calls == []
+    assert session.tool_responses[0][0].response == {"output": {"status": "ignored"}}
+    assert any("set_about call rejected" in r.message for r in caplog.records)
 
 
 # ---------------------------------------------------------------------------
@@ -909,10 +1004,10 @@ async def test_remember_face_persists_encoding_with_one_face(
 
     monkeypatch.setattr(face_service, "enroll_from_frame", fake_enroll)
 
-    memory_appends: list[tuple[str, Any]] = []
+    note_appends: list[tuple[str, Any]] = []
 
-    def memory_append(fact: str, path: Any) -> None:
-        memory_appends.append((fact, path))
+    def append_note(text: str, path: Any) -> None:
+        note_appends.append((text, path))
 
     fake_frame = object()
     session = _MultiTurnFakeSession(
@@ -933,7 +1028,7 @@ async def test_remember_face_persists_encoding_with_one_face(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: fake_frame,
-        memory_append=memory_append,
+        append_note_fn=append_note,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -941,12 +1036,12 @@ async def test_remember_face_persists_encoding_with_one_face(
     try:
         event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert event["type"] == "response.done"
-        await _wait_until(lambda: bool(session.tool_responses) and bool(memory_appends))
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_appends))
     finally:
         await backend.close()
 
     assert enroll_calls == [("Aunt Priya", fake_frame, "is Myra's aunt")]
-    assert memory_appends[0][0] == "Aunt Priya is Myra's aunt"
+    assert note_appends[0][0] == "Aunt Priya is Myra's aunt"
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "ok"}}
 
@@ -963,10 +1058,10 @@ async def test_remember_face_refuses_when_zero_faces(
         lambda *a, **kw: face_service.EnrollResult.NO_FACE,
     )
 
-    memory_appends: list[Any] = []
+    note_appends: list[Any] = []
 
-    def memory_append(fact: str, path: Any) -> None:
-        memory_appends.append(fact)
+    def append_note(text: str, path: Any) -> None:
+        note_appends.append(text)
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -986,7 +1081,7 @@ async def test_remember_face_refuses_when_zero_faces(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        memory_append=memory_append,
+        append_note_fn=append_note,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -999,7 +1094,7 @@ async def test_remember_face_refuses_when_zero_faces(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "no_face"}}
-    assert memory_appends == []
+    assert note_appends == []
 
 
 @pytest.mark.asyncio
@@ -1014,7 +1109,7 @@ async def test_remember_face_refuses_when_multiple_faces(
         lambda *a, **kw: face_service.EnrollResult.MULTIPLE_FACES,
     )
 
-    memory_appends: list[Any] = []
+    note_appends: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1034,7 +1129,7 @@ async def test_remember_face_refuses_when_multiple_faces(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        memory_append=lambda fact, path: memory_appends.append(fact),
+        append_note_fn=lambda text, path: note_appends.append(text),
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1047,7 +1142,7 @@ async def test_remember_face_refuses_when_multiple_faces(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "multiple_faces"}}
-    assert memory_appends == []
+    assert note_appends == []
 
 
 @pytest.mark.asyncio
@@ -1062,7 +1157,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
         lambda *a, **kw: face_service.EnrollResult.CAPACITY_EXCEEDED,
     )
 
-    memory_appends: list[Any] = []
+    note_appends: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1082,7 +1177,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        memory_append=lambda fact, path: memory_appends.append(fact),
+        append_note_fn=lambda text, path: note_appends.append(text),
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1095,7 +1190,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "capacity"}}
-    assert memory_appends == []
+    assert note_appends == []
 
 
 @pytest.mark.asyncio
@@ -1110,7 +1205,7 @@ async def test_remember_face_refuses_when_library_missing(
         lambda *a, **kw: face_service.EnrollResult.LIBRARY_MISSING,
     )
 
-    memory_appends: list[Any] = []
+    note_appends: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1130,7 +1225,7 @@ async def test_remember_face_refuses_when_library_missing(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        memory_append=lambda fact, path: memory_appends.append(fact),
+        append_note_fn=lambda text, path: note_appends.append(text),
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1143,7 +1238,7 @@ async def test_remember_face_refuses_when_library_missing(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "unavailable"}}
-    assert memory_appends == []
+    assert note_appends == []
 
 
 @pytest.mark.asyncio
@@ -1216,6 +1311,7 @@ async def test_forget_face_removes_encoding_and_memory_line(
     target = tmp_path / "memory.md"
     target.write_text(
         "# Things to remember about the child\n\n"
+        "## Notes\n"
         "- Aunt Priya is Myra's aunt _(2026-04-24)_\n"
         "- Their name is Aanya _(2026-04-24)_\n",
         encoding="utf-8",
@@ -1253,9 +1349,13 @@ async def test_forget_face_removes_encoding_and_memory_line(
     assert forget_calls == ["Aunt Priya"]
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "ok"}}
-    text = target.read_text(encoding="utf-8")
-    assert "Aunt Priya" not in text
-    assert "Their name is Aanya" in text
+    # The relationship note is removed from ``## Notes``. It may resurface
+    # in ``## History`` (replace_notes archives removed entries there);
+    # only ``## Notes`` content feeds the system instruction, so a check
+    # against the Notes section is what matters.
+    notes = memory_file.list_notes(target)
+    assert all("Aunt Priya" not in note for note in notes)
+    assert any("Their name is Aanya" in note for note in notes)
 
 
 @pytest.mark.asyncio
@@ -1272,6 +1372,7 @@ async def test_forget_face_returns_not_found_when_unknown(
     target = tmp_path / "memory.md"
     target.write_text(
         "# Things to remember about the child\n\n"
+        "## Notes\n"
         "- Their name is Aanya _(2026-04-24)_\n",
         encoding="utf-8",
     )
@@ -1331,6 +1432,7 @@ async def test_forget_face_does_not_wipe_substring_collisions(
     target = tmp_path / "memory.md"
     target.write_text(
         "# Things to remember about the child\n\n"
+        "## Notes\n"
         "- Their name is Samira _(2026-04-24)_\n"
         "- Their favourite character is Sam _(2026-04-24)_\n"
         "- Sam is Myra's friend _(2026-04-24)_\n",
@@ -1366,13 +1468,15 @@ async def test_forget_face_does_not_wipe_substring_collisions(
     finally:
         await backend.close()
 
-    text = target.read_text(encoding="utf-8")
-    # The relationship line ("Sam is Myra's friend") starts with the name
-    # token and is the legitimate target — that one MUST be gone.
-    assert "Sam is Myra's friend" not in text
-    # The two collision cases must survive.
-    assert "Their name is Samira" in text
-    assert "Their favourite character is Sam" in text
+    notes = memory_file.list_notes(target)
+    # The relationship note ("Sam is Myra's friend") starts with the name
+    # token and is the legitimate target — that one MUST be gone from Notes.
+    # (replace_notes archives it under History, but History never feeds the
+    # system instruction so it's effectively forgotten.)
+    assert all("Sam is Myra's friend" not in note for note in notes)
+    # The two collision cases must survive in Notes.
+    assert any("Their name is Samira" in note for note in notes)
+    assert any("Their favourite character is Sam" in note for note in notes)
 
 
 @pytest.mark.asyncio
@@ -1398,6 +1502,7 @@ async def test_forget_face_continues_memory_cleanup_when_face_forget_raises(
     target = tmp_path / "memory.md"
     target.write_text(
         "# Things to remember about the child\n\n"
+        "## Notes\n"
         "- Aunt Priya is Myra's aunt _(2026-04-24)_\n",
         encoding="utf-8",
     )
@@ -1432,9 +1537,10 @@ async def test_forget_face_continues_memory_cleanup_when_face_forget_raises(
         await backend.close()
 
     response = session.tool_responses[0][0].response
-    # Memory cleanup ran and removed the line; status reports the truth.
+    # Memory cleanup ran and removed the note; status reports the truth.
     assert response == {"output": {"status": "ok"}}
-    assert "Aunt Priya" not in target.read_text(encoding="utf-8")
+    notes = memory_file.list_notes(target)
+    assert all("Aunt Priya" not in note for note in notes)
 
 
 def test_face_tools_not_registered_on_openai_backend() -> None:
@@ -1452,16 +1558,19 @@ def test_face_tools_not_registered_on_openai_backend() -> None:
 
 
 def test_remember_face_tool_declaration_present_on_gemini() -> None:
-    """The Gemini live config must register both ``remember_face`` and
-    ``forget_face`` FunctionDeclarations alongside the existing
-    ``remember`` declaration.
+    """The Gemini live config must register the memory tools (set_about /
+    add_note) alongside the face tools (remember_face / forget_face). The
+    face tools are Gemini-only — they live in their own FunctionDeclaration
+    Tool entries, not bundled into the memory Tool.
     """
     config = build_gemini_live_config(
         {"instructions": "hi", "voice": "alloy"}, _FakeTypes
     )
-    declared_names = {
-        tool.function_declarations[0].name for tool in config.tools
-    }
-    assert "remember" in declared_names
+    declared_names: set[str] = set()
+    for tool in config.tools:
+        for decl in tool.function_declarations:
+            declared_names.add(decl.name)
+    assert "set_about" in declared_names
+    assert "add_note" in declared_names
     assert "remember_face" in declared_names
     assert "forget_face" in declared_names

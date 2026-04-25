@@ -104,15 +104,31 @@ def test_load_profile_appends_memory_markdown_to_instructions(tmp_path) -> None:
     memory_path = tmp_path / "memory.md"
     _write(
         memory_path,
-        "# Things to remember about the child\n\n- Her name is Aanya",
+        "# Things to remember about the child\n\n## Current\n- name: Aanya _(2026-04-25)_\n",
     )
 
     profile = load_profile(str(tmp_path), memory_file_path=str(memory_path))
 
-    assert profile.instructions == (
-        "Be kind.\n\n"
-        "# Things to remember about the child\n\n- Her name is Aanya"
+    assert "Be kind." in profile.instructions
+    assert "## Current" in profile.instructions
+    assert "- name: Aanya" in profile.instructions
+
+
+def test_load_profile_excludes_history_from_instructions(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    memory_path = tmp_path / "memory.md"
+    _write(
+        memory_path,
+        "# Things to remember about the child\n\n"
+        "## Current\n- name: Myra _(2026-04-25)_\n\n"
+        "## History\n- name: Abi _(2026-04-24 → 2026-04-25)_\n",
     )
+
+    profile = load_profile(str(tmp_path), memory_file_path=str(memory_path))
+
+    assert "Myra" in profile.instructions
+    assert "## History" not in profile.instructions
+    assert "Abi" not in profile.instructions
 
 
 def test_validate_tool_names_accepts_known() -> None:
