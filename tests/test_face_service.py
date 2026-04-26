@@ -355,6 +355,176 @@ def test_detect_face_bboxes_passes_rgb_to_face_recognition(monkeypatch) -> None:
     assert tuple(passed[0, 0]) == (30, 20, 10)
 
 
+# ---------------------------------------------------------------------------
+# 2026-04-26 regression: dlib HOG / CNN are NOT thread-safe. Concurrent calls
+# from the gaze tracker (asyncio loop, 3 Hz) and `remember_face` (asyncio
+# to_thread worker) corrupted the glibc freelist and aborted the process.
+# `_DLIB_LOCK` must serialize every dlib entry point in the module.
+# ---------------------------------------------------------------------------
+
+
+def test_dlib_lock_serializes_concurrent_callers(monkeypatch) -> None:
+    """Two threads calling face_service must never sit inside dlib at once."""
+    import threading
+    import time
+
+    inside = 0
+    max_inside = 0
+    counter_lock = threading.Lock()
+    barrier = threading.Barrier(3)  # 2 workers + main thread
+
+    def fake_face_locations(_rgb, model="hog"):
+        nonlocal inside, max_inside
+        with counter_lock:
+            inside += 1
+            max_inside = max(max_inside, inside)
+        # Hold long enough that, without _DLIB_LOCK, the other thread would
+        # observe inside == 2 before the first call returned.
+        time.sleep(0.05)
+        with counter_lock:
+            inside -= 1
+        return [(0, 100, 100, 0)]
+
+    fr = sys.modules["face_recognition"]
+    fr.face_locations = MagicMock(side_effect=fake_face_locations)
+    fr.face_encodings = MagicMock(return_value=[np.zeros(128)])
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    def worker():
+        barrier.wait()
+        face_service.detect_face_bboxes(_frame())
+
+    threads = [threading.Thread(target=worker) for _ in range(2)]
+    for t in threads:
+        t.start()
+    barrier.wait()  # release both workers simultaneously
+    for t in threads:
+        t.join(timeout=2.0)
+        assert not t.is_alive(), "worker thread did not finish in time"
+
+    assert max_inside == 1, (
+        f"dlib was entered concurrently (max_inside={max_inside}); "
+        "_DLIB_LOCK is not serializing callers"
+    )
+
+
+def test_dlib_lock_serializes_enroll_against_detect(monkeypatch) -> None:
+    """The crash trace had enroll_from_frame (worker) + detect_face_bboxes
+    (loop) overlapping. Both entry points must share the same lock."""
+    import threading
+    import time
+
+    inside = 0
+    max_inside = 0
+    counter_lock = threading.Lock()
+    barrier = threading.Barrier(3)
+
+    def fake_face_locations(_rgb, model="hog"):
+        nonlocal inside, max_inside
+        with counter_lock:
+            inside += 1
+            max_inside = max(max_inside, inside)
+        time.sleep(0.05)
+        with counter_lock:
+            inside -= 1
+        return [(0, 100, 100, 0)]
+
+    fr = sys.modules["face_recognition"]
+    fr.face_locations = MagicMock(side_effect=fake_face_locations)
+    fr.face_encodings = MagicMock(return_value=[np.zeros(128)])
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    def enroll_worker():
+        barrier.wait()
+        face_service.enroll_from_frame("X", _frame())
+
+    def detect_worker():
+        barrier.wait()
+        face_service.detect_face_bboxes(_frame())
+
+    t1 = threading.Thread(target=enroll_worker)
+    t2 = threading.Thread(target=detect_worker)
+    t1.start()
+    t2.start()
+    barrier.wait()
+    t1.join(timeout=2.0)
+    t2.join(timeout=2.0)
+
+    assert max_inside == 1, (
+        f"enroll + detect overlapped inside dlib (max_inside={max_inside})"
+    )
+
+
+# ---------------------------------------------------------------------------
+# prewarm: load dlib's CNN encoder before the contended window opens
+# ---------------------------------------------------------------------------
+
+
+def test_prewarm_invokes_face_encodings(monkeypatch) -> None:
+    fr = sys.modules["face_recognition"]
+    fr.face_encodings = MagicMock(return_value=[])
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    face_service.prewarm()
+
+    assert fr.face_encodings.call_count == 1
+    passed_frame, passed_locations = fr.face_encodings.call_args.args
+    assert passed_frame.shape == (128, 128, 3)
+    assert passed_frame.dtype == np.uint8
+    assert passed_locations == [(0, 128, 128, 0)]
+
+
+def test_prewarm_no_op_when_dlib_missing(monkeypatch) -> None:
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", False, raising=False)
+    fr = sys.modules["face_recognition"]
+    fr.face_encodings = MagicMock(return_value=[])
+
+    face_service.prewarm()  # must not raise
+
+    assert fr.face_encodings.call_count == 0
+
+
+def test_prewarm_swallows_exceptions(monkeypatch) -> None:
+    fr = sys.modules["face_recognition"]
+    fr.face_encodings = MagicMock(side_effect=RuntimeError("boom"))
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    face_service.prewarm()  # must not propagate
+
+
+# ---------------------------------------------------------------------------
+# enroll_from_frame downscales for HOG (defense-in-depth: shorter lock-hold)
+# ---------------------------------------------------------------------------
+
+
+def test_enroll_from_frame_downscales_for_hog(monkeypatch) -> None:
+    """HOG runs on a ≤480p frame; encoder runs on the full-res frame with
+    rescaled bboxes. Keeps lock-hold time at ~50 ms instead of ~500 ms."""
+    fr = sys.modules["face_recognition"]
+    fr.face_locations = MagicMock(return_value=[(0, 100, 100, 0)])
+    fr.face_encodings = MagicMock(return_value=[np.zeros(128)])
+    monkeypatch.setattr(face_service, "face_recognition", fr, raising=False)
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+
+    face_service.enroll_from_frame("X", _frame(h=960, w=1280))
+
+    # face_locations should receive a frame downsized to ~480p.
+    located_frame = fr.face_locations.call_args.args[0]
+    assert located_frame.shape[0] == face_service.DOWNSCALE_HEIGHT
+
+    # face_encodings should receive the full-res frame plus rescaled bboxes.
+    encoded_frame, encoded_locations = (
+        fr.face_encodings.call_args.args[0],
+        fr.face_encodings.call_args.args[1],
+    )
+    assert encoded_frame.shape[0] == 960
+    assert encoded_locations == [(0, 200, 200, 0)]  # scale = 960/480 = 2
+
+
 def test_no_frames_persisted_during_face_rec(monkeypatch, tmp_path) -> None:
     """FR-KID-21: enrollment + recognition must not leave images on disk.
 

@@ -12,6 +12,7 @@ import logging
 import os
 import pickle
 import tempfile
+import threading
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -37,6 +38,16 @@ DEFAULT_TOLERANCE = 0.50
 MAX_NAMES = 30
 MAX_ENCODINGS_PER_NAME = 8
 DOWNSCALE_HEIGHT = 480
+
+# dlib's HOG detector and CNN encoder share global model state and are NOT
+# thread-safe. Two concurrent callers (e.g. the gaze tracker on the asyncio
+# loop at 3 Hz and a `remember_face` enrollment dispatched via
+# `asyncio.to_thread`) can corrupt the glibc freelist and abort the process
+# with `corrupted double-linked list` (faulthandler trace 2026-04-26).
+# Every dlib entry point in this module must run under this lock. Callers
+# can stay synchronous; the lock is held for one HOG (~50 ms on a 480p
+# frame) or one CNN encoding (~50 ms on a single face chip).
+_DLIB_LOCK = threading.Lock()
 
 
 class EnrollResult(Enum):
@@ -100,6 +111,64 @@ def save_encodings(encodings: dict[str, list[np.ndarray]]) -> None:
     os.replace(temp_path, target)
 
 
+def _locate_in_rgb(
+    rgb: np.ndarray, *, downscale: bool
+) -> list[tuple[int, int, int, int]]:
+    """Run dlib HOG face detection under :data:`_DLIB_LOCK`; return full-res coords.
+
+    When ``downscale`` is True and ``rgb`` is taller than
+    :data:`DOWNSCALE_HEIGHT`, run detection on a ~480p downscale and
+    rescale bboxes back to the original-frame coordinate system. The
+    downscale path keeps lock-hold time at ~50 ms instead of the
+    ~200–500 ms a full-res HOG takes on a 720p+ frame.
+    """
+    if downscale and rgb.shape[0] > DOWNSCALE_HEIGHT:
+        scale = rgb.shape[0] / DOWNSCALE_HEIGHT
+        new_h = DOWNSCALE_HEIGHT
+        new_w = max(1, int(round(rgb.shape[1] / scale)))
+        # Cheap nearest-neighbour resize via numpy slicing — keeps the module
+        # free of an OpenCV dep (face_recognition itself uses Pillow internally).
+        ys = (np.linspace(0, rgb.shape[0] - 1, new_h)).astype(np.int64)
+        xs = (np.linspace(0, rgb.shape[1] - 1, new_w)).astype(np.int64)
+        small = rgb[ys][:, xs]
+        with _DLIB_LOCK:
+            locations = face_recognition.face_locations(small, model="hog")
+        return [
+            (
+                int(round(top * scale)),
+                int(round(right * scale)),
+                int(round(bottom * scale)),
+                int(round(left * scale)),
+            )
+            for (top, right, bottom, left) in locations
+        ]
+    with _DLIB_LOCK:
+        locations = face_recognition.face_locations(rgb, model="hog")
+    return [(int(t), int(r), int(b), int(l)) for (t, r, b, l) in locations]
+
+
+def prewarm() -> None:
+    """Force dlib's HOG + CNN models to load before the concurrent window opens.
+
+    The first ``face_encodings`` call lazy-loads
+    ``dlib_face_recognition_resnet_model_v1`` (~50 MB), which adds a one-off
+    ~200 ms allocator spike. Doing it cold at startup, before
+    `CameraWorker` and the gaze loop start, keeps that spike out of the
+    window where it could overlap another native call. No-op when dlib is
+    unavailable. Safe to call repeatedly.
+    """
+    if not HAS_FACE_REC:
+        return
+    dummy = np.zeros((128, 128, 3), dtype=np.uint8)
+    try:
+        with _DLIB_LOCK:
+            # locations=[(top, right, bottom, left)] covers the whole dummy.
+            face_recognition.face_encodings(dummy, [(0, 128, 128, 0)])
+    except Exception:
+        # Pre-warm is best-effort — never fatal.
+        logger.debug("face_service.prewarm raised", exc_info=True)
+
+
 def enroll_from_frame(
     name: str,
     frame: np.ndarray,
@@ -113,13 +182,17 @@ def enroll_from_frame(
     :func:`encode_bgr_frame_as_jpeg`. Caller (Chunk G) decides what verbal
     response to produce and owns any ``memory.md`` writes; this module
     only persists the biometric encoding.
+
+    Detection runs on a downscaled frame (≤480p) under :data:`_DLIB_LOCK`
+    so the lock-hold time stays short under concurrent callers; encoding
+    runs on the full-res frame with rescaled bboxes for full quality.
     """
     del relationship  # accepted for API parity with the tool-call layer; unused here.
     if not HAS_FACE_REC:
         return EnrollResult.LIBRARY_MISSING
 
     rgb = np.ascontiguousarray(frame[..., ::-1])
-    locations = face_recognition.face_locations(rgb, model="hog")
+    locations = _locate_in_rgb(rgb, downscale=True)
     if len(locations) == 0:
         return EnrollResult.NO_FACE
     if len(locations) > 1:
@@ -129,7 +202,8 @@ def enroll_from_frame(
     if name not in encodings and len(encodings) >= MAX_NAMES:
         return EnrollResult.CAPACITY_EXCEEDED
 
-    face_encs = face_recognition.face_encodings(rgb, locations)
+    with _DLIB_LOCK:
+        face_encs = face_recognition.face_encodings(rgb, locations)
     if not face_encs:
         # Detector saw a face but encoder couldn't compute it (rare blur/angle case).
         return EnrollResult.NO_FACE
@@ -152,6 +226,7 @@ def identify_in_frame(
 
     ``frame`` is the BGR numpy array from ``CameraWorker``; we swap to RGB
     before calling ``face_recognition`` (see :func:`enroll_from_frame`).
+    Detection + encoding both run under :data:`_DLIB_LOCK`.
     """
     if not HAS_FACE_REC:
         return []
@@ -168,10 +243,11 @@ def identify_in_frame(
             known_encs.append(enc)
 
     rgb = np.ascontiguousarray(frame[..., ::-1])
-    locations = face_recognition.face_locations(rgb, model="hog")
+    locations = _locate_in_rgb(rgb, downscale=False)
     if not locations:
         return []
-    face_encs = face_recognition.face_encodings(rgb, locations)
+    with _DLIB_LOCK:
+        face_encs = face_recognition.face_encodings(rgb, locations)
 
     threshold = _resolve_tolerance(tolerance)
     seen: list[str] = []
@@ -208,32 +284,10 @@ def detect_face_bboxes(
     ``frame`` is the BGR numpy array from ``CameraWorker``; we swap to RGB
     before downscaling and detection (see :func:`enroll_from_frame`). When
     ``downscale`` is True, run detection on a ~480p downscale and rescale
-    bboxes back to the original-frame coordinate system.
+    bboxes back to the original-frame coordinate system. Detection runs
+    under :data:`_DLIB_LOCK`.
     """
     if not HAS_FACE_REC:
         return []
-
     rgb = np.ascontiguousarray(frame[..., ::-1])
-
-    if downscale and rgb.shape[0] > DOWNSCALE_HEIGHT:
-        scale = rgb.shape[0] / DOWNSCALE_HEIGHT
-        new_h = DOWNSCALE_HEIGHT
-        new_w = max(1, int(round(rgb.shape[1] / scale)))
-        # Cheap nearest-neighbour resize via numpy slicing — keeps the module
-        # free of an OpenCV dep (face_recognition itself uses Pillow internally).
-        ys = (np.linspace(0, rgb.shape[0] - 1, new_h)).astype(np.int64)
-        xs = (np.linspace(0, rgb.shape[1] - 1, new_w)).astype(np.int64)
-        small = rgb[ys][:, xs]
-        locations = face_recognition.face_locations(small, model="hog")
-        return [
-            (
-                int(round(top * scale)),
-                int(round(right * scale)),
-                int(round(bottom * scale)),
-                int(round(left * scale)),
-            )
-            for (top, right, bottom, left) in locations
-        ]
-
-    locations = face_recognition.face_locations(rgb, model="hog")
-    return [(int(t), int(r), int(b), int(l)) for (t, r, b, l) in locations]
+    return _locate_in_rgb(rgb, downscale=downscale)

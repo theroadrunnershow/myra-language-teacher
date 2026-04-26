@@ -211,6 +211,60 @@ they are worth landing regardless of which library step 1 implicates.
 Defer the `pip install -U dlib` upgrade until step 1 actually points at
 `libdlib*` — otherwise it's a fishing expedition.
 
+**Root cause CONFIRMED — 2026-04-26 (faulthandler trace + fix landed):**
+
+`PYTHONFAULTHANDLER=1 python -X faulthandler` captured the abort during
+a "Mein Name ist Abi. Und ich bin Myras Vater." `remember_face` call
+(`free()` actually printed `corrupted double-linked list` → SIGABRT).
+Two threads were both inside dlib `_raw_face_locations` (HOG) at the
+crash:
+
+- **Worker thread (concurrent.futures via `asyncio.to_thread`):**
+  `face_service.enroll_from_frame:122` → `face_recognition.face_locations`
+  (the `remember_face` tool).
+- **Asyncio main loop:** `face_service.detect_face_bboxes:227` →
+  `face_tracker._tick:168` (the **gaze tracker** at 3 Hz; default
+  `KIDS_TEACHER_GAZE_HZ=3.0` per `face_tracker.py:49,136`).
+
+dlib's HOG is not thread-safe — concurrent entry against the shared
+global model state corrupts the glibc freelist. Both prior hypotheses
+in the analysis above were partly wrong:
+
+- The CNN encoder was suspect #1; the actual culprit is the HOG
+  detector (both stack tops are in `face_locations`, not
+  `face_encodings`).
+- The "concurrent loop-side native caller" was assumed to be the
+  face-rec sweep (10 s) or PyAV; the trace shows it is the gaze
+  tracker (3 Hz) — a much denser hazard window. PyAV is in the loaded
+  extension list but absent from every active stack frame.
+
+**Fix landed in this PR:**
+
+- `src/face_service.py`: module-level `threading.Lock` (`_DLIB_LOCK`)
+  around every dlib entry point (HOG + CNN encoder), threaded through
+  a shared `_locate_in_rgb` helper used by `enroll_from_frame`,
+  `identify_in_frame`, and `detect_face_bboxes`.
+- `src/face_service.enroll_from_frame`: now downscales to ≤480p for
+  HOG before acquiring the lock, then runs the encoder on the full-res
+  frame with rescaled bboxes — drops worst-case lock-hold from
+  ~500 ms (full-res HOG) to ~100 ms.
+- `src/face_service.prewarm()` and a `face_service.prewarm()` call in
+  `robot_kids_teacher.main` for the gemini path: lazy-loads the CNN
+  encoder at startup before the gaze loop / face-rec sweep / any
+  tool-call worker can race for the lock — keeps the first-call
+  ~200 ms allocator spike out of the contended window.
+- `tests/test_face_service.py`: regressions for concurrent
+  serialization (`detect`+`detect`, `enroll`+`detect`), prewarm
+  behavior, and the enroll downscale path.
+
+`threading.Lock` (not `asyncio.Lock`) because one caller is the
+to_thread worker and one is the loop — `asyncio.Lock` doesn't span
+threads. Loop-side blocking under contention is bounded to ~100 ms
+(one downscaled HOG + one CNN encoding) — comparable to a single
+gaze-tick on the loop, so the loop only misses one beat per
+`remember_face`. Verify on-device with a long-session repro that
+includes multiple `remember_face` calls.
+
 ### Process aborts mid-session even without `remember_face`
 
 Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
@@ -319,6 +373,25 @@ Settle the open question in the runbook: add `pgrep -af
 robot_kids_teacher` between repros so "process gone" vs "log truncated"
 is unambiguous, and add `dmesg -T | tail -40` so OOM kills get ruled out
 each time.
+
+**Correction — 2026-04-26 (faulthandler showed PyAV is NOT the culprit):**
+
+The `PYTHONFAULTHANDLER` trace from Issue 1 shows zero PyAV frames at
+the abort. The PyAV "fresh codec context per frame" hypothesis above
+is wrong. The actual culprit is dlib HOG racing between the asyncio
+loop (gaze tracker at 3 Hz, face-rec sweep at 0.1 Hz) and any
+tool-call worker thread — the same root cause as Issue 1, just
+without `remember_face` as the trigger (the face-rec sweep's
+`identify_in_frame` call can play that role, since it loops HOG +
+CNN encoder on the loop and overlaps with the gaze tracker's HOG via
+the camera buffer / signal yield path).
+
+The fix landed for Issue 1 (`_DLIB_LOCK` in `src/face_service.py`
+around every dlib entry point) covers this trace too. Re-run the
+no-`remember_face` repro post-fix to confirm. The PyAV/codec hardening
+(`reuse codec context`, `to_thread` the encode) remains a fine
+follow-up for allocator hygiene but is no longer load-bearing for
+crash prevention.
 
 ### Process exits with `Segmentation fault` mid-session (turn 17, post-barge-in)
 
@@ -496,6 +569,20 @@ Next actions:
 4. Once one of the three has a confirmed C frame, validate the
    bundled fix against all three traces before declaring closure —
    most likely a single diff covers all three.
+
+**Update — 2026-04-26 (same root cause as Issues 1+2; fix shared):**
+
+Confirmed family with Issues 1+2 — different signal (SIGSEGV vs
+SIGABRT) but the same dlib-HOG concurrency story explains both the
+turn-1 and turn-17 repros. SIGSEGV is just the freelist corruption
+showing up later, when an unrelated allocation/use stumbles into a
+chunk that an earlier concurrent dlib call poisoned. The fix that
+landed for Issue 1 (`_DLIB_LOCK` in `src/face_service.py` + downscale
+in `enroll_from_frame` + CNN prewarm at startup) should resolve this
+too. Verification: run a long session with several barge-ins post-fix
+and confirm zero SIGSEGV. If a SIGSEGV still appears, the residual
+suspect list reorders to PyAV / Reachy SDK / libcamera per the C
+frame the next core dump produces.
 
 ### Gemini Live `GoAway` → 1008 close not handled — no reconnect, fallback line on loop
 

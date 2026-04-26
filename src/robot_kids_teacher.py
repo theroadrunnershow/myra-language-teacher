@@ -657,6 +657,23 @@ def main(argv: Optional[list[str]] = None) -> int:
             # cancelled there. Provider gate (FR-KID-1): no worker spawned
             # when provider=openai.
             camera_worker = _maybe_start_camera_worker(mini, provider)
+            # Pre-warm dlib (HOG + CNN encoder) before the gaze loop, the
+            # face-rec sweep, and any `remember_face` to_thread call can
+            # land. This removes the first-call ~200 ms lazy-load spike
+            # from the contended window where the gaze tracker (3 Hz on the
+            # asyncio loop) and worker-thread `enroll_from_frame` would
+            # otherwise race for `_DLIB_LOCK`. No-op when face-rec is
+            # disabled (provider=openai or dlib missing).
+            if provider == "gemini":
+                try:
+                    import face_service
+
+                    face_service.prewarm()
+                except Exception as exc:
+                    logger.warning(
+                        "[robot_kids_teacher] face_service.prewarm raised: %s",
+                        exc,
+                    )
             try:
                 robot_controller = RobotController(mini)
                 mic_reader = _build_mic_reader(mini, mic_rate, target_rate)
