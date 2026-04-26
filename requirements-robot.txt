@@ -21,3 +21,9 @@ face_recognition>=1.3.0
 # "Please install face_recognition_models" at runtime and the Gemini backend
 # treats face-rec as unavailable.
 face_recognition_models @ git+https://github.com/ageitgey/face_recognition_models
+# face_recognition_models still imports `pkg_resources`, which setuptools
+# removed in 81.0 (deprecated for years, finally gone). Pin below 81 so the
+# import keeps working on Python 3.13 venvs that pull in the latest setuptools
+# by default. Drop this pin only after face_recognition_models migrates to
+# importlib.resources (or we fork it).
+setuptools<81
