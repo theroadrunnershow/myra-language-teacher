@@ -429,11 +429,16 @@ sudo apt install -y cmake libopenblas-dev liblapack-dev   # needed once so dlib 
 python3 -m venv /home/pollen/myra-venv
 source /home/pollen/myra-venv/bin/activate
 pip install -r requirements.txt -r requirements-robot.txt # first install builds dlib
+# face_recognition's pretrained model weights ship as a Git-only package (not
+# on PyPI), so they need a separate install. Without this, dlib loads fine but
+# face_recognition raises "Please install face_recognition_models" at runtime
+# and the Gemini backend treats face-rec as unavailable.
+pip install git+https://github.com/ageitgey/face_recognition_models
 ```
 
 If you want kids-teacher face recognition on the robot, these are the only extra things that need to exist:
 
-- The Pi virtualenv must have `requirements-robot.txt` installed successfully so `face_recognition` and its native dependency `dlib` are available.
+- The Pi virtualenv must have `requirements-robot.txt` **and** `face_recognition_models` (the Git-only weights package above) installed successfully so `face_recognition` and its native dependency `dlib` are available.
 - The robot stores known faces in `~/.myra/faces.pkl` (or `MYRA_FACES_FILE` if you override it). If that file is missing, kids-teacher still runs normally; it just starts with no saved faces.
 - If you want to pre-seed faces before a live session, run `python scripts/enroll_faces.py ...` on the robot after the install. The script creates `~/.myra/faces.pkl` for you.
 
