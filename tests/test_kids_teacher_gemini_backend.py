@@ -1004,10 +1004,11 @@ async def test_remember_face_persists_encoding_with_one_face(
 
     monkeypatch.setattr(face_service, "enroll_from_frame", fake_enroll)
 
-    note_appends: list[tuple[str, Any]] = []
+    note_writes: list[tuple[str, Any]] = []
 
-    def append_note(text: str, path: Any) -> None:
-        note_appends.append((text, path))
+    def add_note(text: str, *, path: Any = None, **_kwargs: Any) -> str:
+        note_writes.append((text, path))
+        return "appended"
 
     fake_frame = object()
     session = _MultiTurnFakeSession(
@@ -1028,7 +1029,7 @@ async def test_remember_face_persists_encoding_with_one_face(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: fake_frame,
-        append_note_fn=append_note,
+        add_note_fn=add_note,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1036,12 +1037,12 @@ async def test_remember_face_persists_encoding_with_one_face(
     try:
         event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
         assert event["type"] == "response.done"
-        await _wait_until(lambda: bool(session.tool_responses) and bool(note_appends))
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
     finally:
         await backend.close()
 
     assert enroll_calls == [("Aunt Priya", fake_frame, "is Myra's aunt")]
-    assert note_appends[0][0] == "Aunt Priya is Myra's aunt"
+    assert note_writes[0][0] == "Aunt Priya is Myra's aunt"
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "ok"}}
 
@@ -1058,10 +1059,11 @@ async def test_remember_face_refuses_when_zero_faces(
         lambda *a, **kw: face_service.EnrollResult.NO_FACE,
     )
 
-    note_appends: list[Any] = []
+    note_writes: list[Any] = []
 
-    def append_note(text: str, path: Any) -> None:
-        note_appends.append(text)
+    def add_note(text: str, *, path: Any = None, **_kwargs: Any) -> str:
+        note_writes.append(text)
+        return "appended"
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1081,7 +1083,7 @@ async def test_remember_face_refuses_when_zero_faces(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        append_note_fn=append_note,
+        add_note_fn=add_note,
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1094,7 +1096,7 @@ async def test_remember_face_refuses_when_zero_faces(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "no_face"}}
-    assert note_appends == []
+    assert note_writes == []
 
 
 @pytest.mark.asyncio
@@ -1109,7 +1111,7 @@ async def test_remember_face_refuses_when_multiple_faces(
         lambda *a, **kw: face_service.EnrollResult.MULTIPLE_FACES,
     )
 
-    note_appends: list[Any] = []
+    note_writes: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1129,7 +1131,7 @@ async def test_remember_face_refuses_when_multiple_faces(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        append_note_fn=lambda text, path: note_appends.append(text),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1142,7 +1144,7 @@ async def test_remember_face_refuses_when_multiple_faces(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "multiple_faces"}}
-    assert note_appends == []
+    assert note_writes == []
 
 
 @pytest.mark.asyncio
@@ -1157,7 +1159,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
         lambda *a, **kw: face_service.EnrollResult.CAPACITY_EXCEEDED,
     )
 
-    note_appends: list[Any] = []
+    note_writes: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1177,7 +1179,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        append_note_fn=lambda text, path: note_appends.append(text),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1190,7 +1192,7 @@ async def test_remember_face_refuses_when_capacity_exceeded(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "capacity"}}
-    assert note_appends == []
+    assert note_writes == []
 
 
 @pytest.mark.asyncio
@@ -1205,7 +1207,7 @@ async def test_remember_face_refuses_when_library_missing(
         lambda *a, **kw: face_service.EnrollResult.LIBRARY_MISSING,
     )
 
-    note_appends: list[Any] = []
+    note_writes: list[Any] = []
 
     session = _MultiTurnFakeSession(
         turns=[
@@ -1225,7 +1227,7 @@ async def test_remember_face_refuses_when_library_missing(
         client_factory=lambda: client,
         types_module=_FakeTypes,
         face_frame_provider=lambda: object(),
-        append_note_fn=lambda text, path: note_appends.append(text),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
     )
     await backend.connect({"instructions": "hi", "voice": "alloy"})
 
@@ -1238,7 +1240,7 @@ async def test_remember_face_refuses_when_library_missing(
 
     response = session.tool_responses[0][0].response
     assert response == {"output": {"status": "unavailable"}}
-    assert note_appends == []
+    assert note_writes == []
 
 
 @pytest.mark.asyncio
@@ -1290,6 +1292,252 @@ async def test_remember_face_refuses_when_no_camera(
     response = session.tool_responses[0][0].response
     assert response["output"]["status"] == "no_face"
     assert enroll_calls == []
+
+
+# ---------------------------------------------------------------------------
+# remember_face: relationship-note persistence on enrollment failure paths.
+#
+# When the parent introduces someone with a relationship phrase, the textual
+# fact ("Abi is Myra's dad") must be persisted regardless of whether the face
+# encoding succeeded — face-rec might be unavailable on this host, the camera
+# might see no/multiple faces, etc. Without this, the entire "remember Myra's
+# dad" intent is lost when face-rec is degraded.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_relationship_when_library_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.LIBRARY_MISSING,
+    )
+
+    note_writes: list[tuple[str, Any]] = []
+
+    def add_note(text: str, *, path: Any = None, **_kwargs: Any) -> str:
+        note_writes.append((text, path))
+        return "appended"
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Abi", "relationship": "is Myra's dad"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        add_note_fn=add_note,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "unavailable"}}
+    assert note_writes == [("Abi is Myra's dad", None)]
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_relationship_when_no_face(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.NO_FACE,
+    )
+
+    note_writes: list[str] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Abi", "relationship": "is Myra's dad"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "no_face"}}
+    assert note_writes == ["Abi is Myra's dad"]
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_relationship_when_multiple_faces(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: face_service.EnrollResult.MULTIPLE_FACES,
+    )
+
+    note_writes: list[str] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Abi", "relationship": "is Myra's dad"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "multiple_faces"}}
+    assert note_writes == ["Abi is Myra's dad"]
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_relationship_when_no_camera() -> None:
+    """Frame provider returns None (camera off / face-rec disabled). The
+    relationship phrase must still be persisted."""
+    note_writes: list[str] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Abi", "relationship": "is Myra's dad"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=None,
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response["output"]["status"] == "no_face"
+    assert note_writes == ["Abi is Myra's dad"]
+
+
+@pytest.mark.asyncio
+async def test_remember_face_persists_relationship_when_enroll_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import face_service
+
+    def boom(*a: Any, **kw: Any) -> Any:
+        raise RuntimeError("dlib went sideways")
+
+    monkeypatch.setattr(face_service, "enroll_from_frame", boom)
+
+    note_writes: list[str] = []
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Abi", "relationship": "is Myra's dad"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        add_note_fn=lambda text, **_kwargs: note_writes.append(text) or "appended",
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses) and bool(note_writes))
+    finally:
+        await backend.close()
+
+    response = session.tool_responses[0][0].response
+    assert response == {"output": {"status": "unavailable"}}
+    assert note_writes == ["Abi is Myra's dad"]
 
 
 @pytest.mark.asyncio

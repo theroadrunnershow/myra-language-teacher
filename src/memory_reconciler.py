@@ -44,10 +44,16 @@ Rules:
   remove=[], text="".
 - "append": the new observation adds something not covered by existing notes.
   remove=[], text=<the new note, possibly cleaned up>.
-- "merge": the new observation extends or refines one or more existing notes.
-  remove=[<their indices>], text=<one combined note>.
-- "replace": the new observation contradicts or supersedes existing note(s).
-  remove=[<their indices>], text=<the new fact>.
+- "merge": the new observation extends or refines one or more existing notes
+  about the SAME subject. remove=[<their indices>], text=<one combined note>.
+- "replace": the new observation contradicts or supersedes existing note(s)
+  about the SAME subject. remove=[<their indices>], text=<the new fact>.
+
+Hard constraint: notes about different proper-name subjects (e.g. "Priya is
+Myra's aunt" vs "Sara is Myra's aunt") are always distinct facts. Never merge
+or replace across different named subjects — use "append" instead. The same
+person may be referred to by short or long forms (e.g. "Priya" / "Aunt Priya"
+/ "Aunt Priya Sharma"); treat those as the same subject.
 
 Keep text short, third-person, factual. No explanations outside the JSON.
 """

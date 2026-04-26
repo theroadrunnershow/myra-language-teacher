@@ -196,3 +196,14 @@ def test_add_note_skips_empty_text(tmp_path) -> None:
     target = tmp_path / "memory.md"
     action = memory_reconciler.add_note("   ", path=target)
     assert action == "skipped"
+
+
+def test_system_prompt_carries_different_names_guardrail() -> None:
+    """Regression: the prompt rule that prevents merge/replace across
+    different proper-name subjects (so 'Sara is Myra's aunt' can't clobber
+    'Priya is Myra's aunt') must remain in the reconciler's system prompt."""
+    # Normalize line wraps so source-level hard wraps don't matter to substring
+    # checks — the LLM sees the prompt as a continuous string anyway.
+    prompt = " ".join(memory_reconciler._SYSTEM_PROMPT.split())
+    assert "different proper-name subjects" in prompt
+    assert "Never merge or replace across different named subjects" in prompt

@@ -37,7 +37,6 @@ from env_loader import load_project_dotenv
 from kids_teacher_backend import BackendConfigError
 from kids_teacher_types import ALLOWED_GEMINI_MODELS
 from memory_file import ALLOWED_KEYS as _MEMORY_ALLOWED_KEYS
-from memory_file import append_note as append_memory_note
 from memory_file import remove_notes_starting_with as memory_remove_notes_starting_with
 from memory_file import set_key as set_memory_key
 from memory_reconciler import add_note as reconcile_add_note
@@ -108,6 +107,7 @@ medical ID in memory.
 - If status is "multiple_faces", say: "I see more than one face — can just <name> look at me?"
 - If status is "capacity", say: "I'm out of room to remember new faces — ask a grown-up to forget someone first."
 - If status is "unavailable", say: "I can't remember faces yet — ask a grown-up to set me up."
+- Special case — when the call included a `relationship` AND status is one of "no_face", "multiple_faces", "capacity", or "unavailable": still acknowledge the relationship was saved. For example, if status is "unavailable" and you called `remember_face(name="Abi", relationship="is Myra's dad")`, say: "I can't see faces yet, but I'll remember that Abi is Myra's dad." Adapt the phrasing to the status (e.g. for "no_face": "I couldn't see you, but I'll remember that Abi is Myra's dad.").
 - When the parent or child says "forget X", call `forget_face` with that name.
 - After `forget_face` returns status "ok", say: "Okay, I forgot <name>."
 - If status is "not_found", say: "I don't think I remembered <name>."
@@ -407,7 +407,6 @@ class GeminiRealtimeBackend:
         memory_file_path: Optional[str] = None,
         set_key_fn: Optional[Callable[[str, str, Optional[str]], None]] = None,
         add_note_fn: Optional[Callable[..., Any]] = None,
-        append_note_fn: Optional[Callable[[str, Optional[str]], None]] = None,
         face_frame_provider: Optional[Callable[[], Any]] = None,
     ) -> None:
         self._model = model or resolve_gemini_model()
@@ -415,11 +414,10 @@ class GeminiRealtimeBackend:
         self._types_module = types_module
         self._memory_file_path = memory_file_path
         self._set_key = set_key_fn or set_memory_key
+        # Relationship notes from remember_face go through the same reconciler
+        # path as add_note so duplicates and contradictions across multiple
+        # introductions get deduped/merged/replaced rather than piling up.
         self._add_note = add_note_fn or reconcile_add_note
-        # Bypass the LLM reconciler for face-rec relationship sentences:
-        # parent-authored, deterministic, short — append_note's exact-text
-        # dedup is sufficient and we save a round-trip on every introduction.
-        self._append_note = append_note_fn or append_memory_note
         self._face_frame_provider = face_frame_provider
         self._client: Any = None
         self._connection_cm: Any = None
@@ -549,8 +547,8 @@ class GeminiRealtimeBackend:
         non_blocking = _gemini_model_supports_non_blocking_tools(self._model)
         function_responses: list[Any] = []
         # ``scheduled_writes`` covers set_about/add_note (LLM-driven memory).
-        # ``relationship_notes`` covers remember_face (parent-authored, bypasses
-        # the reconciler — see :meth:`__init__` docstring).
+        # ``relationship_notes`` covers remember_face — also routed through the
+        # reconciler so duplicate/contradictory introductions get deduped.
         scheduled_writes: list[tuple[str, dict[str, Any]]] = []
         relationship_notes: list[str] = []
 
@@ -686,6 +684,13 @@ class GeminiRealtimeBackend:
             )
             return {"output": {"status": "ignored"}}, None
 
+        # The textual relationship fact ("Abi is Myra's dad") doesn't depend on
+        # the biometric encoding succeeding — persist it whenever the parent
+        # provided one, regardless of how face enrollment turns out.
+        relationship_note: Optional[str] = (
+            f"{name} {relationship}" if relationship else None
+        )
+
         frame = self._face_frame_provider() if self._face_frame_provider else None
         if frame is None:
             logger.info(
@@ -696,7 +701,7 @@ class GeminiRealtimeBackend:
                     "status": "no_face",
                     "message": "I can't see them clearly — can they look at me?",
                 }
-            }, None
+            }, relationship_note
 
         try:
             result = await asyncio.to_thread(
@@ -708,29 +713,26 @@ class GeminiRealtimeBackend:
                 name,
                 exc_info=True,
             )
-            return {"output": {"status": "unavailable"}}, None
+            return {"output": {"status": "unavailable"}}, relationship_note
 
         EnrollResult = face_service.EnrollResult  # noqa: N806
-        relationship_note: Optional[str] = None
         if result == EnrollResult.OK:
             logger.info(
                 "[kids_teacher_gemini_backend] remember_face ok name=%r relationship=%r",
                 name,
                 relationship,
             )
-            if relationship:
-                relationship_note = f"{name} {relationship}"
             return {"output": {"status": "ok"}}, relationship_note
         if result == EnrollResult.NO_FACE:
-            return {"output": {"status": "no_face"}}, None
+            return {"output": {"status": "no_face"}}, relationship_note
         if result == EnrollResult.MULTIPLE_FACES:
-            return {"output": {"status": "multiple_faces"}}, None
+            return {"output": {"status": "multiple_faces"}}, relationship_note
         if result == EnrollResult.CAPACITY_EXCEEDED:
-            return {"output": {"status": "capacity"}}, None
+            return {"output": {"status": "capacity"}}, relationship_note
         if result == EnrollResult.LIBRARY_MISSING:
-            return {"output": {"status": "unavailable"}}, None
+            return {"output": {"status": "unavailable"}}, relationship_note
         # Defensive fallback for any unmapped enum.
-        return {"output": {"status": "unavailable"}}, None
+        return {"output": {"status": "unavailable"}}, relationship_note
 
     async def _handle_forget_face_call(
         self, function_call: Any
@@ -822,9 +824,9 @@ class GeminiRealtimeBackend:
     async def _append_relationship_note_async(self, text: str) -> None:
         try:
             await asyncio.to_thread(
-                self._append_note,
+                self._add_note,
                 text,
-                self._memory_file_path,
+                path=self._memory_file_path,
             )
         except Exception:
             logger.warning(
