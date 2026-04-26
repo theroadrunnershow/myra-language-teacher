@@ -104,7 +104,7 @@ pip install -r requirements.txt -r requirements-robot.txt
 | File                     | Purpose                                                                                                                                         |
 | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------- |
 | `requirements-common.txt` | Shared runtime/audio deps used by both the FastAPI app and the robot scripts (`numpy`, `scipy`, `pydub`, `python-dotenv`). |
-| `requirements-robot.txt` | Reachy Mini SDK + `requests` only. It pulls in `requirements-common.txt`, so `pip install -r requirements-robot.txt` still works for cloud-mode Pi installs. |
+| `requirements-robot.txt` | Reachy Mini SDK, `requests`, and robot-only face-recognition support (`face_recognition`, which builds `dlib` on the Pi). It pulls in `requirements-common.txt`, so `pip install -r requirements-robot.txt` still works for cloud-mode Pi installs. |
 | `src/robot_teacher.py`   | Drives the lesson loop on the Pi: starts the Myra server on port 8765, uses robot mics/speaker, and calls `/api/recognize` and `/api/tts`.      |
 | `tests/test_bridge.py`   | Verifies audio bridge (mic → WAV → API) and TTS without the robot attached. Run with the server already running on port 8765.                   |
 
@@ -425,10 +425,17 @@ Then open **[http://localhost:8000/kids-teacher](http://localhost:8000/kids-teac
 ```bash
 # On the Pi, inside the repo directory
 sudo apt install -y ffmpeg                            # once per Pi image
+sudo apt install -y cmake libopenblas-dev liblapack-dev   # needed once so dlib can build
 python3 -m venv /home/pollen/myra-venv
 source /home/pollen/myra-venv/bin/activate
-pip install -r requirements.txt -r requirements-robot.txt
+pip install -r requirements.txt -r requirements-robot.txt # first install builds dlib
 ```
+
+If you want kids-teacher face recognition on the robot, these are the only extra things that need to exist:
+
+- The Pi virtualenv must have `requirements-robot.txt` installed successfully so `face_recognition` and its native dependency `dlib` are available.
+- The robot stores known faces in `~/.myra/faces.pkl` (or `MYRA_FACES_FILE` if you override it). If that file is missing, kids-teacher still runs normally; it just starts with no saved faces.
+- If you want to pre-seed faces before a live session, run `python scripts/enroll_faces.py ...` on the robot after the install. The script creates `~/.myra/faces.pkl` for you.
 
 **B2. Set credentials.** Either export them in the shell, or add them to `/home/pollen/myra-language-teacher/.env` so the entry script picks them up via `env_loader`. For OpenAI:
 
