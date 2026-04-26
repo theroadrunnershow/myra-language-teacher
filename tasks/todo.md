@@ -167,6 +167,50 @@ Hot suspects on this code path:
 May share a root cause with the next entry (concurrent native-code
 corruption); diagnosis decides whether it's one fix or two.
 
+**Analysis update — 2026-04-26 (root-cause hypothesis + concrete actions):**
+
+Strongest single-suspect after re-reading the call path: **dlib CNN
+encoder running on a full-resolution frame**. `enroll_from_frame`
+(`src/face_service.py:122,132`) calls HOG + the CNN encoder on the
+original `CameraWorker` BGR frame with no downscale, unlike
+`detect_face_bboxes` (`:218-227`) which resizes to ≤480p first.
+`face_recognition_resnet_model_v1` is lazy-loaded inside the first
+`face_encodings` call (right inside the camera-busy window), and
+`face_recognition_models` was newly git-pinned in `ed83e73` — making
+this the single densest native allocation in the whole session.
+Concurrent native callers in that window: HOG sweep on the asyncio
+loop, PyAV MJPEG encode on the asyncio loop, CameraWorker BGR
+mutation in its daemon thread, GStreamer audio playback on the Reachy
+SDK side. dlib + libav + numpy + libgstreamer all share the glibc heap.
+
+Next actions, cheapest first:
+
+1. **Capture the C frame.** Re-run with
+   `PYTHONFAULTHANDLER=1 python -X faulthandler src/robot_kids_teacher.py …`
+   for the cheap version, then `ulimit -c unlimited` followed by
+   `coredumpctl gdb` on the saved core for the authoritative `bt`,
+   `thread apply all bt`. The library named in the top frame settles
+   the dlib-vs-libav-vs-Reachy question.
+2. **Pre-warm the CNN encoder at startup.** In
+   `robot_kids_teacher.main` (after the SDK checks, before
+   `mini.media.start_recording()`) make one cold
+   `face_recognition.face_encodings(np.zeros((128,128,3), dtype=np.uint8),
+   [(0,128,128,0)])` call. Removes the first-allocation spike from the
+   concurrent window so the only path that triggers the bug after
+   pre-warm is the steady-state one.
+3. **Downscale `enroll_from_frame`** to ≤480p before HOG/CNN, mirroring
+   `detect_face_bboxes` (`src/face_service.py:218-227`). ~5× less dlib
+   work in the bad window for free.
+4. **Serialize all dlib entry points** (`enroll_from_frame`,
+   `identify_in_frame`, `detect_face_bboxes`) through a single
+   `asyncio.Lock` so dlib never overlaps itself across the asyncio loop
+   and the to_thread executor.
+
+Bundle steps 2+3+4 — each is ~10 LOC and individually unobjectionable;
+they are worth landing regardless of which library step 1 implicates.
+Defer the `pip install -U dlib` upgrade until step 1 actually points at
+`libdlib*` — otherwise it's a fishing expedition.
+
 ### Process aborts mid-session even without `remember_face`
 
 Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
@@ -234,6 +278,47 @@ Open questions:
 core-dump, to capture the C frame at the abort. The two issues likely
 share a single root cause (concurrent native-code heap corruption) but
 the stack trace decides whether it's one fix or two.
+
+**Analysis update — 2026-04-26 (root-cause hypothesis + concrete actions):**
+
+Strongest single-suspect: **PyAV MJPEG encode in
+`encode_bgr_frame_as_jpeg` (`src/kids_teacher_camera.py:35-56`)** — a
+fresh `av.CodecContext.create("mjpeg", "w")` is built and flushed
+(`codec.encode(None)`) on every video tick, allocating + tearing down
+a full codec context each time. The video pump runs at 1 Hz on the
+asyncio loop (`src/robot_kids_teacher.py:286`) alongside the HOG sweep
+(also on the loop, `:530`), with the CameraWorker daemon thread mutating
+the BGR source at ~25 Hz (`src/kids_teacher_camera.py:101`). Three
+native paths sharing the glibc heap; `clear_player`/GStreamer flush on
+barge-in narrows the bad window further.
+
+Next actions, ordered for cheapest bisection:
+
+1. **Provider bisect.** Run one session with
+   `KIDS_TEACHER_REALTIME_PROVIDER=openai` — that path skips
+   `_maybe_start_camera_worker` (`src/robot_kids_teacher.py:707-709`),
+   the video pump, the face-rec sweep, and the gaze loop entirely.
+   Crash gone → camera + PyAV + face-rec stack confirmed without ever
+   touching gdb.
+2. **Face-rec bisect.** Keep provider=gemini, set
+   `KIDS_TEACHER_FACE_RECHECK_SEC=99999` to silence the per-tick HOG
+   sweep while leaving video on. Splits PyAV vs HOG.
+3. **Capture the C frame** (same plan as Issue 1) regardless of
+   bisection outcome — confirms the C-level smoking gun.
+4. **Hardening fix:** reuse a single long-lived MJPEG codec context
+   (module-level or class-attr in a dedicated `JpegEncoder` wrapper);
+   drop the per-frame `codec.encode(None)` flush in favor of one
+   explicit close at session teardown. Same throughput, far less
+   allocator churn.
+5. **Hardening fix:** wrap `encode_bgr_frame_as_jpeg` in
+   `asyncio.to_thread` (or a dedicated single-thread executor pinned to
+   the encoder from #4) so PyAV never overlaps another loop-side native
+   call.
+
+Settle the open question in the runbook: add `pgrep -af
+robot_kids_teacher` between repros so "process gone" vs "log truncated"
+is unambiguous, and add `dmesg -T | tail -40` so OOM kills get ruled out
+each time.
 
 ### Process exits with `Segmentation fault` mid-session (turn 17, post-barge-in)
 
@@ -388,6 +473,30 @@ If diagnosis confirms a shared heap-corruption root cause across Issues
 1, 2, and 3, fold them into a single fix; otherwise treat them
 independently per the C stack each one produces.
 
+**Analysis update — 2026-04-26 (root-cause hypothesis + concrete actions):**
+
+Treat as the same root-cause family as Issue 2 — different signal
+(SIGSEGV vs SIGABRT), same trigger pattern (post-barge-in turn-change).
+The turn-1 repro proves the hazard is per-event, not accumulated, so
+any fix that lands Issue 2 should land this one too.
+
+Next actions:
+
+1. Run the same provider/face-rec bisection from Issue 2 first; do not
+   spend diagnostic time on this one specifically until that splits.
+2. Add `coredumpctl gdb` to the on-device runbook — for an intermittent
+   turn-N crash a saved core beats a live gdb run. From the core
+   capture `bt`, `thread apply all bt`, plus `info registers` and
+   `disas $pc-32,$pc+32` at the SEGV frame to identify the exact
+   instruction.
+3. The Reachy motion subsystem is also stressed in both repros
+   (`Robot motion timed out…` / `Robot motion recovered.`). If
+   SIGSEGVs persist after Issues 2/3 land, attach `gdb` during a
+   `goto_target` storm and inspect Reachy SDK / ZMQ thread state.
+4. Once one of the three has a confirmed C frame, validate the
+   bundled fix against all three traces before declaring closure —
+   most likely a single diff covers all three.
+
 ### Gemini Live `GoAway` → 1008 close not handled — no reconnect, fallback line on loop
 
 Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
@@ -509,6 +618,183 @@ stress in this window.
 
 Independent of the heap-corruption issues 1–3 — separate root cause,
 separate fix.
+
+**Analysis update — 2026-04-26 (root cause confirmed + concrete fix plan):**
+
+Root cause confirmed by re-reading the backend: both signals are already
+parsed by `_normalize_message`
+(`src/kids_teacher_gemini_backend.py:873-894`) but neither emits a
+normalized event nor stores any state — the data is logged and
+discarded. `_reader_loop` (`:490-535`) bubbles the eventual 1008 close
+out as a single `error` event and exits with no reconnect. `send_audio`
+(`:1020-1042`) never marks the session dead, so subsequent calls hammer
+the closed socket; each `error` event drives the fallback line in
+`kids_teacher_realtime._on_error`
+(`src/kids_teacher_realtime.py:293-306`).
+
+Concrete fix plan (single PR, in order):
+
+1. **Cache the handle.** Add
+   `self._latest_resumption_handle: Optional[str] = None` in
+   `__init__`. In the `srupdate` branch of `_normalize_message` set
+   `self._latest_resumption_handle = new_handle` whenever `new_handle`
+   is a non-empty string and `resumable` is truthy.
+2. **Track liveness.** Add `self._session_alive = True` in `__init__`;
+   flip to False in the `send_audio`/`send_video` exception branches;
+   short-circuit subsequent `send_audio` calls to a single DEBUG log
+   instead of the existing `#N` WARNING spam.
+3. **Reconnect.** Add `_reconnect_with_handle()` that `__aexit__`s the
+   old `_connection_cm` and re-enters `client.aio.live.connect(...)`
+   with `LiveConnectConfig(..., session_resumption=
+   types.SessionResumptionConfig(handle=self._latest_resumption_handle))`.
+   Trigger from `_reader_loop`'s outer-except path AND proactively when
+   a `go_away` event arrives (use `time_left` to decide pre- vs
+   post-turn close). Reset `_session_alive=True` and
+   `_send_failure_count=0` on success.
+4. **Dedupe the fallback.** In
+   `kids_teacher_realtime._on_error` add a `_last_fallback_at`
+   timestamp; emit `_FALLBACK_ASSISTANT_LINE` at most once per ~5 s
+   contiguous error window; suppress the SPEAKING/LISTENING flap while
+   the backend is mid-reconnect.
+5. **Backend test (fakes only).** Extend
+   `tests/test_kids_teacher_gemini_backend.py` with a fake
+   `LiveServerMessage` sequence
+   (`srupdate(new_handle="abc", resumable=True)` →
+   `go_away(time_left=Duration(2s))` → send-side raises 1008) and
+   assert: handle cached, reconnect attempted with
+   `SessionResumptionConfig(handle="abc")`, only one `error` event
+   surfaced upstream.
+
+Settle before step 3:
+
+- Verify `google.genai.types.SessionResumptionConfig` exists in the
+  version pinned in `requirements-robot.txt` (older SDKs route
+  resumption differently through `LiveConnectConfig`).
+- Confirm reconnect-with-handle preserves the system prompt and prior
+  turns. If it doesn't, a cold restart in the kids-teacher experience
+  is worse than today's bug; in that case the fix has to also re-issue
+  the system prompt as the first turn.
+
+Operational mitigation while the fix lands: run sessions with
+`--max-seconds` set just under the observed cap so the session ends
+cleanly rather than getting force-dropped at 1008.
+
+### `memory_reconciler` dedup silently disabled — Ollama unreachable on Pi, falls back to plain append on every note
+
+Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
+
+**Symptom:** every memory note write logs a `WARNING` that Ollama isn't
+reachable, and the reconciler falls back to a plain `append`. The note
+IS persisted (no functional break) but **dedup is silently disabled** —
+duplicates and contradictions in `memory.md` will accumulate over time,
+which is the exact failure mode the reconciler exists to prevent.
+
+**Logs (verbatim, 2026-04-26):**
+
+```
+16:29:07  INFO     [kids_teacher_gemini_backend] session_resumption_update: new_handle='827b38eb-…'
+16:29:07  INFO     [kids_teacher_robot_bridge] mic pump heartbeat: sent=39 none=13 (last 2.0s)
+16:29:08  WARNING  [memory_reconciler] LLM call failed: ollama chat failed: Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download
+16:29:09  INFO     [kids_teacher_gemini_backend] add_note write succeeded for payload={'text': 'She visited the beach.'}
+```
+
+**Analysis:**
+
+- `text_llm.DEFAULT_PROVIDER = "ollama"` (`src/text_llm.py:26`), default
+  model `llama3.2:3b`. With no Ollama daemon running on the Pi and
+  `MYRA_TEXT_LLM_PROVIDER` / `OLLAMA_HOST` unset, the connection fails
+  on every reconciler call.
+- `memory_reconciler._ask_llm` catches the exception and returns
+  `{"action": "append", "remove": [], "text": new_note}`
+  (`src/memory_reconciler.py:137-139`).
+- `_apply_decision` then calls `memory_file.append_note` directly —
+  hence the immediately-following `add_note write succeeded` info log.
+
+So the path is: WARNING (Ollama down) → append (no dedup) → INFO
+(write succeeded). Every memory write. Once memory grows past
+`DEFAULT_MIN_EXISTING_FOR_LLM = 3` notes, this happens for every
+subsequent `add_note` and `remember_face` relationship-note call.
+
+This is **not** the same as the existing
+`memory.md ⇄ faces.pkl Linkage Hardening` entry — that one is about
+the reconciler doing the *wrong* merge; this one is about the
+reconciler doing *nothing*.
+
+**Fix checklist:**
+
+- `High` Decide what text-LLM provider to run on the Pi:
+  - **Option A (recommended):** `export MYRA_TEXT_LLM_PROVIDER=gemini`
+    in the Pi's environment. Reuses `GEMINI_API_KEY` (already required
+    for the realtime backend), no extra services. Memory writes are
+    async/background so the extra latency doesn't block the session.
+  - **Option B:** install + run Ollama locally on the Pi. Heavier
+    resource cost on top of the camera + dlib + Reachy SDK already
+    sharing limited RAM (cf. issues 1–3). Probably overkill for a 3 b
+    dedup task.
+  - **Option C:** `export MYRA_TEXT_LLM_PROVIDER=openai` — only viable
+    if `OPENAI_API_KEY` is set.
+- `Medium` Pre-flight check at backend startup: send one trivial
+  `text_llm.complete` call. On failure, log a single WARNING ("text-LLM
+  unreachable; memory dedup disabled this session") and short-circuit
+  `memory_reconciler` to plain append for the rest of the session,
+  instead of logging on every memory write.
+- `Medium` Demote the per-write `[memory_reconciler] LLM call failed`
+  log to `INFO` (or `DEBUG` after the pre-flight WARNING above) — the
+  fallback is well-defined and benign, and at WARNING it competes for
+  attention with the heap-corruption stack-traces we actually need.
+- `Low` Document the recommended Pi setting in README /
+  `.env.example`: `MYRA_TEXT_LLM_PROVIDER=gemini` is the default for
+  this device unless the user is intentionally running a local model.
+
+**Open questions:**
+
+- Was Ollama meant to be running on the Pi (daemon not started), or
+  did the default provider get inherited unintentionally? `which
+  ollama && systemctl status ollama` settles it.
+- Has memory.md already accumulated duplicates from sessions running
+  in this fallback mode? If so, a one-time pass through the reconciler
+  with a working provider would clean it up.
+
+**Analysis update — 2026-04-26 (root cause confirmed + concrete fix plan):**
+
+Root cause confirmed by re-reading the code:
+`text_llm.DEFAULT_PROVIDER = "ollama"` (`src/text_llm.py:26`); on the
+Pi `MYRA_TEXT_LLM_PROVIDER` is unset; `_complete_ollama` (`:137-178`)
+opens a client against `localhost:11434` (no daemon) and the connection
+raises; `_ask_llm` catches and returns `{"action": "append"}`
+(`src/memory_reconciler.py:130-139`); `_apply_decision` (`:175-177`)
+falls through to `memory_file.append_note`. Fully consistent with the
+WARNING + INFO pair in the trace.
+
+Concrete fix plan (smallest first):
+
+1. **Pi default → gemini.** Add `MYRA_TEXT_LLM_PROVIDER=gemini` to the
+   Pi's `.env` and document it in `.env.example`. Reuses
+   `GEMINI_API_KEY`; no new daemon. Cleanest immediate unblock.
+2. **One-shot pre-flight at startup.** In `robot_kids_teacher.main`
+   (after the SDK presence checks) call
+   `text_llm.complete(system="ping", user="ping", timeout_seconds=2.0)`
+   once. On failure log a single WARNING ("text-LLM unreachable;
+   memory dedup disabled this session") and set a module-level
+   `_DEDUP_DISABLED` flag.
+3. **Short-circuit the reconciler when disabled.** In
+   `memory_reconciler.add_note`, skip the LLM round-trip when the flag
+   is set and call `memory_file.append_note` directly. Demote the
+   per-write `[memory_reconciler] LLM call failed` log to DEBUG once
+   the pre-flight has surfaced the WARNING. Stops the spam without
+   silencing the meaningful first-failure signal.
+4. **Test (fakes).** Extend `tests/test_memory_reconciler.py` with a
+   fake `completer` that raises connection-refused; assert one WARNING
+   total (not one per write) after the pre-flight has run.
+5. **One-time backfill.** Once a working provider is wired up, replay
+   each line of `memory.md` through `memory_reconciler.add_note` to
+   dedup whatever accumulated during the broken window. A
+   `scripts/dedup_memory.py` wrapper keeps it repeatable.
+
+Sanity-check first on the Pi: `which ollama && systemctl --user status
+ollama`. If ollama was meant to be running and just failed to start,
+restarting (or systemd-enabling) it may be the right answer instead of
+switching providers.
 
 ### Kids Teacher Spec Gaps
 
