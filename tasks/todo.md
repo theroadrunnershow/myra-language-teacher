@@ -181,6 +181,36 @@ Failures log a warning, never block session shutdown.
 via Gemini Live tool-use plumbing. **Only if v2 surfaces a real
 friction point.**
 
+### memory.md ⇄ faces.pkl Linkage Hardening
+
+Context: `faces.pkl` keys on the person's `name` (string). `memory.md`
+relationship notes are written as `f"{name} {relationship}"` so the body
+*starts with* that name, and `forget_face` cleans the line via
+`memory_file.remove_notes_starting_with(name)` (case-insensitive prefix
+match on the body). The cross-store linkage is purely lexical — both
+sides must agree on the name string.
+
+Issues surfaced after commit `3690d30` (relationship notes now go through
+the reconciler):
+
+- `High` Add a prompt rule to `memory_reconciler._SYSTEM_PROMPT`: when
+the original note(s) started with a person's name, the merged/replaced
+text must continue to start with that exact name string. Otherwise a
+`merge`/`replace` could rewrite `"Aunt Priya is Myra's aunt"` into
+`"Myra's aunt Priya likes mangoes"` and `forget_face("Aunt Priya")`
+would silently leave the line behind.
+- `Medium` Pre-existing asymmetry in `_handle_forget_face_call`:
+`face_service.forget(name)` does exact-match `del encodings[name]`
+while `remove_notes_starting_with(name)` casefolds. Mixed-case input
+(`"aunt priya"`) cleans memory.md but leaves the encoding orphaned
+(the resulting `KeyError` is caught and treated as `removed_face=False`).
+Either lowercase the name on enroll/forget or apply the same
+normalization both sides.
+- `Low` Stretch goal: make the linkage structural rather than lexical
+— tag relationship notes in memory.md (e.g. `[person:Aunt Priya] is
+Myra's aunt`) and have `forget_face` look up by tag. More invasive but
+removes the prefix-preservation requirement entirely.
+
 ### Language Lesson Polish
 
 - Add celebratory jingles
