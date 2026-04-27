@@ -131,6 +131,61 @@ def test_load_profile_excludes_history_from_instructions(tmp_path) -> None:
     assert "Abi" not in profile.instructions
 
 
+def test_load_profile_appends_language_lesson_to_instructions(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "language_lesson.txt",
+        "# Language lesson mode\nTeach Telugu words gently.",
+    )
+
+    profile = load_profile(str(tmp_path))
+
+    assert "Be kind." in profile.instructions
+    assert "# Language lesson mode" in profile.instructions
+    assert "Teach Telugu words gently." in profile.instructions
+    # base instructions appear before the lesson-mode section
+    assert profile.instructions.index("Be kind.") < profile.instructions.index(
+        "# Language lesson mode"
+    )
+
+
+def test_load_profile_skips_missing_language_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    # No language_lesson.txt on disk — loader must not raise or warn.
+    profile = load_profile(str(tmp_path))
+    assert profile.instructions.strip() == "Be kind."
+
+
+def test_load_profile_skips_empty_language_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(tmp_path / "language_lesson.txt", "   \n\n   \n")
+    profile = load_profile(str(tmp_path))
+    # Empty/whitespace-only file must not glue extra blank lines onto instructions.
+    assert profile.instructions.strip() == "Be kind."
+
+
+def test_load_profile_orders_lesson_before_memory(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "language_lesson.txt",
+        "# Language lesson mode\nTeach Telugu words.",
+    )
+    memory_path = tmp_path / "memory.md"
+    _write(
+        memory_path,
+        "# Things to remember about the child\n\n## Current\n- name: Aanya _(2026-04-25)_\n",
+    )
+
+    profile = load_profile(str(tmp_path), memory_file_path=str(memory_path))
+
+    text = profile.instructions
+    assert "# Language lesson mode" in text
+    assert "## Current" in text
+    # Order: base persona → lesson skill → memory.
+    assert text.index("Be kind.") < text.index("# Language lesson mode")
+    assert text.index("# Language lesson mode") < text.index("## Current")
+
+
 def test_validate_tool_names_accepts_known() -> None:
     assert validate_tool_names(["wave"], {"wave", "nod"}) == ["wave"]
 

@@ -27,6 +27,7 @@ PROFILE_NAME = "kids_teacher"
 _INSTRUCTIONS_FILENAME = "instructions.txt"
 _VOICE_FILENAME = "voice.txt"
 _TOOLS_FILENAME = "tools.txt"
+_LANGUAGE_LESSON_FILENAME = "language_lesson.txt"
 
 
 class ProfileValidationError(Exception):
@@ -85,6 +86,14 @@ def load_profile(
         raise ProfileValidationError(
             f"Instructions file is empty at {instructions_path}"
         )
+
+    lesson_path = os.path.join(base_dir, _LANGUAGE_LESSON_FILENAME)
+    lesson_raw = _read_text_file(lesson_path)
+    if lesson_raw is not None:
+        lesson_text = lesson_raw.strip()
+        if lesson_text:
+            instructions = f"{instructions}\n\n{lesson_text}"
+
     try:
         memory_text = read_memory_for_prompt(memory_file_path)
     except OSError as exc:
