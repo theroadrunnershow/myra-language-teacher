@@ -916,6 +916,38 @@ Extends: [tasks/camera-object-recognition-design.md](camera-object-recognition-d
 - `Medium` Add a child-friendly read-aloud / discussion flow for visually grounded books and printed materials: after understanding the book, the robot should summarize or read age-appropriate content and start a topic about it with the child.
 - `Medium` Keep this as a general visual-task capability, not a book-only special case: when an adult references nearby objects in the room, the robot should use camera grounding plus a short clarification question when the target is ambiguous.
 
+### Tooling Layer (shared tool registry across providers)
+
+Design doc: [tasks/plan-tooling-layer.md](plan-tooling-layer.md)
+
+Today tools live inside each provider backend: Gemini hardcodes 4
+tools (`set_about`, `add_note`, `remember_face`, `forget_face`) with a
+100-line if/elif dispatcher in `_handle_tool_call_message`
+(`src/kids_teacher_gemini_backend.py:537-661`); OpenAI ships only a
+stub spec (`src/kids_teacher_backend.py:136-143`). Adding a tool like
+`play_music` (`tasks/plan-music-tool-barge-in.md`) means re-implementing
+schema + dispatch in *each* backend. Design doc proposes a shared
+`ToolSpec` / `ToolRegistry` / `ToolDispatcher` in
+`src/kids_teacher_tools.py` with thin per-backend adapters.
+
+- `High` Land `src/kids_teacher_tools.py` (registry + dispatcher) and
+  migrate the four Gemini tools to `BUILTIN_TOOLS` entries — Gemini
+  behavior byte-identical, no OpenAI flip yet.
+- `High` Replace `_build_memory_tool` / `_build_remember_face_tool` /
+  `_build_forget_face_tool` and the `_handle_tool_call_message`
+  if/elif ladder with a `build_gemini_tools(registry)` adapter and a
+  dispatcher-driven loop.
+- `Medium` Real schema emission in
+  `kids_teacher_backend.build_session_payload` (replaces the stub) +
+  `tool_call` normalization in `_normalize_event` +
+  `send_tool_result`.
+- `Medium` `tests/test_kids_teacher_tools.py` for registry filter,
+  dispatcher dispatch + unknown-name fallback, and per-tool handler
+  semantics against fake services.
+- `Low` Once the layer lands and on-device verification on Gemini is
+  clean, allowlist the four tools for OpenAI sessions and confirm
+  parity (separate PR).
+
 ### Persistent Memory ("Robot That Remembers Myra")
 
 Design doc: [tasks/plan-persistent-memory.md](plan-persistent-memory.md)
