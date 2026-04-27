@@ -766,123 +766,6 @@ Operational mitigation while the fix lands: run sessions with
 `--max-seconds` set just under the observed cap so the session ends
 cleanly rather than getting force-dropped at 1008.
 
-### `memory_reconciler` dedup silently disabled — Ollama unreachable on Pi, falls back to plain append on every note
-
-Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
-
-**Symptom:** every memory note write logs a `WARNING` that Ollama isn't
-reachable, and the reconciler falls back to a plain `append`. The note
-IS persisted (no functional break) but **dedup is silently disabled** —
-duplicates and contradictions in `memory.md` will accumulate over time,
-which is the exact failure mode the reconciler exists to prevent.
-
-**Logs (verbatim, 2026-04-26):**
-
-```
-16:29:07  INFO     [kids_teacher_gemini_backend] session_resumption_update: new_handle='827b38eb-…'
-16:29:07  INFO     [kids_teacher_robot_bridge] mic pump heartbeat: sent=39 none=13 (last 2.0s)
-16:29:08  WARNING  [memory_reconciler] LLM call failed: ollama chat failed: Failed to connect to Ollama. Please check that Ollama is downloaded, running and accessible. https://ollama.com/download
-16:29:09  INFO     [kids_teacher_gemini_backend] add_note write succeeded for payload={'text': 'She visited the beach.'}
-```
-
-**Analysis:**
-
-- `text_llm.DEFAULT_PROVIDER = "ollama"` (`src/text_llm.py:26`), default
-  model `llama3.2:3b`. With no Ollama daemon running on the Pi and
-  `MYRA_TEXT_LLM_PROVIDER` / `OLLAMA_HOST` unset, the connection fails
-  on every reconciler call.
-- `memory_reconciler._ask_llm` catches the exception and returns
-  `{"action": "append", "remove": [], "text": new_note}`
-  (`src/memory_reconciler.py:137-139`).
-- `_apply_decision` then calls `memory_file.append_note` directly —
-  hence the immediately-following `add_note write succeeded` info log.
-
-So the path is: WARNING (Ollama down) → append (no dedup) → INFO
-(write succeeded). Every memory write. Once memory grows past
-`DEFAULT_MIN_EXISTING_FOR_LLM = 3` notes, this happens for every
-subsequent `add_note` and `remember_face` relationship-note call.
-
-This is **not** the same as the existing
-`memory.md ⇄ faces.pkl Linkage Hardening` entry — that one is about
-the reconciler doing the *wrong* merge; this one is about the
-reconciler doing *nothing*.
-
-**Fix checklist:**
-
-- `High` Decide what text-LLM provider to run on the Pi:
-  - **Option A (recommended):** `export MYRA_TEXT_LLM_PROVIDER=gemini`
-    in the Pi's environment. Reuses `GEMINI_API_KEY` (already required
-    for the realtime backend), no extra services. Memory writes are
-    async/background so the extra latency doesn't block the session.
-  - **Option B:** install + run Ollama locally on the Pi. Heavier
-    resource cost on top of the camera + dlib + Reachy SDK already
-    sharing limited RAM (cf. issues 1–3). Probably overkill for a 3 b
-    dedup task.
-  - **Option C:** `export MYRA_TEXT_LLM_PROVIDER=openai` — only viable
-    if `OPENAI_API_KEY` is set.
-- `Medium` Pre-flight check at backend startup: send one trivial
-  `text_llm.complete` call. On failure, log a single WARNING ("text-LLM
-  unreachable; memory dedup disabled this session") and short-circuit
-  `memory_reconciler` to plain append for the rest of the session,
-  instead of logging on every memory write.
-- `Medium` Demote the per-write `[memory_reconciler] LLM call failed`
-  log to `INFO` (or `DEBUG` after the pre-flight WARNING above) — the
-  fallback is well-defined and benign, and at WARNING it competes for
-  attention with the heap-corruption stack-traces we actually need.
-- `Low` Document the recommended Pi setting in README /
-  `.env.example`: `MYRA_TEXT_LLM_PROVIDER=gemini` is the default for
-  this device unless the user is intentionally running a local model.
-
-**Open questions:**
-
-- Was Ollama meant to be running on the Pi (daemon not started), or
-  did the default provider get inherited unintentionally? `which
-  ollama && systemctl status ollama` settles it.
-- Has memory.md already accumulated duplicates from sessions running
-  in this fallback mode? If so, a one-time pass through the reconciler
-  with a working provider would clean it up.
-
-**Analysis update — 2026-04-26 (root cause confirmed + concrete fix plan):**
-
-Root cause confirmed by re-reading the code:
-`text_llm.DEFAULT_PROVIDER = "ollama"` (`src/text_llm.py:26`); on the
-Pi `MYRA_TEXT_LLM_PROVIDER` is unset; `_complete_ollama` (`:137-178`)
-opens a client against `localhost:11434` (no daemon) and the connection
-raises; `_ask_llm` catches and returns `{"action": "append"}`
-(`src/memory_reconciler.py:130-139`); `_apply_decision` (`:175-177`)
-falls through to `memory_file.append_note`. Fully consistent with the
-WARNING + INFO pair in the trace.
-
-Concrete fix plan (smallest first):
-
-1. **Pi default → gemini.** Add `MYRA_TEXT_LLM_PROVIDER=gemini` to the
-   Pi's `.env` and document it in `.env.example`. Reuses
-   `GEMINI_API_KEY`; no new daemon. Cleanest immediate unblock.
-2. **One-shot pre-flight at startup.** In `robot_kids_teacher.main`
-   (after the SDK presence checks) call
-   `text_llm.complete(system="ping", user="ping", timeout_seconds=2.0)`
-   once. On failure log a single WARNING ("text-LLM unreachable;
-   memory dedup disabled this session") and set a module-level
-   `_DEDUP_DISABLED` flag.
-3. **Short-circuit the reconciler when disabled.** In
-   `memory_reconciler.add_note`, skip the LLM round-trip when the flag
-   is set and call `memory_file.append_note` directly. Demote the
-   per-write `[memory_reconciler] LLM call failed` log to DEBUG once
-   the pre-flight has surfaced the WARNING. Stops the spam without
-   silencing the meaningful first-failure signal.
-4. **Test (fakes).** Extend `tests/test_memory_reconciler.py` with a
-   fake `completer` that raises connection-refused; assert one WARNING
-   total (not one per write) after the pre-flight has run.
-5. **One-time backfill.** Once a working provider is wired up, replay
-   each line of `memory.md` through `memory_reconciler.add_note` to
-   dedup whatever accumulated during the broken window. A
-   `scripts/dedup_memory.py` wrapper keeps it repeatable.
-
-Sanity-check first on the Pi: `which ollama && systemctl --user status
-ollama`. If ollama was meant to be running and just failed to start,
-restarting (or systemd-enabling) it may be the right answer instead of
-switching providers.
-
 ### Kids Teacher Spec Gaps
 
 Source: [tasks/kids-teacher-requirements.md](kids-teacher-requirements.md)
@@ -1026,4 +909,10 @@ Amendment: [tasks/kids-teacher-requirements.md § "2026-04-23 Amendment"](kids-t
 
 ## Completed
 
-*(nothing yet)*
+### `memory_reconciler` dedup silently disabled — Ollama unreachable on Pi
+
+Resolved 2026-04-27. Configured Ollama API key on the Reachy Pi so the
+local `text_llm` provider (`MYRA_TEXT_LLM_PROVIDER=ollama`) authenticates
+and reaches the daemon successfully. Reconciler now performs real
+merge/replace/append decisions on every memory note write; no more
+per-write WARNING, no more silent dedup bypass.
