@@ -2,18 +2,39 @@
 Tests 2 & 3: Verify audio bridge functions work against the local server.
 Run with: python test_bridge.py
 Server must already be running on port 8765.
+
+These are live-server smoke tests — they hit a real uvicorn instance for
+TTS + STT round-trips, so pytest auto-skips them when the server is down.
+Start the server (``PYTHONPATH=src python src/main.py``, port 8765) to
+exercise them.
 """
 
 import io
+import socket
 import sys
 
 import numpy as np
+import pytest
 import requests
 import scipy.io.wavfile as wavfile
 from pydub import AudioSegment
 
 SERVER_URL = "http://localhost:8765"
 SAMPLE_RATE = 16000
+
+
+def _server_reachable(host: str = "localhost", port: int = 8765) -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.25):
+            return True
+    except OSError:
+        return False
+
+
+pytestmark = pytest.mark.skipif(
+    not _server_reachable(),
+    reason="Live server not running on localhost:8765 (start uvicorn to run bridge tests).",
+)
 
 
 def test_audio_bridge():
