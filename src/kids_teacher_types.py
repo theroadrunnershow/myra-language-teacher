@@ -65,6 +65,11 @@ class SessionStatus(str, Enum):
     SPEAKING = "speaking"
     ENDED = "ended"
     ERROR = "error"
+    # Transient state while the backend is rebuilding a dropped session
+    # (e.g., the 10-min Gemini Live audio-session ceiling fired). The robot
+    # bridge plays a short recovery cue here instead of the generic ERROR
+    # fallback so the gap feels intentional rather than broken.
+    RECONNECTING = "reconnecting"
 
 
 @dataclass(frozen=True)

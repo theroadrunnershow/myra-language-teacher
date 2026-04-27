@@ -62,6 +62,7 @@ class _FakeTypes:
     Tool = _Record
     AudioTranscriptionConfig = _Record
     LiveConnectConfig = _Record
+    SessionResumptionConfig = _Record
 
 
 class _FakeSession:

@@ -150,6 +150,41 @@ def _resolve_playback_speed() -> float:
     return value
 
 
+_RECOVERY_CUE_TEXT = "One moment, let me think."
+
+
+def _default_recovery_cue(robot_controller: object) -> None:
+    """Play a short "one moment" line through the local TTS + robot speaker.
+
+    Used as the default reconnect cue so the child hears something during
+    the 1–2s gap when Gemini Live drops the session at the 10-min ceiling.
+    Lazily imports :mod:`robot_teacher` so the flow module stays importable
+    on hosts without the robot SDK / audio deps; if the import or the HTTP
+    fetch fails we log and swallow — the cue is best-effort, never fatal.
+    """
+    try:
+        from robot_teacher import _play, api_get_dino_voice  # local import
+    except Exception as exc:
+        logger.debug(
+            "[kids_teacher_flow] recovery cue unavailable (robot_teacher import failed): %s",
+            exc,
+        )
+        return
+    try:
+        mp3 = api_get_dino_voice(_RECOVERY_CUE_TEXT)
+    except Exception as exc:
+        logger.warning(
+            "[kids_teacher_flow] recovery cue TTS fetch failed: %s", exc
+        )
+        return
+    try:
+        _play(robot_controller, mp3)
+    except Exception as exc:
+        logger.warning(
+            "[kids_teacher_flow] recovery cue playback failed: %s", exc
+        )
+
+
 def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
     """Build the real robot audio bridge hooks for a running session.
 
@@ -163,6 +198,7 @@ def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
     return KidsTeacherRobotHooks(
         robot_controller=robot_controller,
         playback_speed=_resolve_playback_speed(),
+        recovery_cue=_default_recovery_cue,
     )
 
 

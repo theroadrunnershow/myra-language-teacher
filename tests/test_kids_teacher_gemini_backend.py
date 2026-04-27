@@ -58,6 +58,7 @@ class _FakeTypes:
     Tool = _Record
     AudioTranscriptionConfig = _Record
     LiveConnectConfig = _Record
+    SessionResumptionConfig = _Record
 
 
 # ---------------------------------------------------------------------------
@@ -1822,3 +1823,414 @@ def test_remember_face_tool_declaration_present_on_gemini() -> None:
     assert "add_note" in declared_names
     assert "remember_face" in declared_names
     assert "forget_face" in declared_names
+
+
+# ---------------------------------------------------------------------------
+# Session resumption + auto-reconnect (B + D)
+#
+# Regression for the on-device 2026-04-27 incident: Gemini Live dropped the
+# session at the 10-min audio-session ceiling (1008 policy violation, GoAway
+# already received), the backend never reconnected, and send_audio kept
+# spamming "session error" events every ~3s with the robot unresponsive.
+# ---------------------------------------------------------------------------
+
+
+def test_build_live_config_passes_resumption_handle_when_provided() -> None:
+    payload = {"instructions": "hi", "voice": "alloy"}
+    config = build_gemini_live_config(
+        payload, _FakeTypes, resumption_handle="abc-123"
+    )
+    assert config.session_resumption.handle == "abc-123"
+
+
+def test_build_live_config_resumption_handle_defaults_to_none() -> None:
+    """First connect must pass handle=None — that's how Gemini knows to
+    start emitting session_resumption_update events. Without
+    session_resumption in the live config at all, the server treats the
+    session as non-resumable and the rotating handles are useless."""
+    payload = {"instructions": "hi", "voice": "alloy"}
+    config = build_gemini_live_config(payload, _FakeTypes)
+    assert config.session_resumption is not None
+    assert config.session_resumption.handle is None
+
+
+def test_normalize_session_resumption_update_caches_latest_handle() -> None:
+    backend = _new_backend()
+    msg = SimpleNamespace(
+        session_resumption_update=SimpleNamespace(
+            new_handle="handle-1",
+            resumable=True,
+            last_consumed_client_message_index=None,
+        )
+    )
+    backend._normalize_message(msg)
+    assert backend._latest_resumption_handle == "handle-1"
+
+    # A fresher update must replace, not append.
+    msg2 = SimpleNamespace(
+        session_resumption_update=SimpleNamespace(
+            new_handle="handle-2",
+            resumable=True,
+            last_consumed_client_message_index=None,
+        )
+    )
+    backend._normalize_message(msg2)
+    assert backend._latest_resumption_handle == "handle-2"
+
+
+def test_normalize_session_resumption_update_ignores_non_resumable() -> None:
+    """When the server marks an update non-resumable (e.g., session is
+    expiring beyond resumption), we must NOT cache that handle — using it
+    on reconnect would be rejected and waste an attempt."""
+    backend = _new_backend()
+    msg = SimpleNamespace(
+        session_resumption_update=SimpleNamespace(
+            new_handle="dead-handle",
+            resumable=False,
+            last_consumed_client_message_index=None,
+        )
+    )
+    backend._normalize_message(msg)
+    assert backend._latest_resumption_handle is None
+
+
+class _FaultableFakeSession(_MultiTurnFakeSession):
+    """A multi-turn fake whose receive() can be made to raise on demand.
+
+    Simulates the Gemini Live 1008 policy-violation disconnect: the reader
+    loop's ``async for`` raises, the backend marks the session dead, and
+    _attempt_reconnect should rebuild the session via the injected client.
+    """
+
+    def __init__(self, turns: list[list[Any]]) -> None:
+        super().__init__(turns)
+        self._raise_on_next_receive = False
+        self._raise_on_next_send = False
+
+    def trip_receive(self) -> None:
+        self._raise_on_next_receive = True
+
+    def trip_send(self) -> None:
+        self._raise_on_next_send = True
+
+    async def receive(self):
+        if self._raise_on_next_receive:
+            self._raise_on_next_receive = False
+            raise RuntimeError(
+                "received 1008 (policy violation) Connection aborted"
+            )
+        async for msg in super().receive():
+            yield msg
+
+    async def send_realtime_input(
+        self,
+        *,
+        audio: Any | None = None,
+        audio_stream_end: bool | None = None,
+    ) -> None:
+        if self._raise_on_next_send:
+            self._raise_on_next_send = False
+            raise RuntimeError("sent 1008 (policy violation)")
+        await super().send_realtime_input(
+            audio=audio, audio_stream_end=audio_stream_end
+        )
+
+
+class _RotatingFakeLive:
+    """Fake live.connect() that hands out a queue of pre-built CMs.
+
+    Each call to ``connect()`` pops the next ``_FakeConnectionCM`` so the
+    test can wire up a fault-injecting first session and a healthy second
+    session for reconnect.
+    """
+
+    def __init__(self, managers: list[_FakeConnectionCM]) -> None:
+        self._managers = list(managers)
+        self.connect_calls: list[dict] = []
+
+    def connect(self, *, model: str, config: Any) -> _FakeConnectionCM:
+        self.connect_calls.append({"model": model, "config": config})
+        if not self._managers:
+            raise RuntimeError("no more fake sessions queued")
+        return self._managers.pop(0)
+
+
+class _RotatingFakeAio:
+    def __init__(self, live: _RotatingFakeLive) -> None:
+        self.live = live
+
+
+class _RotatingFakeClient:
+    def __init__(self, managers: list[_FakeConnectionCM]) -> None:
+        self._live = _RotatingFakeLive(managers)
+        self.aio = _RotatingFakeAio(self._live)
+
+
+@pytest.mark.asyncio
+async def test_reader_loop_disconnect_triggers_reconnect_with_handle() -> None:
+    """Reader-loop exception (1008-style death) must rebuild the session
+    using the latest resumption handle and emit
+    session.reconnecting → session.reconnected events.
+    """
+    first_session = _FaultableFakeSession(
+        turns=[[
+            # Cache a resumption handle before the disconnect.
+            SimpleNamespace(
+                session_resumption_update=SimpleNamespace(
+                    new_handle="resume-token-99",
+                    resumable=True,
+                    last_consumed_client_message_index=None,
+                )
+            ),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    second_session = _MultiTurnFakeSession(turns=[])
+    client = _RotatingFakeClient(
+        [_FakeConnectionCM(first_session), _FakeConnectionCM(second_session)]
+    )
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    received: list[dict] = []
+    gen = backend.events()
+    try:
+        # Drain the first turn's response.done so we know the resumption
+        # handle has been cached.
+        received.append(await asyncio.wait_for(gen.__anext__(), timeout=1.0))
+        await _wait_until(lambda: backend._latest_resumption_handle == "resume-token-99")
+
+        # Trip the live socket — the reader loop's next receive() raises.
+        first_session.trip_receive()
+
+        # Expect: session.reconnecting then session.reconnected.
+        for _ in range(2):
+            received.append(await asyncio.wait_for(gen.__anext__(), timeout=1.0))
+    finally:
+        await backend.close()
+
+    types = [e["type"] for e in received]
+    assert "session.reconnecting" in types
+    assert "session.reconnected" in types
+    assert types.index("session.reconnecting") < types.index("session.reconnected")
+    # NO generic "error" event should leak through during a successful
+    # reconnect — that's exactly what causes the bridge to play the
+    # "Let me try that again in a moment." fallback line repeatedly.
+    assert "error" not in types
+
+    # Two connects total: initial + reconnect. The reconnect carried the
+    # cached handle in its live config.
+    assert len(client._live.connect_calls) == 2
+    second_config = client._live.connect_calls[1]["config"]
+    assert second_config.session_resumption.handle == "resume-token-99"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_falls_back_to_fresh_when_handle_rejected() -> None:
+    """If the saved handle is rejected (e.g. expired), the backend must
+    retry without a handle rather than giving up. New conversation, but
+    the robot at least becomes responsive again."""
+    first_session = _FaultableFakeSession(
+        turns=[[
+            SimpleNamespace(
+                session_resumption_update=SimpleNamespace(
+                    new_handle="expired-handle",
+                    resumable=True,
+                    last_consumed_client_message_index=None,
+                )
+            ),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    second_session = _MultiTurnFakeSession(turns=[])
+
+    # The first reconnect attempt (with the saved handle) will be rejected:
+    # we wrap that CM's __aenter__ to raise once. Subsequent attempts
+    # (handle=None) succeed.
+    rejected_cm = _FakeConnectionCM(_MultiTurnFakeSession(turns=[]))
+    original_aenter = rejected_cm.__aenter__
+
+    async def _fail_once(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("invalid resumption handle")
+
+    rejected_cm.__aenter__ = _fail_once  # type: ignore[assignment]
+
+    client = _RotatingFakeClient([
+        _FakeConnectionCM(first_session),
+        rejected_cm,
+        _FakeConnectionCM(second_session),
+    ])
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    received: list[dict] = []
+    gen = backend.events()
+    try:
+        received.append(await asyncio.wait_for(gen.__anext__(), timeout=1.0))
+        await _wait_until(lambda: backend._latest_resumption_handle == "expired-handle")
+        first_session.trip_receive()
+        for _ in range(2):
+            received.append(await asyncio.wait_for(gen.__anext__(), timeout=2.0))
+    finally:
+        await backend.close()
+
+    # We expect three connect attempts: initial, rejected-with-handle, then
+    # the successful fresh connect.
+    assert len(client._live.connect_calls) == 3
+    handles_used = [
+        call["config"].session_resumption.handle
+        for call in client._live.connect_calls
+    ]
+    assert handles_used == [None, "expired-handle", None]
+
+    # The cached handle should be cleared after rejection so a future
+    # reconnect doesn't keep retrying it.
+    assert backend._latest_resumption_handle is None
+
+    # Recovery still surfaces session.reconnected (not error) so the
+    # bridge restores LISTENING rather than playing the fallback line.
+    types = [e["type"] for e in received]
+    assert "session.reconnected" in types
+    assert "error" not in types
+    # Silence pyflakes about original_aenter; it's kept for test hygiene
+    # in case a future change wants to assert the dispose path.
+    _ = original_aenter
+
+
+@pytest.mark.asyncio
+async def test_send_audio_drops_silently_while_session_dead() -> None:
+    """D: once the session is known dead, send_audio must not push any
+    error events into the queue (the bridge would otherwise turn each one
+    into the fallback line). The realtime handler should hear ONE
+    session.reconnecting event and that's it until reconnect resolves.
+    """
+    first_session = _FaultableFakeSession(
+        turns=[[_build_server_message(turn_complete=True)]]
+    )
+    second_session = _MultiTurnFakeSession(turns=[])
+    client = _RotatingFakeClient(
+        [_FakeConnectionCM(first_session), _FakeConnectionCM(second_session)]
+    )
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        # Drain initial turn so the reader is in steady state.
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+
+        # Trip a send-side disconnect — emulates the on-device case where
+        # the first send_audio after the keepalive death raises 1008.
+        first_session.trip_send()
+        await backend.send_audio(b"\x00" * 320)
+
+        # Mic pump keeps firing during the dead window: 50 more chunks at
+        # ~80ms each. Without the dead-state gate, each one would push a
+        # fresh "error" event.
+        for _ in range(50):
+            await backend.send_audio(b"\x00" * 320)
+
+        # Drain whatever the queue produced. We should see exactly one
+        # session.reconnecting (from the first failure) followed by
+        # session.reconnected — and zero "error" entries.
+        observed: list[dict] = []
+        try:
+            while True:
+                observed.append(
+                    await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+                )
+                if observed[-1].get("type") == "session.reconnected":
+                    break
+        except asyncio.TimeoutError:  # pragma: no cover - reconnect must complete
+            pass
+    finally:
+        await backend.close()
+
+    types = [e["type"] for e in observed]
+    assert types.count("session.reconnecting") == 1, (
+        f"D regression: expected exactly one session.reconnecting, "
+        f"got types={types}"
+    )
+    assert "error" not in types, (
+        f"D regression: dead-session spam leaked into queue, types={types}"
+    )
+    # And the dead chunks must NOT have hit the second (healthy) session.
+    assert second_session.sent_audio == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_gives_up_after_max_attempts_and_emits_single_error() -> None:
+    """When every reconnect attempt fails, the backend surfaces ONE
+    "error" event and stays dead. Without the cap, _attempt_reconnect
+    would spin forever and bury the real failure."""
+    first_session = _FaultableFakeSession(
+        turns=[[_build_server_message(turn_complete=True)]]
+    )
+
+    # Build N always-failing CMs (one per (handle, attempt) combination).
+    # No saved handle in this test, so each attempt = 1 CM.
+    failing_cms: list[_FakeConnectionCM] = []
+    for _ in range(10):
+        cm = _FakeConnectionCM(_MultiTurnFakeSession(turns=[]))
+
+        async def _always_fail(*a: Any, **k: Any) -> Any:
+            raise RuntimeError("simulated permanent outage")
+
+        cm.__aenter__ = _always_fail  # type: ignore[assignment]
+        failing_cms.append(cm)
+
+    client = _RotatingFakeClient([_FakeConnectionCM(first_session), *failing_cms])
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    # Shrink retry budget + backoff so the test runs in well under a second.
+    backend._max_reconnect_attempts = 2
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    received: list[dict] = []
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        first_session.trip_receive()
+        # Expect: reconnecting (immediately) then "error" (after retries).
+        # Patch sleep to skip backoff.
+        original_sleep = asyncio.sleep
+
+        async def _fast_sleep(_seconds: float) -> None:
+            await original_sleep(0)
+
+        import asyncio as _asyncio_mod
+
+        _asyncio_mod.sleep = _fast_sleep  # type: ignore[assignment]
+        try:
+            for _ in range(2):
+                received.append(
+                    await asyncio.wait_for(gen.__anext__(), timeout=2.0)
+                )
+        finally:
+            _asyncio_mod.sleep = original_sleep  # type: ignore[assignment]
+    finally:
+        await backend.close()
+
+    types = [e["type"] for e in received]
+    assert "session.reconnecting" in types
+    assert types.count("error") == 1, (
+        f"expected exactly one error after retry exhaustion, got types={types}"
+    )

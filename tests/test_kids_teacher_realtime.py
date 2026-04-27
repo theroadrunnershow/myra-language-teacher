@@ -552,3 +552,61 @@ async def test_error_mid_stream_publishes_fallback_line_and_keeps_session() -> N
 
     await backend.end_stream()
     await run_task
+
+
+# ---------------------------------------------------------------------------
+# session.reconnecting / session.reconnected (E)
+#
+# When the Gemini backend rebuilds a dropped session, the realtime handler
+# must surface RECONNECTING (so the bridge plays a recovery cue) followed
+# by LISTENING — and crucially MUST NOT push the generic ERROR fallback
+# line, which is what made the on-device 2026-04-27 incident look broken.
+# ---------------------------------------------------------------------------
+
+
+async def test_session_reconnecting_publishes_reconnecting_status_no_fallback():
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Simulate an active assistant response in flight, then a disconnect.
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "scattering "}
+    )
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x01"})
+    await asyncio.sleep(0.01)
+
+    stop_calls_before = hooks.stop_playback_calls
+    await backend.push_event({"type": "session.reconnecting"})
+    await asyncio.sleep(0.01)
+
+    statuses = [s.status for s in hooks.statuses]
+    assert SessionStatus.RECONNECTING in statuses
+    # The in-flight playback must be flushed so we don't keep speaking
+    # chunks that belong to the dead socket.
+    assert hooks.stop_playback_calls == stop_calls_before + 1
+    # Crucially: the generic ERROR fallback line MUST NOT have been
+    # surfaced — otherwise we're back to the on-device behavior the user
+    # reported (robot says "Let me try that again in a moment." while the
+    # bridge spams the same line every 3s).
+    fallback_lines = [
+        t
+        for t in hooks.transcripts
+        if t.speaker == Speaker.ASSISTANT
+        and t.text == "Let me try that again in a moment."
+    ]
+    assert fallback_lines == []
+    assert all(s.status != SessionStatus.ERROR for s in hooks.statuses)
+
+    await backend.push_event({"type": "session.reconnected"})
+    await asyncio.sleep(0.01)
+    statuses_after = [s.status for s in hooks.statuses]
+    # LISTENING must reappear after reconnect so the mic pump knows the
+    # session is healthy again.
+    assert statuses_after.count(SessionStatus.LISTENING) >= 2
+
+    await backend.end_stream()
+    await run_task

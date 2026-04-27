@@ -78,6 +78,7 @@ class KidsTeacherRobotHooks:
         max_queued_chunks: int = _DEFAULT_MAX_QUEUED_CHUNKS,
         play_chunk: Optional[Callable[[Any, bytes, int], None]] = None,
         playback_speed: float = 1.0,
+        recovery_cue: Optional[Callable[[Any], None]] = None,
     ) -> None:
         """Create a hook implementation bound to ``robot_controller``.
 
@@ -101,6 +102,13 @@ class KidsTeacherRobotHooks:
                 resampling rather than a phase vocoder). Ignored if a
                 custom ``play_chunk`` is provided — callers that inject
                 their own chunk player own their own speed policy.
+            recovery_cue: Optional callable invoked on a RECONNECTING
+                status event. Receives the robot controller and is
+                expected to play a brief audio cue (e.g. "one moment")
+                so the child hears something during the 1–2s reconnect
+                gap instead of dead air. Called on a short-lived helper
+                thread so a slow TTS fetch can't block the realtime
+                handler. Tests leave this ``None`` (cue is skipped).
         """
         self._robot = robot_controller
         self._sample_rate = sample_rate
@@ -127,6 +135,7 @@ class KidsTeacherRobotHooks:
         # for the current assistant turn. Reset on stop_assistant_playback.
         self._speaking_active = False
         self._speaking_lock = threading.Lock()
+        self._recovery_cue = recovery_cue
 
     # ------------------------------------------------------------------
     # Thread lifecycle
@@ -248,6 +257,21 @@ class KidsTeacherRobotHooks:
                 event.detail or "goodbye",
             )
             self._safe_call("idle")
+        elif status == SessionStatus.RECONNECTING:
+            self._log.info(
+                "[kids_teacher_robot_bridge] session reconnecting: %s",
+                event.detail or "(no detail)",
+            )
+            # Drop any chunks buffered against the dead socket and return
+            # to the listening pose so the robot doesn't appear frozen
+            # mid-speak while the recovery cue plays.
+            with self._queue_lock:
+                self._queue.clear()
+            with self._speaking_lock:
+                self._speaking_active = False
+            self._safe_call("flush_output_audio")
+            self._safe_call("listen")
+            self._fire_recovery_cue()
         elif status == SessionStatus.ERROR:
             self._log.warning(
                 "[kids_teacher_robot_bridge] session error: %s",
@@ -292,6 +316,32 @@ class KidsTeacherRobotHooks:
             if not self._queue:
                 return None
             return self._queue.popleft()
+
+    def _fire_recovery_cue(self) -> None:
+        """Run the recovery cue off-thread so a slow TTS fetch can't block.
+
+        The realtime handler calls publish_status synchronously from its
+        event loop; if the cue blocks (HTTP fetch, MP3 decode, robot
+        playback prime), the event loop stalls and the next reconnect
+        event arrives late.
+        """
+        cue = self._recovery_cue
+        if cue is None:
+            return
+
+        def _run() -> None:
+            try:
+                cue(self._robot)
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] recovery_cue raised: %s", exc
+                )
+
+        threading.Thread(
+            target=_run,
+            name="kids-teacher-recovery-cue",
+            daemon=True,
+        ).start()
 
     def _safe_call(self, method_name: str) -> None:
         method = getattr(self._robot, method_name, None)

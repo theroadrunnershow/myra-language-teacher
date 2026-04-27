@@ -211,6 +211,10 @@ class KidsTeacherRealtimeHandler:
             self._on_audio_chunk(event)
         elif event_type == "response.done":
             self._on_response_done()
+        elif event_type == "session.reconnecting":
+            self._on_reconnecting(event)
+        elif event_type == "session.reconnected":
+            self._on_reconnected(event)
         elif event_type == "error":
             self._on_error(event)
         else:
@@ -288,6 +292,36 @@ class KidsTeacherRealtimeHandler:
         logger.info("[kids_teacher_realtime] response.done — turn complete")
         self._assistant_active = False
         self._drain_pending_audio()
+        self._publish_status(SessionStatus.LISTENING)
+
+    def _on_reconnecting(self, event: dict) -> None:
+        """Backend is rebuilding a dropped Gemini Live session.
+
+        Drop any in-flight assistant playback (the chunks belong to the
+        dead socket) and surface a RECONNECTING status. The robot bridge
+        uses this to play a short "one moment" cue instead of going silent
+        — to a 4-year-old, 1–2s of dead air after a turn registers as
+        "robot is broken".
+        """
+        detail = event.get("message")
+        logger.info("[kids_teacher_realtime] backend reconnecting (%s)", detail or "")
+        self._assistant_active = False
+        self._drain_pending_audio()
+        try:
+            self._hooks.stop_assistant_playback()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] stop_assistant_playback raised during reconnect: %s",
+                exc,
+            )
+        self._publish_status(
+            SessionStatus.RECONNECTING, detail=str(detail) if detail else None
+        )
+
+    def _on_reconnected(self, event: dict) -> None:
+        """Backend successfully rebuilt the session — return to LISTENING."""
+        detail = event.get("message")
+        logger.info("[kids_teacher_realtime] backend reconnected (%s)", detail or "")
         self._publish_status(SessionStatus.LISTENING)
 
     def _on_error(self, event: dict) -> None:

@@ -675,3 +675,175 @@ def test_build_robot_hooks_falls_back_on_bad_speed_env(monkeypatch, bad_value):
         hooks.stop(timeout=1.0)
 
     assert captured[0] == 1.0
+
+
+# ---------------------------------------------------------------------------
+# RECONNECTING status → recovery cue (E)
+#
+# When the Gemini Live session drops at the 10-min ceiling and the backend
+# rebuilds it, the bridge must (a) drop any chunks queued against the dead
+# socket, (b) restore the listening pose so the robot doesn't appear frozen
+# mid-speak, and (c) fire the injected recovery cue off-thread so the slow
+# TTS fetch can't block the realtime handler.
+# ---------------------------------------------------------------------------
+
+
+def test_publish_status_reconnecting_clears_queue_and_returns_to_listen():
+    hooks, robot, _ = _make_hooks()
+    hooks.start_assistant_playback(b"\x00\x01")  # arms speaking_active
+    hooks.start_assistant_playback(b"\x02\x03")
+
+    hooks.publish_status(_status(SessionStatus.RECONNECTING, detail="dropped"))
+
+    assert robot.flush_calls == 1
+    assert robot.calls[-1] == "listen"
+    # Once the robot is back in LISTENING, a brand-new chunk after reconnect
+    # should re-arm the speak animation (speaking_active flag was cleared).
+    hooks.start_assistant_playback(b"\x10\x11")
+    assert robot.calls.count("speak") == 2
+
+
+def test_publish_status_reconnecting_invokes_recovery_cue_off_thread():
+    """The cue runs in a daemon thread so a slow TTS fetch can't stall the
+    event loop. We assert (a) the cue ran with the robot controller and
+    (b) it ran on a thread that's NOT the caller's thread."""
+    cue_calls: List[Tuple[object, int]] = []
+    cue_started = threading.Event()
+    release = threading.Event()
+    caller_thread_id = threading.get_ident()
+
+    def slow_cue(robot: object) -> None:
+        cue_started.set()
+        release.wait(timeout=2.0)
+        cue_calls.append((robot, threading.get_ident()))
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        play_chunk=RecordingPlayChunk(),
+        recovery_cue=slow_cue,
+    )
+
+    hooks.publish_status(_status(SessionStatus.RECONNECTING))
+
+    # publish_status returned without waiting for the cue — it must be
+    # running on its own thread.
+    assert cue_started.wait(timeout=1.0)
+    assert cue_calls == []  # still blocked on `release`
+    release.set()
+    assert _wait_until(lambda: len(cue_calls) == 1, timeout=1.0)
+    cue_robot, cue_thread = cue_calls[0]
+    assert cue_robot is robot
+    assert cue_thread != caller_thread_id
+
+
+def test_publish_status_reconnecting_without_cue_is_no_op():
+    """recovery_cue defaults to None — bridge must still publish the
+    listening pose without raising."""
+    hooks, robot, _ = _make_hooks()
+    hooks.publish_status(_status(SessionStatus.RECONNECTING))
+    assert robot.calls[-1] == "listen"
+
+
+def test_publish_status_reconnecting_swallows_cue_exceptions():
+    """A broken cue must not crash the bridge thread or propagate out."""
+    def broken_cue(_robot: object) -> None:
+        raise RuntimeError("simulated TTS outage")
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        play_chunk=RecordingPlayChunk(),
+        recovery_cue=broken_cue,
+    )
+
+    # Must return without raising; the exception is logged and swallowed
+    # inside the worker thread.
+    hooks.publish_status(_status(SessionStatus.RECONNECTING))
+    assert robot.calls[-1] == "listen"
+
+
+def test_build_robot_hooks_wires_default_recovery_cue():
+    """build_robot_hooks must inject a default cue so that on a real robot
+    deployment a session drop produces audible recovery feedback rather
+    than silence. The cue's body is exercised in the flow-level test below.
+    """
+    hooks = build_robot_hooks(FakeRobotController())
+    assert hooks._recovery_cue is not None  # type: ignore[attr-defined]
+
+
+def test_default_recovery_cue_calls_dino_voice_and_plays(monkeypatch):
+    """The default cue should fetch a short 'one moment' line via the
+    local TTS (api_get_dino_voice) and play it through the robot speaker.
+    Mocks: monkeypatch the robot_teacher import so no HTTP / SDK is hit.
+    """
+    import kids_teacher_flow as flow
+
+    fake_module = types.ModuleType("robot_teacher")
+    fetched_text: List[str] = []
+    played: List[Tuple[object, bytes]] = []
+
+    def fake_api_get_dino_voice(text: str) -> bytes:
+        fetched_text.append(text)
+        return b"FAKEMP3"
+
+    def fake_play(robot, mp3_bytes):
+        played.append((robot, mp3_bytes))
+
+    fake_module.api_get_dino_voice = fake_api_get_dino_voice  # type: ignore[attr-defined]
+    fake_module._play = fake_play  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+
+    robot = FakeRobotController()
+    flow._default_recovery_cue(robot)
+
+    assert fetched_text == [flow._RECOVERY_CUE_TEXT]
+    assert played == [(robot, b"FAKEMP3")]
+
+
+def test_default_recovery_cue_swallows_tts_failure(monkeypatch):
+    """A network outage on the TTS fetch must not raise out of the cue —
+    the recovery path is best-effort, never fatal to the session."""
+    import kids_teacher_flow as flow
+
+    fake_module = types.ModuleType("robot_teacher")
+
+    def boom(_text: str) -> bytes:
+        raise ConnectionError("simulated TTS outage")
+
+    fake_module.api_get_dino_voice = boom  # type: ignore[attr-defined]
+    fake_module._play = lambda r, b: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+
+    flow._default_recovery_cue(FakeRobotController())  # must not raise
+
+
+def test_default_recovery_cue_swallows_missing_robot_teacher(monkeypatch):
+    """If robot_teacher (and its audio deps) isn't installed on the host —
+    e.g. a stripped CI image — the cue must silently no-op rather than
+    crash the bridge."""
+    import kids_teacher_flow as flow
+
+    monkeypatch.setitem(sys.modules, "robot_teacher", None)
+    # importlib raises if a module is bound to None; emulate that path
+    # by deleting + setting up an import that fails.
+    sys.modules.pop("robot_teacher", None)
+
+    real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+    def fail_import(name, *args, **kwargs):
+        if name == "robot_teacher":
+            raise ImportError("robot_teacher not available on this host")
+        return real_import(name, *args, **kwargs)
+
+    if isinstance(__builtins__, dict):
+        __builtins__["__import__"] = fail_import
+    else:
+        __builtins__.__import__ = fail_import  # type: ignore[assignment]
+    try:
+        flow._default_recovery_cue(FakeRobotController())  # must not raise
+    finally:
+        if isinstance(__builtins__, dict):
+            __builtins__["__import__"] = real_import
+        else:
+            __builtins__.__import__ = real_import  # type: ignore[assignment]

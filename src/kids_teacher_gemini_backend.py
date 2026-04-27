@@ -337,6 +337,7 @@ def build_gemini_live_config(
     types_module: Any,
     *,
     model: str = DEFAULT_GEMINI_MODEL,
+    resumption_handle: Optional[str] = None,
 ) -> Any:
     """Translate the OpenAI-shaped ``session_payload`` into ``LiveConnectConfig``.
 
@@ -354,6 +355,14 @@ def build_gemini_live_config(
       on child transcripts; without them topic classification regresses.
     * ``turn_detection`` with ``type == "server_vad"`` → Gemini's
       default automatic activity detection (no explicit config needed).
+
+    ``resumption_handle`` enables Gemini Live's session-resumption protocol:
+    pass ``None`` on the first connect (server starts emitting
+    ``session_resumption_update`` events with rotating handles); pass the
+    most recent handle when reconnecting after a 1008 / GoAway disconnect to
+    pick up the same conversation context. The 10-minute audio-session
+    duration ceiling will eventually drop every long session, so
+    resumption is the only way to keep continuity across the gap.
     """
     voice_name = map_openai_voice_to_gemini(session_payload.get("voice"))
     modalities_raw = session_payload.get("modalities") or ["audio"]
@@ -376,6 +385,9 @@ def build_gemini_live_config(
         speech_config=speech_config,
         input_audio_transcription=types_module.AudioTranscriptionConfig(),
         output_audio_transcription=types_module.AudioTranscriptionConfig(),
+        session_resumption=types_module.SessionResumptionConfig(
+            handle=resumption_handle
+        ),
         tools=[
             _build_memory_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_remember_face_tool(types_module, non_blocking=tool_supports_non_blocking),
@@ -434,13 +446,38 @@ class GeminiRealtimeBackend:
         # Trace-logging state: distinguishes the first post-connect send
         # failure (likely keepalive timeout) from the subsequent spam.
         self._send_failure_count = 0
+        # Resumption + reconnect bookkeeping. The session payload is cached
+        # on first connect so reconnect can rebuild an equivalent live
+        # config; the latest resumption handle (rotated by the server every
+        # turn) is what lets the next connect pick up the same conversation
+        # after the 10-minute audio-session ceiling drops it.
+        self._session_payload: Optional[dict] = None
+        self._latest_resumption_handle: Optional[str] = None
+        # Dead-state guard: once the session is known dead, send_audio
+        # silently drops and the reader loop stops emitting fresh "error"
+        # events. Cleared when reconnect succeeds. Without this, a single
+        # disconnect bleeds an "error" event into the bridge every ~3s
+        # (one per send_audio failure) until the session is rebuilt.
+        self._session_dead = False
+        self._reconnect_task: Optional[asyncio.Task] = None
+        # Lazily created on the running loop (asyncio.Lock requires one).
+        self._reconnect_lock: Optional[asyncio.Lock] = None
+        # Bound the reconnect retry budget so we don't spin forever if the
+        # service is genuinely down. After this, we surface a single error
+        # and stay dead until close().
+        self._max_reconnect_attempts = 4
 
     @property
     def model(self) -> str:
         return self._model
 
     async def connect(self, session_payload: dict) -> None:
-        """Open the Gemini Live session and start pumping events."""
+        """Open the Gemini Live session and start pumping events.
+
+        The payload is cached so :meth:`_attempt_reconnect` can rebuild an
+        equivalent live config when the session is dropped (e.g., the
+        10-minute audio-session ceiling).
+        """
         client_factory = self._client_factory
         types_module = self._types_module
 
@@ -470,11 +507,27 @@ class GeminiRealtimeBackend:
 
         self._client = client_factory()
         self._types_module = types_module
+        self._session_payload = session_payload
+        self._reconnect_lock = asyncio.Lock()
+
+        await self._open_connection(resumption_handle=None)
+
+    async def _open_connection(self, *, resumption_handle: Optional[str]) -> None:
+        """(Re)open the Gemini Live WebSocket and (re)start the reader loop.
+
+        Builds a fresh live config from the cached session payload — passing
+        ``resumption_handle`` only on a reconnect so the server picks up
+        from the previous turn instead of starting a brand-new conversation.
+        """
+        assert self._client is not None
+        assert self._types_module is not None
+        assert self._session_payload is not None
 
         live_config = build_gemini_live_config(
-            session_payload,
-            types_module,
+            self._session_payload,
+            self._types_module,
             model=self._model,
+            resumption_handle=resumption_handle,
         )
         self._connection_cm = self._client.aio.live.connect(
             model=self._model, config=live_config
@@ -485,6 +538,12 @@ class GeminiRealtimeBackend:
             logger.warning("[kids_teacher_gemini_backend] connect failed: %s", exc)
             raise
 
+        # Reset per-connection state so a healthy reconnect starts clean:
+        # send-failure spam counter, dead-state gate, and the input-speech
+        # synthesis flag (which shouldn't carry across a fresh socket).
+        self._send_failure_count = 0
+        self._session_dead = False
+        self._input_speech_active = False
         self._reader_task = asyncio.create_task(self._reader_loop())
 
     async def _reader_loop(self) -> None:
@@ -524,15 +583,130 @@ class GeminiRealtimeBackend:
             logger.info("[kids_teacher_gemini_backend] reader loop cancelled")
             raise
         except Exception as exc:  # pragma: no cover - integration path
+            # First-disconnect path: log once, mark the session dead so
+            # send_audio stops generating fresh "error" events, and kick
+            # off a reconnect. We do NOT push an "error" event here —
+            # _attempt_reconnect emits "session.reconnecting" instead so
+            # the bridge can play a recovery cue rather than the generic
+            # "Let me try that again in a moment." fallback line.
             logger.warning(
                 "[kids_teacher_gemini_backend] reader loop error (session likely dead): %s",
                 exc,
             )
-            await self._event_queue.put({"type": "error", "message": str(exc)})
+            self._session_dead = True
+            self._schedule_reconnect()
         else:
             logger.info(
                 "[kids_teacher_gemini_backend] reader loop ended cleanly (close() called)"
             )
+
+    def _schedule_reconnect(self) -> None:
+        """Spawn a single reconnect task; idempotent across concurrent callers.
+
+        Called from both the reader-loop exception handler and the first
+        send_audio failure — whichever notices the disconnect first wins,
+        and any later caller within the same outage is a no-op.
+        """
+        if self._closed:
+            return
+        existing = self._reconnect_task
+        if existing is not None and not existing.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._attempt_reconnect())
+
+    async def _attempt_reconnect(self) -> None:
+        """Tear down the dead WebSocket and rebuild the session.
+
+        Tries the cached resumption handle first (preserves conversation
+        context across the 10-min ceiling); falls back to a fresh connect
+        on any handle rejection. Backs off between attempts and gives up
+        after :attr:`_max_reconnect_attempts` — at which point the session
+        stays dead and a single ``error`` event is surfaced so the
+        realtime handler can show its fallback line rather than the
+        recovery cue spinning forever.
+        """
+        if self._closed or self._reconnect_lock is None:
+            return
+        async with self._reconnect_lock:
+            if self._closed:
+                return
+            await self._event_queue.put({"type": "session.reconnecting"})
+            await self._dispose_connection()
+
+            # Two-tier strategy per attempt: try the saved resumption handle
+            # first (preserves context), then fall back to a fresh connect
+            # (loses context but recovers responsiveness). Either success
+            # path emits "session.reconnected" and clears _session_dead.
+            handle_candidates: tuple[Optional[str], ...] = (
+                self._latest_resumption_handle,
+                None,
+            ) if self._latest_resumption_handle else (None,)
+
+            for attempt in range(1, self._max_reconnect_attempts + 1):
+                if self._closed:
+                    return
+                for handle in handle_candidates:
+                    try:
+                        await self._open_connection(resumption_handle=handle)
+                    except Exception as exc:
+                        logger.warning(
+                            "[kids_teacher_gemini_backend] reconnect attempt %d "
+                            "(handle=%s) failed: %s",
+                            attempt,
+                            "saved" if handle else "fresh",
+                            exc,
+                        )
+                        # If the saved handle was rejected, drop it so the
+                        # next iteration doesn't keep re-trying a handle
+                        # the server has already refused.
+                        if handle is not None:
+                            self._latest_resumption_handle = None
+                            handle_candidates = (None,)
+                        continue
+                    logger.info(
+                        "[kids_teacher_gemini_backend] reconnect succeeded "
+                        "(attempt=%d, handle=%s)",
+                        attempt,
+                        "saved" if handle else "fresh",
+                    )
+                    await self._event_queue.put({"type": "session.reconnected"})
+                    return
+
+                # Both handle variants failed this round — back off briefly
+                # before the next attempt so we don't hammer Gemini Live.
+                await asyncio.sleep(min(2.0 * attempt, 8.0))
+
+            logger.warning(
+                "[kids_teacher_gemini_backend] reconnect exhausted after %d attempts; "
+                "session stays dead",
+                self._max_reconnect_attempts,
+            )
+            await self._event_queue.put(
+                {"type": "error", "message": "reconnect failed"}
+            )
+
+    async def _dispose_connection(self) -> None:
+        """Best-effort teardown of the current dead connection + reader task.
+
+        Used by :meth:`_attempt_reconnect` before reopening; never raises.
+        """
+        if self._reader_task is not None and not self._reader_task.done():
+            self._reader_task.cancel()
+            try:
+                await self._reader_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        self._reader_task = None
+        if self._connection_cm is not None:
+            try:
+                await self._connection_cm.__aexit__(None, None, None)
+            except Exception as exc:
+                logger.debug(
+                    "[kids_teacher_gemini_backend] dispose_connection ignored: %s",
+                    exc,
+                )
+        self._connection_cm = None
+        self._session = None
 
     async def _handle_tool_call_message(self, raw_message: Any) -> None:
         tool_call = _attr(raw_message, "tool_call")
@@ -873,6 +1047,7 @@ class GeminiRealtimeBackend:
             srupdate = _attr(raw_message, "session_resumption_update")
             if srupdate is not None:
                 new_handle = _attr(srupdate, "new_handle")
+                resumable = _attr(srupdate, "resumable")
                 if isinstance(new_handle, str) and len(new_handle) > 40:
                     handle_preview: Any = f"{new_handle[:40]}...(len={len(new_handle)})"
                 else:
@@ -881,9 +1056,16 @@ class GeminiRealtimeBackend:
                     "[kids_teacher_gemini_backend] session_resumption_update: "
                     "new_handle=%r resumable=%s last_consumed_client_message_index=%s",
                     handle_preview,
-                    _attr(srupdate, "resumable"),
+                    resumable,
                     _attr(srupdate, "last_consumed_client_message_index"),
                 )
+                # Cache the most recent resumable handle so a future
+                # reconnect (after the 10-min ceiling drops the socket)
+                # picks up the same conversation context. The server
+                # rotates handles every turn — the latest is the only
+                # one that matters.
+                if resumable and isinstance(new_handle, str) and new_handle:
+                    self._latest_resumption_handle = new_handle
                 return events
             goaway = _attr(raw_message, "go_away")
             if goaway is not None:
@@ -1020,6 +1202,12 @@ class GeminiRealtimeBackend:
     async def send_audio(self, chunk: bytes) -> None:
         if self._session is None or not chunk:
             return
+        # Once the session is known dead, drop further mic chunks silently
+        # until reconnect resolves. Without this gate, every mic-pump tick
+        # (~12/sec at 80ms chunks) crashes against the dead socket and
+        # spams the bridge with "session error" events.
+        if self._session_dead:
+            return
         assert self._types_module is not None
         try:
             await self._session.send_realtime_input(
@@ -1033,13 +1221,15 @@ class GeminiRealtimeBackend:
                     "(first send failure — likely keepalive timeout or server disconnect): %s",
                     exc,
                 )
-            else:
-                logger.warning(
-                    "[kids_teacher_gemini_backend] send_audio failed (#%d, session still dead): %s",
-                    self._send_failure_count,
-                    exc,
-                )
-            await self._event_queue.put({"type": "error", "message": str(exc)})
+                # Mark dead and trigger a single reconnect; subsequent
+                # racy in-flight sends will be no-ops thanks to the
+                # _session_dead gate above. We deliberately do NOT push
+                # an "error" event here — the realtime handler would
+                # turn it into the generic fallback line. The reconnect
+                # path emits "session.reconnecting" / "session.reconnected"
+                # instead so the bridge can play a recovery cue.
+                self._session_dead = True
+                self._schedule_reconnect()
 
     async def send_video(self, jpeg_bytes: bytes) -> None:
         """Forward one JPEG frame to Gemini Live's video channel.
@@ -1117,6 +1307,15 @@ class GeminiRealtimeBackend:
         if self._closed:
             return
         self._closed = True
+        # Cancel the reconnect coroutine first so it can't race with the
+        # connection teardown below and reopen a socket we're trying to
+        # close.
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            self._reconnect_task.cancel()
+            try:
+                await self._reconnect_task
+            except (asyncio.CancelledError, Exception):
+                pass
         if self._reader_task is not None:
             self._reader_task.cancel()
             try:
