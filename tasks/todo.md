@@ -894,6 +894,23 @@ Source: [tasks/kids-teacher-requirements.md](kids-teacher-requirements.md)
 - `Medium` Wire confidence-based multilingual reply selection into the live runtime, including fallback to the configured default language and support for preference ordering
 - `Medium` Add code-level personal-data screening/redaction for persisted kids-teacher review data instead of relying only on profile instructions
 
+### Kids Teacher Tool Execution Layer
+
+Source: [tasks/plan-kids-tutor-skill.md § "Why pure system-prompt is the only viable v1"](plan-kids-tutor-skill.md#why-pure-system-prompt-is-the-only-viable-v1)
+
+`kids_teacher_backend.py:136-141` currently sends placeholder tool specs as
+`{"type": "function", "name": name}` with no parameter schemas and no executor.
+The code comment explicitly defers real tool-spec lookup to the future
+integration phase. That made a pure system-prompt language lesson the only
+viable v1, because a `get_lesson_word(language, category)` tool would require
+building the full tool-use layer first.
+
+- `High` Replace placeholder tool specs with provider-ready function declarations, including names, descriptions, and JSON parameter schemas for each enabled kids-teacher tool.
+- `High` Add a real tool-call executor in the kids-teacher realtime path that validates arguments, dispatches to registered Python handlers, returns structured tool results to OpenAI Realtime / Gemini Live, and logs failures without crashing the session.
+- `High` Design a small provider-neutral tool registry so OpenAI and Gemini share the same canonical tool definitions instead of duplicating schemas in backend-specific code.
+- `Medium` Add tests for tool schema generation, argument validation, successful dispatch, handler exceptions, and provider-specific response/result serialization.
+- `Medium` Once the layer exists, revisit language-lesson tools such as `get_lesson_word(language, category)` and pronunciation helpers instead of relying entirely on prompt-side word selection and counting.
+
 ### Face Recognition for Reachy Mini
 
 Design doc: [tasks/face-recognition-design.md](face-recognition-design.md)
