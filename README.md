@@ -272,6 +272,7 @@ Child speech ─▶ mic pump ─▶ RealtimeBackend (OpenAI | Gemini) ─▶ Han
 - `src/kids_review_store.py` — local-first transcript + raw-audio retention, optional GCS sync
 - `src/kids_teacher_flow.py` — orchestrator; wires safety + review + hooks around the handler
 - `src/kids_teacher_robot_bridge.py` — robot audio bridge (playback thread + mic pump)
+- `src/motion/` — three-layer motion director (audio wobble + LLM-chosen gestures + face-tracking offsets). Toggle with `KIDS_TEACHER_MOTION_LAYERS=full|none|<csv>` (or `--motion-layers`); see `REACHY_PI_SETUP.md` for layer details.
 - `profiles/kids_teacher/{instructions,tools,voice}.txt` — the locked persona content
 
 ### Prerequisites
