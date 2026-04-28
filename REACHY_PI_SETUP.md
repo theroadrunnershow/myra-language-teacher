@@ -158,6 +158,27 @@ Variables you should know:
 - `GCP_PROJECT`
   Needed only if you want `/api/translate` to fall back to Google Translate for unknown words.
 
+### Motion director (kids-teacher mode only)
+
+The robot's body language is driven by a three-layer additive motion stack
+(audio-reactive wobble, LLM-chosen gestures, face-tracking offsets). Layer
+selection is operator-controlled:
+
+- `KIDS_TEACHER_MOTION_LAYERS=full|none|<csv>`
+  Default: `full` (all layers on). Use `none` to fall back to the legacy
+  `speak`/`listen`/`idle` state machine — useful while debugging hardware.
+  CSV subset names: `wobble` (L1), `gestures` (L2), `tracking` (L3).
+  Example: `KIDS_TEACHER_MOTION_LAYERS=wobble,tracking` runs everything
+  except LLM-driven gesture tools. The CLI flag `--motion-layers` overrides
+  this var when both are set.
+- `KIDS_TEACHER_GAZE_FOLLOW_ENABLED=true|false`
+  Hard-kill switch for L3 (face tracking). Falsey here disables L3 even if
+  `KIDS_TEACHER_MOTION_LAYERS` would otherwise enable it. Default: `true`.
+- `KIDS_TEACHER_GAZE_HZ` (default `3.0`) and `KIDS_TEACHER_GAZE_DEAD_ZONE`
+  (default `0.05`) tune the face tracker itself.
+- `KIDS_TEACHER_CHILD_NAME` makes L3 prefer the enrolled child's face over
+  the closest visible person. Unset = closest face wins.
+
 Credentials:
 
 - For Google Translate fallback and GCS sync from the Pi, the process must have Google application default credentials or a service account configured.
