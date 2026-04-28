@@ -495,3 +495,60 @@ def test_run_lesson_session_keeps_looping_while_play_again_is_yes(monkeypatch):
     )
 
     assert len(lesson_calls) == 1 + REPLAY_WORD_BATCH + REPLAY_WORD_BATCH
+
+
+# ---------------------------------------------------------------------------
+# apply_pose — streaming sink for the motion-director composer
+# ---------------------------------------------------------------------------
+
+
+def test_apply_pose_translates_offsets_to_goto_target_call():
+    mini = _FakeMini()
+    controller = RobotController(mini)
+    ok = controller.apply_pose(
+        head_pitch=0.1,
+        head_yaw=-0.05,
+        head_roll=0.02,
+        head_x=0.001,
+        head_y=-0.002,
+        head_z=0.003,
+        antenna_left=0.4,
+        antenna_right=-0.4,
+        duration=0.033,
+    )
+    assert ok is True
+    assert len(mini.goto_calls) == 1
+    call = mini.goto_calls[0]
+    assert call["duration"] == 0.033
+    assert call["method"] == "minjerk"
+    # Antennae shape: [left, right]
+    assert list(call["antennas"]) == [0.4, -0.4]
+
+
+def test_apply_pose_drops_frame_when_lock_contended():
+    mini = _FakeMini()
+    controller = RobotController(mini)
+    # Hold the motion lock so the apply_pose acquire times out.
+    controller._motion_lock.acquire()
+    try:
+        ok = controller.apply_pose(duration=0.01)
+    finally:
+        controller._motion_lock.release()
+    assert ok is False
+    assert mini.goto_calls == []
+
+
+def test_apply_pose_swallows_sdk_errors():
+    mini = _FakeMini()
+
+    def _raise(**_kwargs):
+        raise RuntimeError("motor offline")
+
+    mini.goto_behavior = _raise
+    controller = RobotController(mini)
+    ok = controller.apply_pose(head_pitch=0.1, duration=0.033)
+    assert ok is False
+    # Subsequent frames should still attempt the call.
+    mini.goto_behavior = None
+    ok2 = controller.apply_pose(head_pitch=0.1, duration=0.033)
+    assert ok2 is True

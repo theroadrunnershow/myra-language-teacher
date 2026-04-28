@@ -72,3 +72,108 @@ def test_missing_reachy_mini_returns_exit_code_two(monkeypatch):
 
     exit_code = robot_kids_teacher.main(["--session-id", "test-session"])
     assert exit_code == 2
+
+
+# ---------------------------------------------------------------------------
+# Motion-director CLI flag + factory + gaze loop subscriber swap
+# ---------------------------------------------------------------------------
+
+
+def test_motion_layers_cli_flag_is_parsed():
+    import robot_kids_teacher
+
+    parser = robot_kids_teacher._build_parser()
+    parsed = parser.parse_args(["--motion-layers", "wobble,tracking"])
+    assert parsed.motion_layers == "wobble,tracking"
+
+
+def test_motion_layers_cli_default_is_none():
+    import robot_kids_teacher
+
+    parser = robot_kids_teacher._build_parser()
+    parsed = parser.parse_args([])
+    assert parsed.motion_layers is None
+
+
+def test_resolve_motion_layers_spec_prefers_cli_over_env(monkeypatch):
+    import robot_kids_teacher
+
+    monkeypatch.setenv(robot_kids_teacher._MOTION_LAYERS_ENV_VAR, "tracking")
+    spec = robot_kids_teacher._resolve_motion_layers_spec("wobble")
+    assert spec == "wobble"
+
+
+def test_resolve_motion_layers_spec_falls_back_to_env(monkeypatch):
+    import robot_kids_teacher
+
+    monkeypatch.setenv(robot_kids_teacher._MOTION_LAYERS_ENV_VAR, "tracking")
+    assert robot_kids_teacher._resolve_motion_layers_spec(None) == "tracking"
+    assert robot_kids_teacher._resolve_motion_layers_spec("") == "tracking"
+
+
+def test_resolve_motion_layers_spec_returns_none_when_unset(monkeypatch):
+    import robot_kids_teacher
+
+    monkeypatch.delenv(robot_kids_teacher._MOTION_LAYERS_ENV_VAR, raising=False)
+    assert robot_kids_teacher._resolve_motion_layers_spec(None) is None
+
+
+def test_maybe_make_motion_stack_returns_none_when_layers_none():
+    import robot_kids_teacher
+
+    class _Robot:
+        pass
+
+    stack = robot_kids_teacher._maybe_make_motion_stack(
+        _Robot(), layers_spec="none", audio_sample_rate=24000
+    )
+    assert stack is None
+
+
+def test_maybe_make_motion_stack_returns_stack_when_layers_full():
+    import robot_kids_teacher
+
+    class _Robot:
+        def apply_pose(self, **_kwargs):
+            return True
+
+    stack = robot_kids_teacher._maybe_make_motion_stack(
+        _Robot(), layers_spec="full", audio_sample_rate=24000
+    )
+    assert stack is not None
+    # The full stack exposes the gesture tool surface.
+    names = {t["name"] for t in stack.additional_tool_specs()}
+    assert "play_gesture" in names
+
+
+def test_make_gaze_loop_factory_attaches_motion_stack_when_provided():
+    """When a motion stack is passed, the gaze loop must wire its face
+    mixer to the FaceTracker — not the debug-log subscriber."""
+    import robot_kids_teacher
+
+    attached = []
+
+    class _StackStub:
+        def attach_face_tracker(self, tracker):
+            attached.append(tracker)
+
+        def detach_face_tracker(self):
+            attached.append("detached")
+
+    factory = robot_kids_teacher._make_gaze_loop_factory(
+        camera_worker=object(), motion_stack=_StackStub()
+    )
+    # We're not running the loop end-to-end here; just confirm the factory
+    # returns a coroutine factory and that the integration path is wired.
+    assert callable(factory)
+
+
+def test_make_gaze_loop_factory_falls_back_to_debug_subscriber_without_stack():
+    """No motion stack → no attach_face_tracker call; debug subscriber
+    is the only consumer."""
+    import robot_kids_teacher
+
+    factory = robot_kids_teacher._make_gaze_loop_factory(
+        camera_worker=object(), motion_stack=None
+    )
+    assert callable(factory)

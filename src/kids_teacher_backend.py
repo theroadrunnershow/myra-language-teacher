@@ -123,6 +123,8 @@ def build_session_payload(
     config: KidsTeacherSessionConfig,
     *,
     modalities: tuple[str, ...] = ("audio", "text"),
+    additional_tools: Optional[list[dict]] = None,
+    additional_instructions: Optional[str] = None,
 ) -> dict:
     """Build the JSON-serializable ``session.update`` payload.
 
@@ -131,9 +133,14 @@ def build_session_payload(
     internal tools (for example Gemini's persistent-memory helper)
     during provider-specific config translation. V1 uses server-side VAD
     and OpenAI's ``gpt-4o-mini-transcribe`` for input transcripts.
+
+    ``additional_tools`` lets callers inject fully-specified tool dicts
+    (e.g. the motion-director gesture tools) alongside the profile
+    allowlist. They are appended in order; profile-allowlisted names take
+    precedence if a name collides.
     """
     profile = config.profile
-    tools = [
+    tools: list[dict] = [
         # Tool-spec lookup is deliberately NOT part of V1 — this is a
         # minimal stub so the backend can wire up allowlisted names.
         # Intern 2 / integration phase will replace this with real tool
@@ -141,8 +148,17 @@ def build_session_payload(
         {"type": "function", "name": name}
         for name in profile.allowed_tools
     ]
+    if additional_tools:
+        existing_names = {t.get("name") for t in tools}
+        for spec in additional_tools:
+            if spec.get("name") in existing_names:
+                continue
+            tools.append(spec)
+    instructions = profile.instructions
+    if additional_instructions:
+        instructions = f"{instructions}\n\n{additional_instructions.strip()}"
     return {
-        "instructions": profile.instructions,
+        "instructions": instructions,
         "voice": profile.voice,
         "language_code": profile.language_code,
         "modalities": list(modalities),
@@ -170,6 +186,15 @@ class RealtimeBackend(Protocol):
 
     async def cancel_response(self) -> None: ...
 
+    async def send_tool_response(self, call_id: str, output: str) -> None:
+        """Acknowledge a function tool call back to the model.
+
+        ``output`` is a free-form string (typically JSON) the model can read
+        as the function result. Backends that don't support tool calls may
+        leave this as a no-op.
+        """
+        ...
+
     async def close(self) -> None: ...
 
     def events(self) -> AsyncIterator[dict]:
@@ -184,6 +209,7 @@ class RealtimeBackend(Protocol):
           * ``assistant_transcript.delta`` ``{"text": str}``
           * ``assistant_transcript.final`` ``{"text": str, "language": Optional[str]}``
           * ``audio.chunk``              ``{"audio": bytes}`` (raw PCM16)
+          * ``tool.call``                ``{"call_id": str, "name": str, "arguments": str}`` (JSON string)
           * ``response.done``            ``{}``
           * ``error``                    ``{"message": str}``
         """
@@ -347,6 +373,16 @@ class OpenAIRealtimeBackend:
                 "type": "audio.chunk",
                 "audio": _decode_audio_delta(_field("delta", "")),
             }
+        if raw_type == "response.function_call_arguments.done":
+            # Function tool calls land as one event per call. ``arguments``
+            # is a JSON string the SDK leaves un-parsed; pass it through so
+            # the bridge can decode at dispatch time.
+            return {
+                "type": "tool.call",
+                "call_id": _field("call_id", "") or "",
+                "name": _field("name", "") or "",
+                "arguments": _field("arguments", "") or "",
+            }
         if raw_type == "response.done":
             return {"type": "response.done"}
         if raw_type == "error":
@@ -402,6 +438,29 @@ class OpenAIRealtimeBackend:
             await self._connection.response.cancel()  # type: ignore[attr-defined]
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_backend] cancel_response failed: %s", exc)
+
+    async def send_tool_response(self, call_id: str, output: str) -> None:
+        """Send a ``function_call_output`` so the model can continue.
+
+        OpenAI Realtime expects each function call to be acknowledged with
+        a conversation item of type ``function_call_output`` carrying the
+        same ``call_id`` and a string ``output``. Without this the model
+        can stall waiting for the result.
+        """
+        if self._connection is None or not call_id:
+            return
+        try:
+            await self._connection.conversation.item.create(  # type: ignore[attr-defined]
+                item={
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - integration path
+            logger.warning(
+                "[kids_teacher_backend] send_tool_response failed: %s", exc
+            )
 
     async def close(self) -> None:
         if self._closed:

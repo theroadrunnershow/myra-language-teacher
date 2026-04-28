@@ -847,3 +847,205 @@ def test_default_recovery_cue_swallows_missing_robot_teacher(monkeypatch):
             __builtins__["__import__"] = real_import
         else:
             __builtins__.__import__ = real_import  # type: ignore[assignment]
+
+
+# ---------------------------------------------------------------------------
+# Motion-stack integration (motion-director wiring)
+# ---------------------------------------------------------------------------
+
+
+class _RecordingMotionStack:
+    """Minimal MotionStack stand-in that records every bridge-facing call."""
+
+    def __init__(
+        self,
+        *,
+        tool_payload: Optional[str] = '{"ok": true}',
+        tool_raises: bool = False,
+    ) -> None:
+        self.calls: List[str] = []
+        self.audio_chunks: List[bytes] = []
+        self.tool_calls: List[Tuple[str, str, str]] = []
+        self.tool_payload = tool_payload
+        self.tool_raises = tool_raises
+        self.start_calls = 0
+        self.stop_calls = 0
+
+    def start(self) -> None:
+        self.start_calls += 1
+
+    def stop(self, timeout: float = 1.0) -> None:
+        self.stop_calls += 1
+
+    def feed_assistant_audio(self, chunk: bytes) -> None:
+        self.audio_chunks.append(chunk)
+
+    def enter_assistant_speech(self) -> None:
+        self.calls.append("enter_assistant_speech")
+
+    def exit_assistant_speech(self) -> None:
+        self.calls.append("exit_assistant_speech")
+
+    def enter_child_speech(self) -> None:
+        self.calls.append("enter_child_speech")
+
+    def exit_child_speech(self) -> None:
+        self.calls.append("exit_child_speech")
+
+    def set_idle(self) -> None:
+        self.calls.append("set_idle")
+
+    def handle_tool_call(self, call_id: str, name: str, arguments: str) -> Optional[str]:
+        self.tool_calls.append((call_id, name, arguments))
+        if self.tool_raises:
+            raise RuntimeError("stack boom")
+        return self.tool_payload
+
+
+def _make_hooks_with_stack(stack):
+    robot = FakeRobotController()
+    recorder = RecordingPlayChunk()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        sample_rate=24000,
+        play_chunk=recorder,
+        motion_stack=stack,
+    )
+    return hooks, robot, recorder
+
+
+def test_motion_stack_replaces_legacy_speak_listen_idle_calls():
+    """When a stack is wired the bridge must NOT call robot.speak/listen/idle —
+    the composer is the sole motor driver."""
+    stack = _RecordingMotionStack()
+    hooks, robot, _ = _make_hooks_with_stack(stack)
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.stop_assistant_playback()
+    hooks.publish_status(_status(SessionStatus.IDLE))
+
+    # The legacy animation methods must not appear in the call log.
+    legacy = {"speak", "listen", "idle"}
+    assert legacy.isdisjoint(set(robot.calls))
+
+
+def test_motion_stack_enter_assistant_on_first_chunk_only():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.start_assistant_playback(b"\x02\x03")
+    hooks.start_assistant_playback(b"\x04\x05")
+
+    # Three chunks fed; only one enter_assistant_speech.
+    assert stack.audio_chunks == [b"\x00\x01", b"\x02\x03", b"\x04\x05"]
+    assert stack.calls.count("enter_assistant_speech") == 1
+
+
+def test_motion_stack_exit_assistant_on_stop():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.stop_assistant_playback()
+
+    assert stack.calls[-1] == "exit_assistant_speech"
+
+
+def test_motion_stack_status_listening_routes_to_exit_assistant():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.publish_status(_status(SessionStatus.LISTENING))
+    assert stack.calls == ["exit_assistant_speech"]
+
+
+def test_motion_stack_status_speaking_routes_to_enter_assistant():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.publish_status(_status(SessionStatus.SPEAKING))
+    assert stack.calls == ["enter_assistant_speech"]
+
+
+def test_motion_stack_status_idle_and_ended_route_to_set_idle():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.publish_status(_status(SessionStatus.IDLE))
+    hooks.publish_status(_status(SessionStatus.ENDED))
+    hooks.publish_status(_status(SessionStatus.ERROR))
+
+    assert stack.calls == ["set_idle", "set_idle", "set_idle"]
+
+
+def test_motion_stack_reconnecting_clears_speaking_and_exits_assistant():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.start_assistant_playback(b"\x00\x01")
+    stack.calls.clear()  # ignore the enter call
+
+    hooks.publish_status(_status(SessionStatus.RECONNECTING, detail="testing"))
+
+    assert "exit_assistant_speech" in stack.calls
+
+
+def test_on_speech_started_routes_to_enter_child_speech():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.on_speech_started()
+
+    assert stack.calls == ["enter_child_speech"]
+
+
+def test_on_speech_stopped_routes_to_exit_child_speech():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    hooks.on_speech_stopped()
+
+    assert stack.calls == ["exit_child_speech"]
+
+
+def test_handle_tool_call_routes_to_stack_and_returns_payload():
+    stack = _RecordingMotionStack(tool_payload='{"ok": true, "detail": "ok"}')
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    payload = hooks.handle_tool_call("c1", "play_gesture", '{"name": "nod"}')
+
+    assert stack.tool_calls == [("c1", "play_gesture", '{"name": "nod"}')]
+    assert payload == '{"ok": true, "detail": "ok"}'
+
+
+def test_handle_tool_call_returns_none_when_no_motion_stack():
+    hooks, _, _ = _make_hooks()
+    assert hooks.handle_tool_call("c1", "play_gesture", "{}") is None
+
+
+def test_handle_tool_call_swallows_stack_exception_and_returns_none():
+    stack = _RecordingMotionStack(tool_raises=True)
+    hooks, _, _ = _make_hooks_with_stack(stack)
+    payload = hooks.handle_tool_call("c1", "play_gesture", "{}")
+    assert payload is None
+
+
+def test_motion_stack_lifecycle_called_on_start_and_stop():
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+    hooks.start()
+    try:
+        assert stack.start_calls == 1
+    finally:
+        hooks.stop()
+    assert stack.stop_calls >= 1
+
+
+def test_motion_stack_absent_preserves_legacy_speak_listen_calls():
+    """Smoke: no regression for the kill-switch path."""
+    hooks, robot, _ = _make_hooks()  # no motion_stack
+    hooks.start_assistant_playback(b"\x00\x01")
+    hooks.stop_assistant_playback()
+    assert "speak" in robot.calls
+    assert "listen" in robot.calls
