@@ -3,12 +3,13 @@ Tests 2 & 3: Verify audio bridge functions work against the local server.
 Run with: python test_bridge.py
 Server must already be running on port 8765.
 
-These are live-server smoke tests — they hit a real uvicorn instance for
-TTS + STT round-trips, so pytest auto-skips them when the server is down.
-Start the server (``PYTHONPATH=src python src/main.py``, port 8765) to
-exercise them.
+These are live integration tests. If the server is not running on
+:8765, each test fails fast with a clear message identifying the root
+cause — no buried urllib3/requests stack trace. Start the server with
+``PYTHONPATH=src python src/main.py`` to exercise them.
 """
 
+import errno
 import io
 import socket
 import sys
@@ -20,25 +21,35 @@ import scipy.io.wavfile as wavfile
 from pydub import AudioSegment
 
 SERVER_URL = "http://localhost:8765"
+SERVER_HOST = "localhost"
+SERVER_PORT = 8765
 SAMPLE_RATE = 16000
 
 
-def _server_reachable(host: str = "localhost", port: int = 8765) -> bool:
+def _require_live_server() -> None:
+    """Fail fast with a clear message if the server is not listening on :8765.
+
+    Without this preflight, the tests fail with a deep
+    ``requests.exceptions.ConnectionError`` stack from urllib3 that
+    obscures the actual cause (server not running). This surfaces the
+    real reason at the top of the failure output.
+    """
     try:
-        with socket.create_connection((host, port), timeout=0.25):
-            return True
-    except OSError:
-        return False
-
-
-pytestmark = pytest.mark.skipif(
-    not _server_reachable(),
-    reason="Live server not running on localhost:8765 (start uvicorn to run bridge tests).",
-)
+        with socket.create_connection((SERVER_HOST, SERVER_PORT), timeout=0.25):
+            return
+    except OSError as exc:
+        reason = errno.errorcode.get(exc.errno, str(exc.errno)) if exc.errno else type(exc).__name__
+        pytest.fail(
+            f"Live server not reachable on {SERVER_HOST}:{SERVER_PORT} "
+            f"({reason}: {exc}). These are integration tests — start the "
+            f"server with `PYTHONPATH=src python src/main.py` before running them.",
+            pytrace=False,
+        )
 
 
 def test_audio_bridge():
     """Test 2: mic numpy array → WAV → POST /api/recognize"""
+    _require_live_server()
     print("\n── Test 2: Audio bridge (mic → WAV → API) ──")
 
     # Simulate 5s of mic output: shape (N, 2) float32 stereo
@@ -80,6 +91,7 @@ def test_audio_bridge():
 
 def test_tts_bridge():
     """Test 3: GET /api/tts MP3 → numpy samples for robot speaker"""
+    _require_live_server()
     print("── Test 3: TTS bridge (API → MP3 → numpy) ──")
 
     r = requests.get(
