@@ -610,3 +610,282 @@ async def test_session_reconnecting_publishes_reconnecting_status_no_fallback():
 
     await backend.end_stream()
     await run_task
+
+
+# ---------------------------------------------------------------------------
+# Behavior 12: tool.call dispatch (motion-director plumbing)
+# ---------------------------------------------------------------------------
+
+
+class _ToolHooks(FakeHooks):
+    """FakeHooks + a recording handle_tool_call."""
+
+    def __init__(self, *, return_value: Optional[str] = '{"ok": true}',
+                 raise_exc: Optional[Exception] = None) -> None:
+        super().__init__()
+        self.tool_calls: List[tuple] = []
+        self._return_value = return_value
+        self._raise_exc = raise_exc
+
+    def handle_tool_call(
+        self, call_id: str, name: str, arguments: str
+    ) -> Optional[str]:
+        self.tool_calls.append((call_id, name, arguments))
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return self._return_value
+
+
+async def test_tool_call_event_dispatched_to_hook_and_acked() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _ToolHooks(return_value='{"ok": true, "detail": "playing"}')
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_xyz",
+            "name": "play_gesture",
+            "arguments": '{"name": "nod_encourage"}',
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.tool_calls == [
+        ("call_xyz", "play_gesture", '{"name": "nod_encourage"}')
+    ]
+    assert backend.tool_responses == [
+        ("call_xyz", '{"ok": true, "detail": "playing"}')
+    ]
+
+
+async def test_tool_call_without_handle_tool_call_hook_is_ignored() -> None:
+    """Hooks that don't expose handle_tool_call must not crash the handler."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()  # no handle_tool_call
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_xyz",
+            "name": "play_gesture",
+            "arguments": "{}",
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert backend.tool_responses == []
+
+
+async def test_tool_call_hook_returning_none_skips_ack() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _ToolHooks(return_value=None)
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_xyz",
+            "name": "play_gesture",
+            "arguments": "{}",
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.tool_calls == [("call_xyz", "play_gesture", "{}")]
+    assert backend.tool_responses == []
+
+
+async def test_tool_call_hook_exception_is_swallowed() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _ToolHooks(raise_exc=RuntimeError("hook boom"))
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_xyz",
+            "name": "play_gesture",
+            "arguments": "{}",
+        }
+    )
+    await asyncio.sleep(0.01)
+
+    # Subsequent events should still be processed — the handler didn't die.
+    await backend.push_event(
+        {"type": "input.speech_started"}
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    # No ack was sent (hook raised before returning a payload).
+    assert backend.tool_responses == []
+
+
+async def test_tool_call_event_with_blank_call_id_skips_ack() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _ToolHooks(return_value='{"ok": true}')
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "",
+            "name": "play_gesture",
+            "arguments": "{}",
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    # Hook still fires (so the side-effect happens) but no ack is shipped.
+    assert hooks.tool_calls == [("", "play_gesture", "{}")]
+    assert backend.tool_responses == []
+
+
+async def test_tool_call_event_with_non_string_arguments_normalizes_to_empty() -> None:
+    """Defensive: if the backend ever ships non-string args, hand them along
+    as an empty string rather than letting a TypeError reach the model."""
+    backend = FakeRealtimeBackend()
+    hooks = _ToolHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_xyz",
+            "name": "play_gesture",
+            "arguments": {"name": "nod_encourage"},  # dict instead of str
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.tool_calls == [("call_xyz", "play_gesture", "")]
+
+
+# ---------------------------------------------------------------------------
+# Behavior 13: VAD edges forwarded to optional hooks (motion-director)
+# ---------------------------------------------------------------------------
+
+
+class _VadHooks(FakeHooks):
+    def __init__(self, *, raise_on_started: bool = False) -> None:
+        super().__init__()
+        self.speech_started_calls = 0
+        self.speech_stopped_calls = 0
+        self._raise_on_started = raise_on_started
+
+    def on_speech_started(self) -> None:
+        self.speech_started_calls += 1
+        if self._raise_on_started:
+            raise RuntimeError("hook boom")
+
+    def on_speech_stopped(self) -> None:
+        self.speech_stopped_calls += 1
+
+
+async def test_speech_started_event_forwards_to_hook() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _VadHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event({"type": "input.speech_started"})
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.speech_started_calls == 1
+
+
+async def test_speech_stopped_event_forwards_to_hook() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _VadHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event({"type": "input.speech_stopped"})
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.speech_stopped_calls == 1
+
+
+async def test_vad_edges_no_op_when_hook_missing() -> None:
+    """Hooks without on_speech_started/stopped must not crash the loop."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()  # no VAD methods
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event({"type": "input.speech_started"})
+    await backend.push_event({"type": "input.speech_stopped"})
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+
+async def test_vad_hook_exception_is_swallowed() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _VadHooks(raise_on_started=True)
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event({"type": "input.speech_started"})
+    await asyncio.sleep(0.01)
+    # The handler must still process subsequent events.
+    await backend.push_event({"type": "input.speech_stopped"})
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.speech_started_calls == 1
+    assert hooks.speech_stopped_calls == 1

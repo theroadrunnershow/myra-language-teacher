@@ -614,6 +614,60 @@ class RobotController:
 
         return False
 
+    # ── Streaming pose tick (motion-director sink) ────────────────────────────
+
+    def apply_pose(
+        self,
+        *,
+        head_pitch: float = 0.0,
+        head_yaw: float = 0.0,
+        head_roll: float = 0.0,
+        head_x: float = 0.0,
+        head_y: float = 0.0,
+        head_z: float = 0.0,
+        antenna_left: float = 0.0,
+        antenna_right: float = 0.0,
+        duration: float = 0.05,
+    ) -> bool:
+        """Push a single pose frame to the SDK. Drops the frame if the
+        motion lock is contended.
+
+        Designed for the motion-director composer: called at ~30 Hz with
+        durations matching the tick period. Bypasses the cooldown / retry
+        logic in :meth:`_goto_target_safe` because at this cadence we'd
+        rather drop a stale frame than queue or back off.
+
+        All values are SI units (radians, metres).
+
+        Returns True if the SDK call ran, False if the frame was dropped.
+        """
+        if not self._motion_lock.acquire(timeout=max(duration * 0.5, 0.005)):
+            return False
+        try:
+            head = create_head_pose(
+                pitch=head_pitch,
+                yaw=head_yaw,
+                roll=head_roll,
+                x=head_x,
+                y=head_y,
+                z=head_z,
+            )
+            antennas = np.array([antenna_left, antenna_right], dtype=float)
+            self._mini.goto_target(
+                head=head,
+                antennas=antennas,
+                duration=max(duration, 1e-3),
+                method="minjerk",
+            )
+            return True
+        except Exception as exc:
+            # Streaming poses fire at 30 Hz; one bad frame should not log
+            # at warning level. Drop silently — the composer keeps ticking.
+            logger.debug("[RobotController] apply_pose dropped frame: %s", exc)
+            return False
+        finally:
+            self._motion_lock.release()
+
     # ── Idle: slow head sway, relaxed antennas ─────────────────────────────────
 
     def idle(self):

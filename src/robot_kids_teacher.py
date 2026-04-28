@@ -109,7 +109,54 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Optional max session length in seconds.",
     )
+    parser.add_argument(
+        "--motion-layers",
+        default=None,
+        help=(
+            "Motion-director layer set: 'full' (default), 'none', or comma "
+            "list from {wobble,gestures,tracking}. Overrides the env var "
+            "KIDS_TEACHER_MOTION_LAYERS."
+        ),
+    )
     return parser
+
+
+_MOTION_LAYERS_ENV_VAR = "KIDS_TEACHER_MOTION_LAYERS"
+
+
+def _resolve_motion_layers_spec(cli_value: Optional[str]) -> Optional[str]:
+    """Pick the motion-layers spec from CLI > env > default ('full')."""
+    if cli_value is not None and cli_value.strip():
+        return cli_value
+    raw = os.environ.get(_MOTION_LAYERS_ENV_VAR, "").strip()
+    if raw:
+        return raw
+    return None  # parse_layers(None) -> ALL_LAYERS
+
+
+def _maybe_make_motion_stack(
+    robot_controller: Any, *, layers_spec: Optional[str], audio_sample_rate: int
+) -> Optional[Any]:
+    """Construct a :class:`MotionStack` unless layers spec is ``"none"``."""
+    from motion.stack import MotionStack, MotionStackConfig, parse_layers
+
+    layers = parse_layers(layers_spec)
+    if not layers:
+        logger.info(
+            "[robot_kids_teacher] motion director disabled (layers=none); "
+            "falling back to legacy speak/listen/idle"
+        )
+        return None
+    logger.info(
+        "[robot_kids_teacher] motion director enabled with layers=%s",
+        sorted(layers),
+    )
+    return MotionStack(
+        robot_controller=robot_controller,
+        config=MotionStackConfig(
+            layers=layers, audio_sample_rate=audio_sample_rate
+        ),
+    )
 
 
 def _build_mic_reader(
@@ -177,6 +224,7 @@ async def _run_session_async(
     mic_reader: Callable[[], Optional[bytes]],
     provider: str,
     camera_worker: Any,
+    motion_layers_spec: Optional[str] = None,
 ) -> None:
     from kids_teacher_flow import build_robot_hooks
 
@@ -195,14 +243,21 @@ async def _run_session_async(
         present_names=present_names,
     )
 
-    hooks = build_robot_hooks(robot_controller)
+    motion_stack = _maybe_make_motion_stack(
+        robot_controller,
+        layers_spec=_resolve_motion_layers_spec(motion_layers_spec),
+        audio_sample_rate=24000,
+    )
+    hooks = build_robot_hooks(robot_controller, motion_stack=motion_stack)
     backend_factory = _build_backend_factory(provider, camera_worker)
     video_pump_factory = (
         _make_video_pump_factory(camera_worker)
         if camera_worker is not None
         else None
     )
-    gaze_loop_factory = _maybe_make_gaze_loop_factory(camera_worker, provider)
+    gaze_loop_factory = _maybe_make_gaze_loop_factory(
+        camera_worker, provider, motion_stack=motion_stack
+    )
     face_rec_loop_factory = _maybe_build_face_rec_loop_factory(
         camera_worker=camera_worker,
         provider=provider,
@@ -303,7 +358,10 @@ def _gaze_follow_enabled() -> bool:
 
 
 def _maybe_make_gaze_loop_factory(
-    camera_worker: Any, provider: str
+    camera_worker: Any,
+    provider: str,
+    *,
+    motion_stack: Optional[Any] = None,
 ) -> Optional[Callable[[Any, asyncio.Event], Awaitable[None]]]:
     """Return a gaze-loop factory for ``provider=gemini`` only.
 
@@ -344,19 +402,20 @@ def _maybe_make_gaze_loop_factory(
             "no targets will be published until dlib is installed"
         )
 
-    return _make_gaze_loop_factory(camera_worker)
+    return _make_gaze_loop_factory(camera_worker, motion_stack=motion_stack)
 
 
 def _make_gaze_loop_factory(
     camera_worker: Any,
+    *,
+    motion_stack: Optional[Any] = None,
 ) -> Callable[[Any, asyncio.Event], Awaitable[None]]:
     """Return a coroutine factory that runs the FaceTracker loop.
 
-    A default debug-level logging subscriber is attached so the
-    ``gaze_target`` channel is observable even before the motion director
-    ships. The motion director will register its own subscriber through
-    ``FaceTracker.subscribe`` when it lands; this factory does not import
-    or depend on it.
+    When ``motion_stack`` is provided, the motion director's
+    :class:`FaceOffsetMixer` is attached as the L3 subscriber. Otherwise a
+    debug-level logging subscriber is attached so the ``gaze_target``
+    channel stays observable.
     """
     from face_tracker import FaceTracker
 
@@ -365,18 +424,38 @@ def _make_gaze_loop_factory(
     async def _loop(handler: Any, stop_event: asyncio.Event) -> None:
         tracker = FaceTracker(camera_worker, child_name=child_name)
 
-        def _log_target(target: Optional[tuple[float, float]]) -> None:
-            if target is None:
-                logger.debug("[face_tracker] gaze_target=None")
-            else:
-                logger.debug(
-                    "[face_tracker] gaze_target=(%.3f, %.3f)", target[0], target[1]
+        if motion_stack is not None:
+            try:
+                motion_stack.attach_face_tracker(tracker)
+            except Exception as exc:
+                logger.warning(
+                    "[robot_kids_teacher] motion_stack.attach_face_tracker raised: %s",
+                    exc,
                 )
+        else:
+            def _log_target(target: Optional[tuple[float, float]]) -> None:
+                if target is None:
+                    logger.debug("[face_tracker] gaze_target=None")
+                else:
+                    logger.debug(
+                        "[face_tracker] gaze_target=(%.3f, %.3f)",
+                        target[0],
+                        target[1],
+                    )
 
-        tracker.subscribe(_log_target)
+            tracker.subscribe(_log_target)
+
         try:
             await tracker.run(stop_event)
         finally:
+            if motion_stack is not None:
+                try:
+                    motion_stack.detach_face_tracker()
+                except Exception as exc:
+                    logger.debug(
+                        "[robot_kids_teacher] motion_stack.detach_face_tracker raised: %s",
+                        exc,
+                    )
             await tracker.stop()
 
     return _loop
@@ -685,6 +764,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                         mic_reader,
                         provider,
                         camera_worker,
+                        motion_layers_spec=args.motion_layers,
                     )
                 )
             finally:

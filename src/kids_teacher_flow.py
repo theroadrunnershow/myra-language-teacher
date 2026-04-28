@@ -185,13 +185,19 @@ def _default_recovery_cue(robot_controller: object) -> None:
         )
 
 
-def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
+def build_robot_hooks(
+    robot_controller: object, *, motion_stack: object = None
+) -> KidsTeacherRuntimeHooks:
     """Build the real robot audio bridge hooks for a running session.
 
     Imports :mod:`kids_teacher_robot_bridge` lazily so this module stays
     importable when the robot SDK (or its optional audio deps) is missing.
     Callers are responsible for ``.start()``/``.stop()`` on the returned
     hooks — the flow wires that lifecycle around ``run_kids_teacher_session``.
+
+    ``motion_stack`` is the optional motion-director orchestrator. When
+    provided, the bridge routes state and audio through it; when ``None``,
+    the legacy speak/listen/idle path runs unchanged.
     """
     from kids_teacher_robot_bridge import KidsTeacherRobotHooks
 
@@ -199,6 +205,7 @@ def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
         robot_controller=robot_controller,
         playback_speed=_resolve_playback_speed(),
         recovery_cue=_default_recovery_cue,
+        motion_stack=motion_stack,
     )
 
 
