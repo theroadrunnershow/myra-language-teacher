@@ -584,188 +584,6 @@ and confirm zero SIGSEGV. If a SIGSEGV still appears, the residual
 suspect list reorders to PyAV / Reachy SDK / libcamera per the C
 frame the next core dump produces.
 
-### Gemini Live `GoAway` → 1008 close not handled — no reconnect, fallback line on loop
-
-Reported: 2026-04-26. Provider=gemini, on-device Reachy Pi.
-
-**Different bug class from issues 1–3:** the **process is alive** (mic-pump
-heartbeats continue firing at 16:06:43, :50, :53). What died is the
-**Gemini Live session itself** — the server sent a `GoAway` signal because
-it had reached the max session duration, then dropped the WebSocket with
-close code **1008 (policy violation)** when the client kept the connection
-open. The backend has no reconnect logic, so it hammers `send_audio` at
-the closed socket and the child hears `_FALLBACK_ASSISTANT_LINE`
-(`"Let me try that again in a moment."`) on loop.
-
-**Logs (verbatim, 2026-04-26):**
-
-```
-16:06:42  INFO     [kids_teacher_robot_bridge] assistant partial transcript: ' up can'
-16:06:42  INFO     [kids_teacher_robot_bridge] assistant partial transcript: ' tell'
-…
-16:06:43  INFO     [kids_teacher_robot_bridge] mic pump heartbeat: sent=25 none=0 (last 2.0s)
-16:06:43  INFO     [kids_teacher_robot_bridge] assistant partial transcript: ' a picture'
-16:06:43  INFO     [kids_teacher_robot_bridge] assistant partial transcript: ' of a baby'
-16:06:43  WARNING  [kids_teacher_gemini_backend] reader loop error (session likely dead): 1008 None. Connection aborted because the client failed to close the connection after receiving a GoAway signal once the session durat
-16:06:43  WARNING  [kids_teacher_robot_bridge] session error: 1008 None. <same>
-16:06:44  INFO     [kids_teacher_robot_bridge] assistant final transcript: 'Let me try that again in a moment.'
-16:06:47  WARNING  [kids_teacher_gemini_backend] Gemini Live session dropped (first send failure — likely keepalive timeout or server disconnect): received 1008 (policy violation) … ; then sent 1008 (policy violation) …
-16:06:47  INFO     [kids_teacher_robot_bridge] assistant final transcript: 'Let me try that again in a moment.'
-16:06:50  WARNING  [kids_teacher_gemini_backend] send_audio failed (#2, session still dead): … 1008 …
-16:06:50  INFO     [kids_teacher_robot_bridge] assistant final transcript: 'Let me try that again in a moment.'
-16:06:53  WARNING  Robot motion failed during idle sway left: TimeoutError …
-16:06:53  WARNING  [kids_teacher_gemini_backend] send_audio failed (#3, session still dead): … 1008 …
-16:06:55  WARNING  [kids_teacher_gemini_backend] send_audio failed (#4, session still dead): … 1008 …
-16:06:55  INFO     [kids_teacher_robot_bridge] assistant final transcript: 'Let me try that again in a moment.'
-```
-
-(The 1008 message is truncated mid-word in the SDK error string — the full
-text is "…once the session duration was reached".)
-
-**Analysis:**
-
-The 1008 error string ("Connection aborted because the client failed to
-close the connection after receiving a GoAway signal once the session
-duration was reached") is Gemini Live's max-session-duration enforcement.
-Gemini emits a `BidiGenerateContentServerMessage.go_away` a few seconds
-before the deadline so clients can close cleanly and (optionally) reopen
-with a `session_resumption.handle` to keep the conversation context. If
-the client doesn't close, the server force-drops with 1008.
-
-The backend already **observes** both signals but takes **no action**:
-
-- `_normalize_message` logs `go_away` events
-  (`src/kids_teacher_gemini_backend.py:888-893`) and discards them.
-- It logs `session_resumption_update` handles
-  (`src/kids_teacher_gemini_backend.py:873-886`) but never **caches** the
-  latest `new_handle`.
-- `send_audio` (`src/kids_teacher_gemini_backend.py:1020-1042`) on
-  failure increments a counter, emits an `error` event, and returns —
-  the session field is never marked dead, so subsequent calls keep
-  hammering the closed WebSocket. The log shows failures #1 → #4 in
-  ~12 seconds.
-- The reader loop logs `reader loop error (session likely dead)` and
-  exits (`src/kids_teacher_gemini_backend.py:526-531`); there is no
-  reconnect attempt.
-- Each error event drives `kids_teacher_realtime._on_error`
-  (`src/kids_teacher_realtime.py:293-306`), which emits
-  `_FALLBACK_ASSISTANT_LINE` and returns to LISTENING — so the child
-  hears the fallback transcript four times in eleven seconds.
-
-`Robot motion failed during idle sway left: TimeoutError` at 16:06:53 is
-unrelated to the 1008 — it's the Reachy motion subsystem timing out on a
-goto_target call (same path as the "Robot motion recovered" line in
-issue 3). Worth noting because it suggests the device is also under SDK
-stress in this window.
-
-**Fix checklist:**
-
-- `High` Cache the most recent `session_resumption.new_handle` on every
-  `session_resumption_update` event in the Gemini backend.
-- `High` On `go_away`, proactively close the current session via the
-  connection context manager and immediately re-enter with
-  `session_resumption.handle=<cached>` on the new `LiveConnectConfig`
-  (the `google-genai` SDK supports this through
-  `types.SessionResumptionConfig`). Do this BEFORE the deadline so the
-  child never sees a 1008.
-- `High` When `_session.send_realtime_input` raises, mark the session
-  dead (`self._session = None` or a `_session_alive` flag) and short-
-  circuit subsequent `send_audio` / `send_video` calls instead of
-  retrying against the closed socket — silences the "send_audio failed
-  (#N)" spam.
-- `High` After session-dead, kick off a reconnect with the cached handle
-  on the same backend instance; only surface a single error event to
-  the realtime handler if the reconnect itself fails.
-- `Medium` Rate-limit / dedupe fallback `_FALLBACK_ASSISTANT_LINE`
-  emissions in `kids_teacher_realtime._on_error` — emit once per
-  contiguous error stretch, not per error event. Otherwise multiple
-  reconnect-time errors stack up audibly.
-- `Medium` Differentiate "session ended, reconnecting" vs generic
-  backend error so the fallback line either matches the situation or
-  the robot stays silent during the brief reconnect window.
-- `Low` Backend-side test using a fake SDK: emit a `go_away` then close
-  the connection, assert the backend (a) caches the latest
-  `session_resumption_update` handle, (b) reconnects with that handle,
-  (c) does NOT emit a stream of send_audio failures.
-- `Low` Document Gemini Live's max session duration in
-  `tasks/kids-teacher-requirements.md` and link the SDK doc for
-  `session_resumption`.
-
-**Open questions:**
-
-- What's the actual session-duration cap? Need the session-start time vs.
-  16:06:43 to compute it. The Gemini Live docs list 10 min for native-
-  audio half-cascade — confirm against this trace.
-- Does reconnect-with-handle preserve **conversation context** (system
-  prompt, prior turns) or does the model start cold? Kids-teacher
-  experience needs context preservation, otherwise the assistant forgets
-  mid-conversation and the fix only solves part of the problem.
-- Should we proactively recycle the session every N minutes regardless of
-  `go_away`, to avoid being right at the edge?
-
-Independent of the heap-corruption issues 1–3 — separate root cause,
-separate fix.
-
-**Analysis update — 2026-04-26 (root cause confirmed + concrete fix plan):**
-
-Root cause confirmed by re-reading the backend: both signals are already
-parsed by `_normalize_message`
-(`src/kids_teacher_gemini_backend.py:873-894`) but neither emits a
-normalized event nor stores any state — the data is logged and
-discarded. `_reader_loop` (`:490-535`) bubbles the eventual 1008 close
-out as a single `error` event and exits with no reconnect. `send_audio`
-(`:1020-1042`) never marks the session dead, so subsequent calls hammer
-the closed socket; each `error` event drives the fallback line in
-`kids_teacher_realtime._on_error`
-(`src/kids_teacher_realtime.py:293-306`).
-
-Concrete fix plan (single PR, in order):
-
-1. **Cache the handle.** Add
-   `self._latest_resumption_handle: Optional[str] = None` in
-   `__init__`. In the `srupdate` branch of `_normalize_message` set
-   `self._latest_resumption_handle = new_handle` whenever `new_handle`
-   is a non-empty string and `resumable` is truthy.
-2. **Track liveness.** Add `self._session_alive = True` in `__init__`;
-   flip to False in the `send_audio`/`send_video` exception branches;
-   short-circuit subsequent `send_audio` calls to a single DEBUG log
-   instead of the existing `#N` WARNING spam.
-3. **Reconnect.** Add `_reconnect_with_handle()` that `__aexit__`s the
-   old `_connection_cm` and re-enters `client.aio.live.connect(...)`
-   with `LiveConnectConfig(..., session_resumption=
-   types.SessionResumptionConfig(handle=self._latest_resumption_handle))`.
-   Trigger from `_reader_loop`'s outer-except path AND proactively when
-   a `go_away` event arrives (use `time_left` to decide pre- vs
-   post-turn close). Reset `_session_alive=True` and
-   `_send_failure_count=0` on success.
-4. **Dedupe the fallback.** In
-   `kids_teacher_realtime._on_error` add a `_last_fallback_at`
-   timestamp; emit `_FALLBACK_ASSISTANT_LINE` at most once per ~5 s
-   contiguous error window; suppress the SPEAKING/LISTENING flap while
-   the backend is mid-reconnect.
-5. **Backend test (fakes only).** Extend
-   `tests/test_kids_teacher_gemini_backend.py` with a fake
-   `LiveServerMessage` sequence
-   (`srupdate(new_handle="abc", resumable=True)` →
-   `go_away(time_left=Duration(2s))` → send-side raises 1008) and
-   assert: handle cached, reconnect attempted with
-   `SessionResumptionConfig(handle="abc")`, only one `error` event
-   surfaced upstream.
-
-Settle before step 3:
-
-- Verify `google.genai.types.SessionResumptionConfig` exists in the
-  version pinned in `requirements-robot.txt` (older SDKs route
-  resumption differently through `LiveConnectConfig`).
-- Confirm reconnect-with-handle preserves the system prompt and prior
-  turns. If it doesn't, a cold restart in the kids-teacher experience
-  is worse than today's bug; in that case the fix has to also re-issue
-  the system prompt as the first turn.
-
-Operational mitigation while the fix lands: run sessions with
-`--max-seconds` set just under the observed cap so the session ends
-cleanly rather than getting force-dropped at 1008.
-
 ### Kids Teacher Spec Gaps
 
 Source: [tasks/kids-teacher-requirements.md](kids-teacher-requirements.md)
@@ -908,6 +726,39 @@ Amendment: [tasks/kids-teacher-requirements.md § "2026-04-23 Amendment"](kids-t
 ---
 
 ## Completed
+
+### Gemini Live `GoAway` → 1008 close not handled — no reconnect, fallback line on loop
+
+Resolved 2026-04-27 in commit `73cdabbe` ("kids-teacher gemini:
+auto-reconnect with session resumption + recovery cue"). Three
+coordinated changes landed:
+
+- **Session resumption + auto-reconnect** in
+  `kids_teacher_gemini_backend.py`: `build_gemini_live_config` now sets
+  `session_resumption=SessionResumptionConfig(handle=...)`. The latest
+  `resumable=True` handle is cached from `session_resumption_update`
+  events. Reader-loop exception or first `send_audio` failure schedules
+  a single `_attempt_reconnect()` task that tries the saved handle
+  first (preserves conversation context), falls back to a fresh
+  connect on handle rejection, retries with bounded backoff, and emits
+  `session.reconnecting` / `session.reconnected` events.
+- **Dead-session spam suppression**: `_session_dead` flag short-circuits
+  `send_audio` while reconnect is in flight so the mic pump stops
+  generating fresh error events.
+- **User-facing recovery cue**: new `SessionStatus.RECONNECTING`;
+  realtime handler dispatches `session.reconnecting` → flush playback
+  + RECONNECTING status; `session.reconnected` → LISTENING. Generic
+  ERROR fallback line is no longer triggered on a recoverable
+  disconnect. `KidsTeacherRobotHooks.recovery_cue` plays a short
+  "one moment" line via `api_get_dino_voice` so the 1–2 s reconnect
+  gap doesn't register as broken.
+
+Tests cover: handle in live config, handle caching from update events,
+reader-loop disconnect → reconnect-with-handle, expired handle →
+fresh-connect fallback, `send_audio` dead-state suppression,
+retry-budget exhaustion → single error, RECONNECTING status flushes
+playback + skips fallback line, recovery cue runs off-thread, default
+cue fetches dino voice, cue tolerates TTS / SDK absence.
 
 ### `memory_reconciler` dedup silently disabled — Ollama unreachable on Pi
 
