@@ -406,7 +406,6 @@ async def pump_microphone_to_backend(
     mic_source: Any,
     chunk_duration_ms: int = 80,  # noqa: ARG001 — reserved for future pacing
     stop_event: Optional[asyncio.Event] = None,
-    wait_for_ready: bool = True,
 ) -> None:
     """Background coroutine: forward mic chunks into the realtime handler.
 
@@ -434,21 +433,9 @@ async def pump_microphone_to_backend(
     When the robot SDK is unavailable, the caller should not construct a
     real mic source — this function will simply exit immediately on the
     first empty/missing read.
-
-    ``wait_for_ready=True`` (the default) gates the read loop on
-    :meth:`KidsTeacherRealtimeHandler.wait_until_ready` so audio captured
-    during the Gemini Live warm-up window is dropped at the source rather
-    than sent into a session that isn't transcribing yet (root cause of
-    the "asked 3 times" issue logged 2026-04-29). The mic source is still
-    drained while we wait so its internal buffer doesn't overflow.
     """
     read = _resolve_mic_reader(mic_source)
     chunk_duration_ms = max(1, int(chunk_duration_ms))
-
-    if wait_for_ready and hasattr(handler, "wait_until_ready"):
-        await _drain_mic_until_ready(read, handler, stop_event)
-        if stop_event is not None and stop_event.is_set():
-            return
 
     # Periodic heartbeat — proves the pump is still running and shows
     # whether audio frames are actually flowing to the backend after
@@ -507,56 +494,6 @@ async def pump_microphone_to_backend(
         # realtime handler's own run() loop. No sleep — pacing is driven by
         # the mic_source itself (it should block until a chunk is ready).
         await asyncio.sleep(0)
-
-
-async def _drain_mic_until_ready(
-    read: Callable[[], bytes],
-    handler: Any,
-    stop_event: Optional[asyncio.Event],
-) -> None:
-    """Drain the mic source while waiting for the backend to warm up.
-
-    The mic source is a real-time buffer — if we just ``await`` readiness
-    without touching it, frames pile up and the first thing we send post-
-    warmup is several seconds of stale audio. Read-and-discard pattern
-    keeps the buffer drained at native pacing so the first frame the
-    backend sees is genuinely "current".
-    """
-    ready_task = asyncio.create_task(handler.wait_until_ready())
-    logged_wait = False
-    try:
-        while not ready_task.done():
-            if stop_event is not None and stop_event.is_set():
-                ready_task.cancel()
-                return
-            try:
-                _ = read()
-            except StopIteration:
-                ready_task.cancel()
-                return
-            except Exception as exc:
-                logger.warning(
-                    "[kids_teacher_robot_bridge] mic_source raised during warmup: %s",
-                    exc,
-                )
-                ready_task.cancel()
-                return
-            if not logged_wait:
-                logger.info(
-                    "[kids_teacher_robot_bridge] mic pump waiting for backend "
-                    "readiness; pre-warmup frames will be discarded"
-                )
-                logged_wait = True
-            # Yield briefly: the read above is non-blocking on the robot
-            # mic API (returns None when its buffer is momentarily empty),
-            # so we need our own pacing to avoid pegging the loop.
-            await asyncio.sleep(0.01)
-    finally:
-        if not ready_task.done():
-            try:
-                await ready_task
-            except (asyncio.CancelledError, Exception):
-                pass
 
 
 def _resolve_mic_reader(mic_source: Any) -> Callable[[], bytes]:

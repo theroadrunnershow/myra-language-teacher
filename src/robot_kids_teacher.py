@@ -178,7 +178,7 @@ async def _run_session_async(
     provider: str,
     camera_worker: Any,
 ) -> None:
-    from kids_teacher_flow import _default_startup_greeting, build_robot_hooks
+    from kids_teacher_flow import build_robot_hooks
 
     # Run the session-start face sweep BEFORE building the config so the
     # present-names note is available to ``load_profile`` (FR-KID-15 /
@@ -215,7 +215,6 @@ async def _run_session_async(
         video_pump_factory=video_pump_factory,
         gaze_loop_factory=gaze_loop_factory,
         face_rec_loop_factory=face_rec_loop_factory,
-        startup_greeting=lambda: _default_startup_greeting(robot_controller),
     )
     await run_kids_teacher_session(config=config, deps=deps)
 
@@ -521,29 +520,6 @@ def _make_face_rec_loop_factory(
     async def _loop(handler: Any, stop_event: asyncio.Event) -> None:
         if not face_service.HAS_FACE_REC:
             return
-        # Hold off announcements until the backend session is fully warmed
-        # up. Pre-warmup push_text calls land in a session that hasn't
-        # finished initialization and get silently dropped — so an "X just
-        # joined" announcement at boot disappears entirely. Once readiness
-        # arrives, the rest of the loop runs as before.
-        if hasattr(handler, "wait_until_ready"):
-            ready_task = asyncio.create_task(handler.wait_until_ready())
-            stop_task = asyncio.create_task(stop_event.wait())
-            try:
-                await asyncio.wait(
-                    {ready_task, stop_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            finally:
-                for task in (ready_task, stop_task):
-                    if not task.done():
-                        task.cancel()
-                        try:
-                            await task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-            if stop_event.is_set():
-                return
         prev_bbox_count = 0
         known_names: set[str] = set(initial_names)
         last_announcement_ts: Optional[float] = None

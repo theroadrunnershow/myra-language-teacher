@@ -483,13 +483,6 @@ class GeminiRealtimeBackend:
         # service is genuinely down. After this, we surface a single error
         # and stay dead until close().
         self._max_reconnect_attempts = 4
-        # Readiness signal. Gemini Live's WebSocket completes the connect()
-        # handshake before the server has finished initializing the session
-        # — the practical "I am hot" signal is the first
-        # ``session_resumption_update`` message. Anything pushed before that
-        # (audio frames, text prompts) is silently dropped on the server
-        # side, so callers wait on this through wait_until_ready().
-        self._ready_event: asyncio.Event = asyncio.Event()
 
     @property
     def model(self) -> str:
@@ -921,22 +914,16 @@ class GeminiRealtimeBackend:
                 relationship,
             )
             return {"output": {"status": "ok"}}, relationship_note
-        # Non-OK enrollment outcomes: log so the cause is recoverable from the
-        # log alone (otherwise the only signal is the absence of the "ok" line).
-        status_by_result = {
-            EnrollResult.NO_FACE: "no_face",
-            EnrollResult.MULTIPLE_FACES: "multiple_faces",
-            EnrollResult.CAPACITY_EXCEEDED: "capacity",
-            EnrollResult.LIBRARY_MISSING: "unavailable",
-        }
-        status = status_by_result.get(result, "unavailable")
-        logger.info(
-            "[kids_teacher_gemini_backend] remember_face %s name=%r enroll_result=%r",
-            status,
-            name,
-            getattr(result, "name", result),
-        )
-        return {"output": {"status": status}}, relationship_note
+        if result == EnrollResult.NO_FACE:
+            return {"output": {"status": "no_face"}}, relationship_note
+        if result == EnrollResult.MULTIPLE_FACES:
+            return {"output": {"status": "multiple_faces"}}, relationship_note
+        if result == EnrollResult.CAPACITY_EXCEEDED:
+            return {"output": {"status": "capacity"}}, relationship_note
+        if result == EnrollResult.LIBRARY_MISSING:
+            return {"output": {"status": "unavailable"}}, relationship_note
+        # Defensive fallback for any unmapped enum.
+        return {"output": {"status": "unavailable"}}, relationship_note
 
     async def _handle_forget_face_call(
         self, function_call: Any
@@ -1096,12 +1083,6 @@ class GeminiRealtimeBackend:
                 # one that matters.
                 if resumable and isinstance(new_handle, str) and new_handle:
                     self._latest_resumption_handle = new_handle
-                # First resumption update is the practical "session ready"
-                # signal — Gemini Live only emits these once the server has
-                # finished setting up the session, so anything we send
-                # before this gets silently dropped. Idempotent.
-                if not self._ready_event.is_set():
-                    self._ready_event.set()
                 return events
             goaway = _attr(raw_message, "go_away")
             if goaway is not None:
@@ -1234,9 +1215,6 @@ class GeminiRealtimeBackend:
             events.append({"type": "response.done"})
 
         return events
-
-    async def wait_until_ready(self) -> None:
-        await self._ready_event.wait()
 
     async def send_audio(self, chunk: bytes) -> None:
         if self._session is None or not chunk:

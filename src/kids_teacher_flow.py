@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, List, Optional, Tuple
@@ -153,19 +152,6 @@ def _resolve_playback_speed() -> float:
 
 _RECOVERY_CUE_TEXT = "One moment, let me think."
 
-# Hardcoded greeting played once after handler.start() so the child has an
-# audible "I'm awake and listening" cue before they try to talk. Without it,
-# the first ~30s after boot are silent dead-air while Gemini Live finishes
-# warming up — children who speak into that gap get either no transcription
-# or a misheard one (see myra.log around 05:36-05:37 on 2026-04-29).
-_STARTUP_GREETING_TEXT = "Hello there! Your robot teacher is awake now!"
-
-# Delay between handler.start() returning and the greeting playing. Gives
-# Gemini Live a window to finish its session-resumption handshake so that
-# the user's first words after the greeting land in a ready transcriber.
-_STARTUP_GREETING_DELAY_ENV = "KIDS_TEACHER_STARTUP_GREETING_DELAY"
-_DEFAULT_STARTUP_GREETING_DELAY = 3.0
-
 
 def _default_recovery_cue(robot_controller: object) -> None:
     """Play a short "one moment" line through the local TTS + robot speaker.
@@ -197,128 +183,6 @@ def _default_recovery_cue(robot_controller: object) -> None:
         logger.warning(
             "[kids_teacher_flow] recovery cue playback failed: %s", exc
         )
-
-
-def _default_startup_greeting(robot_controller: object) -> None:
-    """Play the hardcoded "robot teacher awake" greeting through the speaker.
-
-    Mirrors :func:`_default_recovery_cue` — fetches a fixed phrase via the
-    local TTS service and pushes the resulting MP3 to the robot speaker,
-    bypassing the Gemini Live channel so the line plays verbatim. Best
-    effort: any failure (missing robot_teacher import, TTS outage, playback
-    error) is logged and swallowed.
-    """
-    try:
-        from robot_teacher import _play, api_get_dino_voice  # local import
-    except Exception as exc:
-        logger.debug(
-            "[kids_teacher_flow] startup greeting unavailable (robot_teacher import failed): %s",
-            exc,
-        )
-        return
-    try:
-        mp3 = api_get_dino_voice(_STARTUP_GREETING_TEXT)
-    except Exception as exc:
-        logger.warning(
-            "[kids_teacher_flow] startup greeting TTS fetch failed: %s", exc
-        )
-        return
-    try:
-        _play(robot_controller, mp3)
-    except Exception as exc:
-        logger.warning(
-            "[kids_teacher_flow] startup greeting playback failed: %s", exc
-        )
-
-
-def _resolve_startup_greeting_delay() -> float:
-    """Parse ``KIDS_TEACHER_STARTUP_GREETING_DELAY`` with a safe fallback."""
-    raw = os.environ.get(_STARTUP_GREETING_DELAY_ENV, "").strip()
-    if not raw:
-        return _DEFAULT_STARTUP_GREETING_DELAY
-    try:
-        value = float(raw)
-    except ValueError:
-        logger.warning(
-            "[kids_teacher_flow] %s=%r is not a float; falling back to %ss",
-            _STARTUP_GREETING_DELAY_ENV,
-            raw,
-            _DEFAULT_STARTUP_GREETING_DELAY,
-        )
-        return _DEFAULT_STARTUP_GREETING_DELAY
-    return max(0.0, value)
-
-
-async def _maybe_play_startup_greeting(
-    deps: "KidsTeacherFlowDeps",
-    handler: KidsTeacherRealtimeHandler,
-    stop_event: Optional[asyncio.Event],
-) -> None:
-    """Wait for the backend to warm up, then fire the greeting on a thread.
-
-    Anchors on the backend readiness signal so the greeting plays as soon
-    as the session is genuinely hot rather than at a fixed wall-clock
-    delay. ``startup_greeting_delay`` becomes an upper bound: if readiness
-    arrives sooner the greeting fires sooner; if it never arrives within
-    the budget we fall back to playing the greeting anyway so the child
-    isn't left in dead air.
-
-    If ``stop_event`` fires during the wait we skip the greeting entirely
-    — no point cutting a child off mid-shutdown.
-    """
-    cue = deps.startup_greeting
-    if cue is None:
-        return
-
-    delay = max(0.0, deps.startup_greeting_delay)
-    if delay > 0:
-        ready_task = asyncio.create_task(handler.wait_until_ready())
-        waiters: List[asyncio.Task[Any]] = [ready_task]
-        stop_task: Optional[asyncio.Task[Any]] = None
-        if stop_event is not None:
-            stop_task = asyncio.create_task(stop_event.wait())
-            waiters.append(stop_task)
-        try:
-            done, _ = await asyncio.wait(
-                waiters,
-                timeout=delay,
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-        finally:
-            for task in waiters:
-                if not task.done():
-                    task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
-        if stop_task is not None and stop_task in done:
-            # Caller is shutting down — bail without firing.
-            return
-        if ready_task in done:
-            logger.info(
-                "[kids_teacher_flow] startup greeting: backend ready, firing"
-            )
-        else:
-            logger.warning(
-                "[kids_teacher_flow] startup greeting: readiness signal did "
-                "not arrive within %.1fs, firing anyway",
-                delay,
-            )
-
-    def _run() -> None:
-        try:
-            cue()
-        except Exception as exc:
-            logger.warning(
-                "[kids_teacher_flow] startup greeting raised: %s", exc
-            )
-
-    threading.Thread(
-        target=_run,
-        name="kids-teacher-startup-greeting",
-        daemon=True,
-    ).start()
 
 
 def build_robot_hooks(robot_controller: object) -> KidsTeacherRuntimeHooks:
@@ -377,16 +241,6 @@ class KidsTeacherFlowDeps:
     # ``handler.push_text(...)``. Wired by the robot entry point on
     # ``provider=gemini`` only when ``face_recognition`` is available.
     face_rec_loop_factory: Optional[MicPumpFactory] = None
-    # Optional one-shot startup greeting. Invoked once on a daemon thread
-    # after ``handler.start()`` returns and ``startup_greeting_delay``
-    # seconds have elapsed, so the child hears a fixed cue when the robot
-    # is ready to listen rather than guessing from silence. Headless tests
-    # leave this ``None``; the robot entry point binds the controller into
-    # :func:`_default_startup_greeting`.
-    startup_greeting: Optional[Callable[[], None]] = None
-    startup_greeting_delay: float = field(
-        default_factory=_resolve_startup_greeting_delay
-    )
 
 
 async def run_kids_teacher_session(
@@ -482,7 +336,6 @@ async def run_kids_teacher_session(
 
     try:
         await handler.start()
-        await _maybe_play_startup_greeting(deps, handler, stop_event)
         run_task = asyncio.create_task(handler.run())
 
         if stop_event is None:
