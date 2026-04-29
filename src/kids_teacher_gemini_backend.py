@@ -914,16 +914,22 @@ class GeminiRealtimeBackend:
                 relationship,
             )
             return {"output": {"status": "ok"}}, relationship_note
-        if result == EnrollResult.NO_FACE:
-            return {"output": {"status": "no_face"}}, relationship_note
-        if result == EnrollResult.MULTIPLE_FACES:
-            return {"output": {"status": "multiple_faces"}}, relationship_note
-        if result == EnrollResult.CAPACITY_EXCEEDED:
-            return {"output": {"status": "capacity"}}, relationship_note
-        if result == EnrollResult.LIBRARY_MISSING:
-            return {"output": {"status": "unavailable"}}, relationship_note
-        # Defensive fallback for any unmapped enum.
-        return {"output": {"status": "unavailable"}}, relationship_note
+        # Non-OK enrollment outcomes: log so the cause is recoverable from the
+        # log alone (otherwise the only signal is the absence of the "ok" line).
+        status_by_result = {
+            EnrollResult.NO_FACE: "no_face",
+            EnrollResult.MULTIPLE_FACES: "multiple_faces",
+            EnrollResult.CAPACITY_EXCEEDED: "capacity",
+            EnrollResult.LIBRARY_MISSING: "unavailable",
+        }
+        status = status_by_result.get(result, "unavailable")
+        logger.info(
+            "[kids_teacher_gemini_backend] remember_face %s name=%r enroll_result=%r",
+            status,
+            name,
+            getattr(result, "name", result),
+        )
+        return {"output": {"status": status}}, relationship_note
 
     async def _handle_forget_face_call(
         self, function_call: Any

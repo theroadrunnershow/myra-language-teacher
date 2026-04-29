@@ -1323,6 +1323,77 @@ async def test_remember_face_refuses_when_no_camera(
     assert enroll_calls == []
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "enroll_result_name, expected_status",
+    [
+        ("NO_FACE", "no_face"),
+        ("MULTIPLE_FACES", "multiple_faces"),
+        ("CAPACITY_EXCEEDED", "capacity"),
+        ("LIBRARY_MISSING", "unavailable"),
+    ],
+)
+async def test_remember_face_logs_non_ok_status(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    enroll_result_name: str,
+    expected_status: str,
+) -> None:
+    """Non-OK enrollment outcomes must be logged with the resolved status and
+    the underlying EnrollResult, so post-mortems can tell NO_FACE from
+    MULTIPLE_FACES without re-running the session.
+    """
+    import face_service
+
+    enroll_result = getattr(face_service.EnrollResult, enroll_result_name)
+    monkeypatch.setattr(
+        face_service,
+        "enroll_from_frame",
+        lambda *a, **kw: enroll_result,
+    )
+
+    session = _MultiTurnFakeSession(
+        turns=[
+            [
+                _build_face_tool_call_message(
+                    name="remember_face",
+                    args={"name": "Aunt Priya"},
+                ),
+                _build_server_message(turn_complete=True),
+            ]
+        ]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        face_frame_provider=lambda: object(),
+        add_note_fn=lambda text, **_kwargs: "appended",
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    caplog.set_level("INFO", logger="kids_teacher_gemini_backend")
+    try:
+        await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        await _wait_until(lambda: bool(session.tool_responses))
+    finally:
+        await backend.close()
+
+    matching = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.name == "kids_teacher_gemini_backend"
+        and "remember_face" in rec.getMessage()
+        and "ok" not in rec.getMessage().split("remember_face ", 1)[1].split(" ", 1)[0]
+    ]
+    assert any(expected_status in msg for msg in matching), matching
+    assert any(enroll_result_name in msg for msg in matching), matching
+    assert any("'Aunt Priya'" in msg for msg in matching), matching
+
+
 # ---------------------------------------------------------------------------
 # remember_face: relationship-note persistence on enrollment failure paths.
 #
