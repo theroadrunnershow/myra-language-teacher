@@ -14,6 +14,7 @@ from typing import Iterable, Optional
 
 from kids_teacher_types import KidsTeacherProfile
 from memory_file import read_for_prompt as read_memory_for_prompt
+from words_db import get_lesson_seed_vocabulary
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,27 @@ _VOICE_FILENAME = "voice.txt"
 _TOOLS_FILENAME = "tools.txt"
 _LANGUAGE_LESSON_FILENAME = "language_lesson.txt"
 
+_VOCAB_HEADING = "# Telugu starter vocabulary (seed pool for lesson stories)"
+_VOCAB_INTRO = (
+    "Use this list as the seed for lesson stories. Pick a theme for the "
+    "lesson, then choose 3 to 4 seed words from one category below. Vary "
+    "the theme across sessions so the child does not hear the same words "
+    "every time. After the seed words are taught, you may add 2 to 3 more "
+    "Telugu words that come up naturally in the story — translate those "
+    "yourself; they do not need to be on this list."
+)
+
+_CATEGORY_TITLES: tuple[tuple[str, str], ...] = (
+    ("animals", "Animals"),
+    ("food", "Food"),
+    ("colors", "Colors"),
+    ("body_parts", "Body parts"),
+    ("numbers", "Numbers"),
+    ("common_objects", "Common objects"),
+    ("verbs", "Simple verbs"),
+    ("core_phrases", "Common phrases"),
+)
+
 
 class ProfileValidationError(Exception):
     """Raised when the kids-teacher profile cannot be loaded safely."""
@@ -42,6 +64,36 @@ def _read_text_file(path: str) -> Optional[str]:
             return handle.read()
     except OSError as exc:
         raise ProfileValidationError(f"Failed to read {path}: {exc}") from exc
+
+
+def _format_vocab_entry(entry: dict) -> str:
+    english = entry.get("english", "").strip()
+    telugu = entry.get("telugu", "").strip()
+    roman = entry.get("tel_roman", "").strip()
+    if telugu and roman:
+        return f"- {english} — {telugu} ({roman})"
+    if telugu:
+        return f"- {english} — {telugu}"
+    return f"- {english}"
+
+
+def format_telugu_lesson_vocabulary() -> str:
+    """Render the kids-teacher Telugu seed pool as a markdown block.
+
+    The block is appended after ``language_lesson.txt`` so the realtime
+    model can pick concrete seed words from a categorized list instead
+    of leaning on the same hardcoded examples each session.
+    """
+    seed = get_lesson_seed_vocabulary()
+    lines: list[str] = [_VOCAB_HEADING, "", _VOCAB_INTRO]
+    for key, title in _CATEGORY_TITLES:
+        entries = seed.get(key) or []
+        if not entries:
+            continue
+        lines.append("")
+        lines.append(f"## {title}")
+        lines.extend(_format_vocab_entry(entry) for entry in entries)
+    return "\n".join(lines)
 
 
 def _parse_tools(raw: str) -> tuple[str, ...]:
@@ -93,6 +145,9 @@ def load_profile(
         lesson_text = lesson_raw.strip()
         if lesson_text:
             instructions = f"{instructions}\n\n{lesson_text}"
+            instructions = (
+                f"{instructions}\n\n{format_telugu_lesson_vocabulary()}"
+            )
 
     try:
         memory_text = read_memory_for_prompt(memory_file_path)

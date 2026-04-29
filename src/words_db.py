@@ -1524,3 +1524,32 @@ def get_all_words_for_language(language: str, categories: list) -> list:
                     "category": cat,
                 })
     return result
+
+
+# Categories pulled into the kids-teacher Telugu seed pool. Order here
+# is the order the lesson prompt renders them in.
+_LESSON_SEED_CATEGORIES = (
+    "animals",
+    "food",
+    "colors",
+    "body_parts",
+    "numbers",
+    "common_objects",
+    "verbs",
+)
+
+
+def get_lesson_seed_vocabulary() -> dict:
+    """Return a categorized Telugu seed pool for kids-teacher lessons.
+
+    Each value is a list of fresh dict copies so callers cannot mutate
+    the underlying ``WORD_DATABASE`` / ``_CORE_PHRASES`` state. The
+    kids-teacher profile loader renders this into the realtime model's
+    system prompt so the storyteller has a concrete word list to draw
+    from instead of falling back to the same handful of examples.
+    """
+    seed: dict[str, list[dict]] = {}
+    for category in _LESSON_SEED_CATEGORIES:
+        seed[category] = [dict(entry) for entry in WORD_DATABASE.get(category, [])]
+    seed["core_phrases"] = [dict(phrase) for phrase in _CORE_PHRASES]
+    return seed

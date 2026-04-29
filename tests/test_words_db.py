@@ -13,6 +13,7 @@ from words_db import (
     SUPPORTED_LANGUAGES,
     WORD_DATABASE,
     get_all_words_for_language,
+    get_lesson_seed_vocabulary,
     get_random_word,
 )
 
@@ -309,3 +310,43 @@ class TestGetAllWordsForLanguage:
             assert w["romanized"].isascii(), (
                 f"mal_roman should be ASCII for '{w['english']}': {w['romanized']!r}"
             )
+
+
+class TestLessonSeedVocabulary:
+    """Coverage for the kids-teacher seed pool accessor."""
+
+    def test_returns_expected_categories(self):
+        seed = get_lesson_seed_vocabulary()
+        assert set(seed.keys()) == {
+            "animals",
+            "food",
+            "colors",
+            "body_parts",
+            "numbers",
+            "common_objects",
+            "verbs",
+            "core_phrases",
+        }
+
+    def test_every_seed_entry_has_telugu_and_roman(self):
+        seed = get_lesson_seed_vocabulary()
+        for category, entries in seed.items():
+            assert entries, f"category {category!r} is empty"
+            for entry in entries:
+                assert entry.get("english"), f"missing english in {category}"
+                assert entry.get("telugu"), f"missing telugu in {category}"
+                assert entry.get("tel_roman"), f"missing tel_roman in {category}"
+
+    def test_seed_dicts_are_defensive_copies(self):
+        seed = get_lesson_seed_vocabulary()
+        seed["animals"][0]["english"] = "MUTATED"
+        # Re-reading should give the original value, proving the seed
+        # accessor returns fresh copies and not aliases into WORD_DATABASE.
+        assert get_lesson_seed_vocabulary()["animals"][0]["english"] != "MUTATED"
+
+    def test_core_phrases_are_present(self):
+        seed = get_lesson_seed_vocabulary()
+        english_phrases = {entry["english"] for entry in seed["core_phrases"]}
+        # A handful of canonical core phrases must show up.
+        assert "Good morning" in english_phrases
+        assert "Thank you" in english_phrases

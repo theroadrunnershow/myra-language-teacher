@@ -63,9 +63,33 @@ def test_step1_silly_story_intro(lesson_section: str) -> None:
     assert "story" in lesson_section.lower()
 
 
-def test_step2_teach_word_uses_kukka_example(lesson_section: str) -> None:
-    # The skill prompt teaches "Dog → kukka" as the canonical example.
-    assert "kukka" in lesson_section.lower()
+def test_story_must_contain_seed_words(lesson_section: str) -> None:
+    # The lesson must couple the story to the words being taught — a
+    # generic "tell any silly story then switch to teaching" prompt is
+    # what produced the disconnected bear-flying-into-mud → kukka run.
+    text = lesson_section.lower()
+    assert "story must include every seed word" in text
+
+
+def test_seed_words_drawn_from_starter_vocabulary(lesson_section: str) -> None:
+    # The lesson must point the model at the embedded vocabulary list
+    # rather than letting it fall back to the same hardcoded examples.
+    assert "telugu starter vocabulary" in lesson_section.lower()
+
+
+def test_theme_rotation_present(lesson_section: str) -> None:
+    # Themes must rotate across sessions so words do not repeat.
+    text = lesson_section.lower()
+    assert "rotate themes" in text or "vary the theme" in text or "vary between" in text
+
+
+def test_dynamic_word_expansion_present(lesson_section: str) -> None:
+    # After seed words, the model must expand with 2-3 more words it
+    # picks from the story itself — that is what keeps every lesson
+    # different.
+    text = lesson_section.lower()
+    assert "dynamic word" in text or "dynamic words" in text
+    assert "do not have to be on the starter vocabulary" in text
 
 
 def test_step5_mini_game_present(lesson_section: str) -> None:

@@ -151,7 +151,8 @@ def test_load_profile_appends_language_lesson_to_instructions(tmp_path) -> None:
 
 def test_load_profile_skips_missing_language_lesson(tmp_path) -> None:
     _write(tmp_path / "instructions.txt", "Be kind.")
-    # No language_lesson.txt on disk — loader must not raise or warn.
+    # No language_lesson.txt on disk — loader must not raise or warn,
+    # and it must not append the Telugu seed-vocabulary block either.
     profile = load_profile(str(tmp_path))
     assert profile.instructions.strip() == "Be kind."
 
@@ -160,8 +161,35 @@ def test_load_profile_skips_empty_language_lesson(tmp_path) -> None:
     _write(tmp_path / "instructions.txt", "Be kind.")
     _write(tmp_path / "language_lesson.txt", "   \n\n   \n")
     profile = load_profile(str(tmp_path))
-    # Empty/whitespace-only file must not glue extra blank lines onto instructions.
+    # Empty/whitespace-only file must not glue extra blank lines or a
+    # vocab block onto instructions.
     assert profile.instructions.strip() == "Be kind."
+
+
+def test_load_profile_appends_telugu_seed_vocabulary_after_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "language_lesson.txt",
+        "# Language lesson mode\nTeach Telugu words.",
+    )
+
+    profile = load_profile(str(tmp_path))
+
+    # Vocab block follows the lesson section so the lesson can reference
+    # "the starter vocabulary list further down in this prompt".
+    assert "# Telugu starter vocabulary" in profile.instructions
+    lesson_idx = profile.instructions.index("# Language lesson mode")
+    vocab_idx = profile.instructions.index("# Telugu starter vocabulary")
+    assert lesson_idx < vocab_idx
+    # At least one concrete entry from words_db should be rendered.
+    assert "కుక్క" in profile.instructions  # dog
+    assert "(kukka)" in profile.instructions
+
+
+def test_load_profile_no_vocab_when_lesson_missing(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    profile = load_profile(str(tmp_path))
+    assert "# Telugu starter vocabulary" not in profile.instructions
 
 
 def test_load_profile_orders_lesson_before_memory(tmp_path) -> None:
