@@ -64,11 +64,24 @@ def test_gesture_tool_specs_has_play_and_stop():
     assert names == {PLAY_GESTURE_TOOL_NAME, STOP_MOTION_TOOL_NAME}
 
 
-def test_play_gesture_enum_lists_every_clip():
+def test_play_gesture_enum_lists_only_public_clips():
+    """The enum exposes affect/celebration clips only.
+
+    System-lane clips (e.g. ``cancel``) and safety-lane clips are
+    composer-internal. The model's self-cancel surface is ``stop_motion()``;
+    if ``cancel`` were callable via ``play_gesture`` it would arm the global
+    rate-cap timer and starve the next 4 s of legitimate gestures.
+    """
     library = default_library()
     specs = gesture_tool_specs(library)
     play = next(s for s in specs if s["name"] == PLAY_GESTURE_TOOL_NAME)
-    assert sorted(play["parameters"]["properties"]["name"]["enum"]) == library.names()
+    enum = play["parameters"]["properties"]["name"]["enum"]
+    expected = sorted(
+        name for name in library.names()
+        if library.get(name).lane in {"affect", "celebration"}
+    )
+    assert sorted(enum) == expected
+    assert "cancel" not in enum
 
 
 def test_play_gesture_requires_name():

@@ -125,7 +125,7 @@ def test_maybe_make_motion_stack_returns_none_when_layers_none():
         pass
 
     stack = robot_kids_teacher._maybe_make_motion_stack(
-        _Robot(), layers_spec="none", audio_sample_rate=24000
+        _Robot(), layers_spec="none"
     )
     assert stack is None
 
@@ -138,7 +138,7 @@ def test_maybe_make_motion_stack_returns_stack_when_layers_full():
             return True
 
     stack = robot_kids_teacher._maybe_make_motion_stack(
-        _Robot(), layers_spec="full", audio_sample_rate=24000
+        _Robot(), layers_spec="full"
     )
     assert stack is not None
     # The full stack exposes the gesture tool surface.

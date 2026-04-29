@@ -140,9 +140,12 @@ class FaceOffsetMixer:
         with self._lock:
             self._tracker_target = target
             self._tracker_target_at = now
-            if target is not None:
-                # Update the held-target snapshot so a transition into
-                # robot_speaking locks onto the freshest known subject.
+            # Update the held-target snapshot so a future transition into
+            # robot_speaking locks onto the freshest known subject. While
+            # already in robot_speaking we MUST NOT overwrite — the contract
+            # is "do not re-pick mid-utterance" (plan §6.3.1). The lock-on
+            # snapshot taken in set_gain_state covers entry to that state.
+            if target is not None and self._gain_state != "robot_speaking":
                 self._held_target = target
 
     # ------------------------------------------------------------------
@@ -194,18 +197,26 @@ class FaceOffsetMixer:
         gain = self._gains.get(self._gain_state, 0.0)
 
         # Robot-speaking mode locks onto the snapshot taken when we entered
-        # this state. We do NOT honor "tracker publishes None" here —
-        # holding still is the desired behavior during a robot utterance.
+        # this state. We do NOT honor "tracker publishes None" or staleness
+        # here — holding still is the desired behavior during a robot
+        # utterance.
         if self._gain_state == "robot_speaking":
             target = self._held_target
         else:
             target = self._tracker_target
-            # No subject right now: ease toward zero. We let the slew limiter
-            # do that for us by returning NEUTRAL as the target. After
-            # ``no_target_release_s`` we're effectively at zero anyway.
-            if target is None:
-                _ = self._no_target_release_s  # documented; slew handles it
-                return NEUTRAL
+            # Stale-target release: FaceTracker silently suppresses publishes
+            # when the chosen face's normalized target lands inside its
+            # dead-zone (FR-KID-28). Without a timeout the mixer would slew
+            # to whatever stale off-center value it last saw, leaving the
+            # head visibly cocked while the child is straight ahead. After
+            # ``no_target_release_s`` of silence, treat the target as gone
+            # and ease back to neutral.
+            if (
+                target is not None
+                and self._tracker_target_at is not None
+                and (now - self._tracker_target_at) > self._no_target_release_s
+            ):
+                target = None
 
         if target is None:
             return NEUTRAL

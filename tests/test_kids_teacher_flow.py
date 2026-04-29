@@ -19,6 +19,8 @@ from kids_teacher_flow import (
     KidsTeacherFlowDeps,
     NullRuntimeHooks,
     RecordingRuntimeHooks,
+    _ReviewStoreHooks,
+    _SafetyHooks,
     build_robot_hooks_stub,
     run_kids_teacher_session,
 )
@@ -475,3 +477,86 @@ async def test_safety_allows_safe_child_input():
     assert "Puppies are baby dogs." in assistant_finals
     # No duplicate safe-fallback assistant messages.
     assert assistant_finals.count("Puppies are baby dogs.") == 1
+
+
+# ---------------------------------------------------------------------------
+# Wrapper delegation — motion-director protocol must round-trip
+# ---------------------------------------------------------------------------
+
+
+class _MotionAwareHooks(RecordingRuntimeHooks):
+    """RecordingRuntimeHooks plus the optional motion-director methods."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tool_calls: List[tuple] = []
+        self.speech_started_count = 0
+        self.speech_stopped_count = 0
+
+    def handle_tool_call(self, call_id: str, name: str, arguments: str) -> str:
+        self.tool_calls.append((call_id, name, arguments))
+        return '{"ok": true}'
+
+    def on_speech_started(self) -> None:
+        self.speech_started_count += 1
+
+    def on_speech_stopped(self) -> None:
+        self.speech_stopped_count += 1
+
+    def additional_tool_specs(self) -> list:
+        return [{"type": "function", "name": "play_gesture"}]
+
+    def additional_instructions(self) -> str:
+        return "# gesture vocabulary\n"
+
+
+def test_safety_and_review_wrappers_delegate_motion_director_methods(tmp_path):
+    """Wrappers must forward motion-director protocol methods to the inner hooks.
+
+    Regression for the case where _SafetyHooks / _ReviewStoreHooks only
+    implemented the original 5 protocol methods; the realtime handler then
+    saw ``getattr(hooks, "handle_tool_call", None) is None`` and silently
+    dropped the entire L2 gesture layer + L3 gain switching.
+    """
+    inner = _MotionAwareHooks()
+    config = _config("wrapper-delegation")
+
+    review_store = KidsReviewStore(
+        transcripts_enabled=True,
+        audio_enabled=False,
+        retention_days=30,
+        local_dir=str(tmp_path),
+    )
+    review_wrapped = _ReviewStoreHooks(inner, review_store, config)
+    safety_wrapped = _SafetyHooks(review_wrapped, config)
+
+    # Round-trip every motion-director method through the full wrapper chain.
+    safety_wrapped.handle_tool_call("call-1", "play_gesture", '{"name": "nod"}')
+    safety_wrapped.on_speech_started()
+    safety_wrapped.on_speech_stopped()
+    specs = safety_wrapped.additional_tool_specs()
+    instructions = safety_wrapped.additional_instructions()
+
+    assert inner.tool_calls == [("call-1", "play_gesture", '{"name": "nod"}')]
+    assert inner.speech_started_count == 1
+    assert inner.speech_stopped_count == 1
+    assert specs == [{"type": "function", "name": "play_gesture"}]
+    assert instructions == "# gesture vocabulary\n"
+
+    # getattr(..., None) probes (the realtime handler's pattern) must return
+    # callables, not None, when the inner hook implements them.
+    assert getattr(safety_wrapped, "handle_tool_call", None) is not None
+    assert getattr(safety_wrapped, "additional_tool_specs", None) is not None
+
+
+def test_wrappers_raise_attribute_error_when_inner_lacks_optional_method():
+    """If the inner hook doesn't implement an optional method, the wrappers
+    must surface that as AttributeError so ``getattr(..., None)`` returns None.
+    """
+    inner = RecordingRuntimeHooks()  # no motion-director methods
+    config = _config("no-motion")
+
+    safety_wrapped = _SafetyHooks(inner, config)
+    assert getattr(safety_wrapped, "handle_tool_call", None) is None
+    assert getattr(safety_wrapped, "on_speech_started", None) is None
+    assert getattr(safety_wrapped, "additional_tool_specs", None) is None

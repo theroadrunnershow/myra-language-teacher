@@ -222,17 +222,76 @@ def test_robot_speaking_holds_target_when_tracker_publishes_none():
 
 
 def test_robot_speaking_holds_target_when_tracker_re_publishes_different_target():
-    """While the robot is talking we should NOT swing to a new subject."""
-    mixer, tracker, _ = _make()
+    """While the robot is talking we should NOT swing to a new subject.
+
+    Critically: the fake clock MUST advance between the second publish and the
+    later ticks. A frozen clock makes the slew limiter early-return at every
+    tick (dt == 0), which masked the bug where ``_on_target`` overwrote
+    ``_held_target`` mid-utterance.
+    """
+    clock = _FakeClock()
+    mixer, tracker, _ = _make(clock=clock)
     tracker.publish((0.5, 0.0))
     mixer.set_gain_state("robot_speaking")
     expected_yaw = mixer.current_offset().head_yaw
     # A new subject appears — we ignore it during robot speech.
     tracker.publish((-1.0, 0.0))
-    # Many ticks later the offset is still roughly the same.
+    # Advance time so the slew limiter actually runs on subsequent ticks.
+    # 2 s is well beyond the time it would take a 60°/s slew to swing from
+    # +4° (gain 0.4 × 0.5 × 20°) to -8° (gain 0.4 × -1.0 × 20°), so the bug
+    # would visibly land here if the held-target overwrite were happening.
     for _ in range(20):
+        clock.advance(0.1)
         mixer.current_offset()
     assert mixer.current_offset().head_yaw == pytest.approx(expected_yaw, abs=1e-9)
+
+
+def test_stale_tracker_target_releases_to_neutral_after_no_target_release_s():
+    """If the tracker stops publishing (e.g. dead-zone entry suppresses
+    publishes), the mixer must release the off-center target after
+    ``no_target_release_s`` and ease back toward neutral.
+
+    Regression for the case where ``FaceTracker._tick`` silently returns
+    without publishing when the target is inside its dead-zone — leaving
+    the mixer's stored target stuck at the previous off-center value.
+    """
+    clock = _FakeClock()
+    mixer, tracker, _ = _make(clock=clock, no_target_release_s=0.6)
+
+    # Settle the displayed offset on the off-center target by simulating
+    # ~3 Hz publishes for a stretch (each well within the release window).
+    for _ in range(2):
+        tracker.publish((0.5, 0.0))
+        for _ in range(10):
+            clock.advance(0.025)
+            mixer.current_offset()
+    settled = mixer.current_offset()
+    assert settled.head_yaw > 0  # confirm we did track it
+
+    # Tracker goes silent (dead-zone suppression). Advance past the release
+    # window so subsequent ticks see the target as stale and ease to neutral.
+    for _ in range(60):
+        clock.advance(0.05)
+        mixer.current_offset()
+    assert mixer.current_offset().head_yaw == pytest.approx(0.0, abs=1e-6)
+
+
+def test_robot_speaking_ignores_stale_tracker_target():
+    """During robot_speaking the held snapshot is authoritative; staleness
+    of ``_tracker_target`` must not pull the head toward neutral."""
+    clock = _FakeClock()
+    mixer, tracker, _ = _make(clock=clock, no_target_release_s=0.6)
+    tracker.publish((0.5, 0.0))
+    mixer.set_gain_state("robot_speaking")
+    expected = mixer.current_offset().head_yaw
+    # Tracker goes silent for longer than the release window.
+    clock.advance(5.0)
+    for _ in range(20):
+        clock.advance(0.05)
+        mixer.current_offset()
+    # Held target still drives the offset — staleness check skipped in
+    # robot_speaking.
+    assert mixer.current_offset().head_yaw == pytest.approx(expected, abs=1e-9)
 
 
 def test_set_robot_speaking_snaps_held_to_latest_target():
@@ -266,7 +325,10 @@ def test_idle_state_follows_new_target_after_publish():
     tracker.publish((0.2, 0.0))
     mixer.current_offset()
     tracker.publish((-0.2, 0.0))
-    clock.advance(2.0)
+    # Slew @ 60°/s covers ±2.8° (0.2 × 20° × 0.7 idle gain) in well under
+    # 100ms. Stay inside the no_target_release_s window (0.6s default) so the
+    # staleness check doesn't release the target before the assertion.
+    clock.advance(0.1)
     offset = mixer.current_offset()
     assert offset.head_yaw < 0
 
@@ -307,8 +369,14 @@ def test_slew_rate_caps_angular_velocity():
     assert intermediate < MAX_PAN_RAD
     assert intermediate > -MAX_PAN_RAD
 
-    # Eventually catches up.
-    clock.advance(2.0)
+    # Eventually catches up. Re-publish each frame so the target stays fresh
+    # while the slew (60°/s, must cover ~40°) takes ~0.7s to converge — a
+    # one-shot 2s advance would exceed no_target_release_s and ease back to
+    # neutral instead.
+    for _ in range(50):
+        tracker.publish((1.0, 0.0))
+        clock.advance(0.02)
+        mixer.current_offset()
     final = mixer.current_offset().head_yaw
     assert final == pytest.approx(MAX_PAN_RAD)
 

@@ -506,6 +506,13 @@ class _ReviewStoreHooks:
                     "[kids_teacher_flow] review_store.record_audio: %s", exc
                 )
 
+    def __getattr__(self, name: str) -> Any:
+        # Forward any non-overridden attribute (e.g. motion-director protocol
+        # methods like ``handle_tool_call`` / ``additional_tool_specs``) to the
+        # inner hooks. Raises AttributeError naturally if the inner doesn't
+        # define it, so ``getattr(hooks, name, None)`` callers see ``None``.
+        return getattr(self._inner, name)
+
 
 def _wrap_hooks_with_review(
     inner: KidsTeacherRuntimeHooks,
@@ -649,3 +656,10 @@ class _SafetyHooks:
             language=language,
         )
         self._inner.publish_transcript(safe_event)
+
+    def __getattr__(self, name: str) -> Any:
+        # Forward any non-overridden attribute (e.g. motion-director protocol
+        # methods like ``handle_tool_call`` / ``additional_tool_specs``) to the
+        # inner hooks. Raises AttributeError naturally if the inner doesn't
+        # define it, so ``getattr(hooks, name, None)`` callers see ``None``.
+        return getattr(self._inner, name)

@@ -95,14 +95,10 @@ class AudioWobbler:
     def __init__(
         self,
         *,
-        sample_rate: int = 24000,
         clock: Callable[[], float] = time.monotonic,
         oscillators=_DEFAULT_OSCILLATORS,
         reference_rms: float = _REFERENCE_RMS,
     ) -> None:
-        if sample_rate <= 0:
-            raise ValueError(f"sample_rate must be positive, got {sample_rate!r}")
-        self._sample_rate = sample_rate
         self._clock = clock
         self._oscillators = tuple(oscillators)
         self._reference_rms = reference_rms

@@ -41,13 +41,6 @@ def _loud_chunk(n: int = 480, amplitude: int = 12000) -> bytes:
 # ---------------------------------------------------------------------------
 
 
-def test_constructor_rejects_bad_sample_rate():
-    with pytest.raises(ValueError):
-        AudioWobbler(sample_rate=0)
-    with pytest.raises(ValueError):
-        AudioWobbler(sample_rate=-1)
-
-
 def test_initial_offset_is_neutral():
     w = AudioWobbler(clock=_FakeClock())
     assert w.current_offset() == NEUTRAL

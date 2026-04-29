@@ -30,6 +30,9 @@ STOP_MOTION_TOOL_NAME = "stop_motion"
 MOTION_TOOL_NAMES = (PLAY_GESTURE_TOOL_NAME, STOP_MOTION_TOOL_NAME)
 
 
+_PUBLIC_LANES = frozenset({"affect", "celebration"})
+
+
 def gesture_tool_specs(library: ChoreographyLibrary) -> List[dict]:
     """Build OpenAI Realtime ``function`` tool specs for the L2 vocabulary.
 
@@ -37,7 +40,16 @@ def gesture_tool_specs(library: ChoreographyLibrary) -> List[dict]:
     only request gestures the library actually knows about — the scheduler
     enforces this again at dispatch time, but pinning the enum at the API
     boundary is cheap insurance.
+
+    System- and safety-lane clips (e.g. ``cancel``) are excluded — those are
+    composer-internal and have their own LLM surface (``stop_motion``). If
+    the model called ``play_gesture(name="cancel")`` it would arm the global
+    rate-cap timer and block the next legitimate L2 gesture for ~4 s.
     """
+    public_names = [
+        name for name in library.names()
+        if (clip := library.get(name)) is not None and clip.lane in _PUBLIC_LANES
+    ]
     return [
         {
             "type": "function",
@@ -52,7 +64,7 @@ def gesture_tool_specs(library: ChoreographyLibrary) -> List[dict]:
                 "properties": {
                     "name": {
                         "type": "string",
-                        "enum": library.names(),
+                        "enum": public_names,
                         "description": "Name of the gesture clip to play.",
                     }
                 },

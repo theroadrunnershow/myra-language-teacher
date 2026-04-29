@@ -77,7 +77,6 @@ def parse_layers(spec: Optional[str]) -> FrozenSet[str]:
 class MotionStackConfig:
     layers: FrozenSet[str] = ALL_LAYERS
     tick_hz: float = 30.0
-    audio_sample_rate: int = 24000
 
 
 class MotionStack:
@@ -106,7 +105,7 @@ class MotionStack:
 
         self._wobbler: Optional[AudioWobbler] = None
         if LAYER_WOBBLE in config.layers:
-            self._wobbler = AudioWobbler(sample_rate=config.audio_sample_rate)
+            self._wobbler = AudioWobbler()
             self._composer.set_wobble_source(self._wobbler.current_offset)
 
         self._scheduler: Optional[GestureScheduler] = None

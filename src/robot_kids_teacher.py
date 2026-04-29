@@ -135,7 +135,7 @@ def _resolve_motion_layers_spec(cli_value: Optional[str]) -> Optional[str]:
 
 
 def _maybe_make_motion_stack(
-    robot_controller: Any, *, layers_spec: Optional[str], audio_sample_rate: int
+    robot_controller: Any, *, layers_spec: Optional[str]
 ) -> Optional[Any]:
     """Construct a :class:`MotionStack` unless layers spec is ``"none"``."""
     from motion.stack import MotionStack, MotionStackConfig, parse_layers
@@ -153,9 +153,7 @@ def _maybe_make_motion_stack(
     )
     return MotionStack(
         robot_controller=robot_controller,
-        config=MotionStackConfig(
-            layers=layers, audio_sample_rate=audio_sample_rate
-        ),
+        config=MotionStackConfig(layers=layers),
     )
 
 
@@ -246,7 +244,6 @@ async def _run_session_async(
     motion_stack = _maybe_make_motion_stack(
         robot_controller,
         layers_spec=_resolve_motion_layers_spec(motion_layers_spec),
-        audio_sample_rate=24000,
     )
     hooks = build_robot_hooks(robot_controller, motion_stack=motion_stack)
     backend_factory = _build_backend_factory(provider, camera_worker)
