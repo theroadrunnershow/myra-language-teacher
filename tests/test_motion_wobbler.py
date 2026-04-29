@@ -88,17 +88,10 @@ def test_loud_audio_drives_offset_away_from_neutral():
         w.feed(_loud_chunk())
         clock.advance(0.05)
     offset = w.current_offset()
-    # At least one channel should be away from zero.
+    # At least one driven channel should be away from zero.
     assert any(
         abs(getattr(offset, ch)) > 1e-4
-        for ch in (
-            "head_pitch",
-            "head_yaw",
-            "head_roll",
-            "head_z",
-            "antenna_left",
-            "antenna_right",
-        )
+        for ch in ("head_yaw", "antenna_left", "antenna_right")
     )
 
 
@@ -129,26 +122,17 @@ def test_reset_zeroes_envelope_immediately():
 # ---------------------------------------------------------------------------
 
 
-def test_default_oscillators_drive_at_least_six_channels():
+def test_default_oscillators_drive_head_yaw_and_antennas():
     """Smoke: prove every default-driven channel sees motion at some sample."""
     clock = _FakeClock()
     w = AudioWobbler(clock=clock)
     for _ in range(20):
         w.feed(_loud_chunk())
         clock.advance(0.05)
-    seen = {
-        ch: False
-        for ch in (
-            "head_pitch",
-            "head_yaw",
-            "head_roll",
-            "head_z",
-            "antenna_left",
-            "antenna_right",
-        )
-    }
-    # Sample at many points so we don't miss a zero crossing.
-    for _ in range(40):
+    seen = {ch: False for ch in ("head_yaw", "antenna_left", "antenna_right")}
+    # Sample over a few seconds — the slow oscillators need time to swing
+    # through a non-zero phase even with a fully-driven envelope.
+    for _ in range(200):
         offset = w.current_offset()
         for ch in seen:
             if abs(getattr(offset, ch)) > 1e-6:
@@ -160,7 +144,7 @@ def test_default_oscillators_drive_at_least_six_channels():
 
 
 def test_unmoved_channels_stay_zero():
-    """``head_x`` / ``head_y`` are not driven by the default oscillators."""
+    """Only ``head_yaw`` + antennas are driven by the default oscillators."""
     clock = _FakeClock()
     w = AudioWobbler(clock=clock)
     for _ in range(20):
@@ -168,8 +152,11 @@ def test_unmoved_channels_stay_zero():
         clock.advance(0.05)
     for _ in range(40):
         offset = w.current_offset()
+        assert offset.head_pitch == 0.0
+        assert offset.head_roll == 0.0
         assert offset.head_x == 0.0
         assert offset.head_y == 0.0
+        assert offset.head_z == 0.0
         clock.advance(0.02)
 
 
@@ -188,15 +175,9 @@ def test_offsets_stay_within_oscillator_amplitudes():
         w.feed(huge)
         clock.advance(0.05)
     # Sample widely.
-    max_per_channel = {
-        "head_pitch": 0.0,
-        "head_yaw": 0.0,
-        "head_roll": 0.0,
-        "head_z": 0.0,
-        "antenna_left": 0.0,
-        "antenna_right": 0.0,
-    }
-    for _ in range(200):
+    max_per_channel = {"head_yaw": 0.0, "antenna_left": 0.0, "antenna_right": 0.0}
+    # Sub-Hz oscillators need a multi-second sweep to hit their peaks.
+    for _ in range(2000):
         offset = w.current_offset()
         for ch in max_per_channel:
             max_per_channel[ch] = max(max_per_channel[ch], abs(getattr(offset, ch)))
@@ -205,10 +186,7 @@ def test_offsets_stay_within_oscillator_amplitudes():
 
     # Bounds drawn from the default oscillator amplitudes (with a tiny
     # slack for floating-point + interaction with the envelope ceiling).
-    assert max_per_channel["head_pitch"] <= math.radians(3.0) * 1.05
-    assert max_per_channel["head_yaw"] <= math.radians(2.0) * 1.05
-    assert max_per_channel["head_roll"] <= math.radians(1.0) * 1.05
-    assert max_per_channel["head_z"] <= 0.0025 * 1.05
+    assert max_per_channel["head_yaw"] <= math.radians(4.0) * 1.05
     assert max_per_channel["antenna_left"] <= math.radians(8.0) * 1.05
     assert max_per_channel["antenna_right"] <= math.radians(8.0) * 1.05
 

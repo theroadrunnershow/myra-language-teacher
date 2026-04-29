@@ -19,14 +19,14 @@ barge-in (plan §7 rule 4).
 
 Oscillators
 -----------
-Six independent sinusoids at slightly detuned frequencies, one per output
-channel (head pitch / yaw / roll / z, antenna left / right). Each is
-driven by the wall clock so motion stays continuous across feeds. The
-envelope multiplies the amplitude of every oscillator uniformly — quiet
-audio = small wobble, loud audio = full-amplitude wobble.
+Three slow sinusoids: a head-yaw "no-no" shake plus antiphase antenna
+flaps. Each is driven by the wall clock so motion stays continuous
+across feeds. The envelope multiplies the amplitude of every oscillator
+uniformly — quiet audio = small motion, loud audio = full-amplitude.
 
-Per-channel amplitudes are conservative; the composer also has its own
-final-output safety cap.
+Frequencies are sub-Hz so the result reads as a deliberate slow shake
+suitable for a young child, not a jittery wobble. Per-channel amplitudes
+are conservative; the composer also has its own final-output safety cap.
 """
 
 from __future__ import annotations
@@ -64,17 +64,15 @@ class _Oscillator:
     phase_offset: float = 0.0
 
 
-# Six oscillators, slightly detuned so the channels never line up into a
-# single big "lurch". Amplitudes are conservative — caps in plan §9.
+# Slow head shake + ear shake. Sub-Hz frequencies so the motion reads as
+# deliberate rather than jittery. Amplitudes are conservative — caps in
+# plan §9.
 _DEFAULT_OSCILLATORS = (
-    _Oscillator("head_pitch", frequency_hz=2.0, peak_amplitude=3.0 * _DEG),
-    _Oscillator("head_yaw", frequency_hz=1.1, peak_amplitude=2.0 * _DEG, phase_offset=math.pi / 3),
-    _Oscillator("head_roll", frequency_hz=1.3, peak_amplitude=1.0 * _DEG, phase_offset=math.pi / 5),
-    _Oscillator("head_z", frequency_hz=2.4, peak_amplitude=0.0025, phase_offset=math.pi / 7),
-    _Oscillator("antenna_left", frequency_hz=1.6, peak_amplitude=8.0 * _DEG),
+    _Oscillator("head_yaw", frequency_hz=0.35, peak_amplitude=4.0 * _DEG),
+    _Oscillator("antenna_left", frequency_hz=0.5, peak_amplitude=8.0 * _DEG),
     _Oscillator(
         "antenna_right",
-        frequency_hz=1.7,
+        frequency_hz=0.5,
         peak_amplitude=8.0 * _DEG,
         phase_offset=math.pi,  # antiphase with left so they alternate
     ),
