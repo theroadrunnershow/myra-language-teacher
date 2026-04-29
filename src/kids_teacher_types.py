@@ -125,6 +125,10 @@ class KidsTeacherProfile:
     voice: str
     allowed_tools: tuple[str, ...]
     locked: bool = True
+    # BCP-47 locale fed into Gemini Live's SpeechConfig.language_code.
+    # ``en-IN`` makes English carry an Indian accent and renders code-
+    # switched Telugu/Hindi words with correct retroflex phonemes.
+    language_code: str = "en-IN"
 
 
 @dataclass(frozen=True)

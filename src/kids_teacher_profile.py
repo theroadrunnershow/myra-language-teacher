@@ -23,12 +23,14 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir))
 DEFAULT_PROFILE_DIR = os.path.join(_REPO_ROOT, "profiles", "kids_teacher")
 
 DEFAULT_VOICE = "alloy"
+DEFAULT_LANGUAGE_CODE = "en-IN"
 PROFILE_NAME = "kids_teacher"
 
 _INSTRUCTIONS_FILENAME = "instructions.txt"
 _VOICE_FILENAME = "voice.txt"
 _TOOLS_FILENAME = "tools.txt"
 _LANGUAGE_LESSON_FILENAME = "language_lesson.txt"
+_LANGUAGE_CODE_FILENAME = "language_code.txt"
 
 _VOCAB_HEADING = "# Telugu starter vocabulary (seed pool for lesson stories)"
 _VOCAB_INTRO = (
@@ -195,12 +197,26 @@ def load_profile(
     tools_raw = _read_text_file(tools_path)
     allowed_tools = _parse_tools(tools_raw) if tools_raw is not None else ()
 
+    language_code_path = os.path.join(base_dir, _LANGUAGE_CODE_FILENAME)
+    language_code_raw = _read_text_file(language_code_path)
+    if language_code_raw is None:
+        language_code = DEFAULT_LANGUAGE_CODE
+    else:
+        language_code = (
+            language_code_raw.strip().splitlines()[0].strip()
+            if language_code_raw.strip()
+            else ""
+        )
+        if not language_code:
+            language_code = DEFAULT_LANGUAGE_CODE
+
     return KidsTeacherProfile(
         name=PROFILE_NAME,
         instructions=instructions,
         voice=voice,
         allowed_tools=allowed_tools,
         locked=locked,
+        language_code=language_code,
     )
 
 

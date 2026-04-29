@@ -38,6 +38,7 @@ def _make_profile(
     tools: tuple[str, ...] = (),
     voice: str = "alloy",
     instructions: str = "Be a warm preschool teacher.",
+    language_code: str = "en-IN",
 ) -> KidsTeacherProfile:
     return KidsTeacherProfile(
         name="kids_teacher",
@@ -45,6 +46,7 @@ def _make_profile(
         voice=voice,
         allowed_tools=tools,
         locked=True,
+        language_code=language_code,
     )
 
 
@@ -104,10 +106,17 @@ def test_build_session_payload_includes_profile_fields_and_vad() -> None:
 
     assert payload["instructions"] == "Only safe topics."
     assert payload["voice"] == "verse"
+    assert payload["language_code"] == "en-IN"
     assert payload["modalities"] == ["audio", "text"]
     assert payload["input_audio_transcription"] == {"model": "gpt-4o-mini-transcribe"}
     assert payload["turn_detection"] == {"type": "server_vad"}
     assert payload["tool_choice"] == "auto"
+
+
+def test_build_session_payload_propagates_custom_language_code() -> None:
+    profile = _make_profile(language_code="te-IN")
+    payload = build_session_payload(_make_config(profile))
+    assert payload["language_code"] == "te-IN"
 
 
 def test_build_session_payload_empty_tools_when_allowlist_empty() -> None:

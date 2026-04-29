@@ -115,13 +115,23 @@ def test_map_openai_voice_case_insensitive() -> None:
 
 
 def test_map_openai_voice_unknown_falls_back_to_default() -> None:
-    # Any unmapped name → Kore (the default child-friendly voice).
-    assert map_openai_voice_to_gemini("some-new-openai-voice") == "Kore"
+    # Any unmapped name → the default warm voice.
+    assert map_openai_voice_to_gemini("some-new-openai-voice") == "Sulafat"
 
 
 def test_map_openai_voice_empty_or_none_uses_default() -> None:
-    assert map_openai_voice_to_gemini(None) == "Kore"
-    assert map_openai_voice_to_gemini("") == "Kore"
+    assert map_openai_voice_to_gemini(None) == "Sulafat"
+    assert map_openai_voice_to_gemini("") == "Sulafat"
+
+
+def test_map_direct_gemini_voice_passthrough_for_indian_audition() -> None:
+    # Direct Gemini voice names (case-insensitive) must pass through —
+    # Sulafat / Aoede / Vindemiatrix are the candidates auditioned for
+    # Indian-English / Telugu pronunciation.
+    assert map_openai_voice_to_gemini("Sulafat") == "Sulafat"
+    assert map_openai_voice_to_gemini("sulafat") == "Sulafat"
+    assert map_openai_voice_to_gemini("Aoede") == "Aoede"
+    assert map_openai_voice_to_gemini("VINDEMIATRIX") == "Vindemiatrix"
 
 
 # ---------------------------------------------------------------------------
@@ -167,6 +177,24 @@ def test_build_live_config_defaults_to_audio_when_modalities_missing() -> None:
     payload = {"instructions": "hi", "voice": "alloy"}
     config = build_gemini_live_config(payload, _FakeTypes)
     assert config.response_modalities == ["AUDIO"]
+
+
+def test_build_live_config_propagates_language_code_into_speech_config() -> None:
+    # en-IN locale is what makes English carry an Indian accent and
+    # what renders code-switched Telugu words with retroflex phonemes
+    # ("koti" → "ko-thi" instead of "ko-di").
+    payload = {"instructions": "hi", "voice": "Sulafat", "language_code": "en-IN"}
+    config = build_gemini_live_config(payload, _FakeTypes)
+    assert config.speech_config.language_code == "en-IN"
+    assert config.speech_config.voice_config.prebuilt_voice_config.voice_name == "Sulafat"
+
+
+def test_build_live_config_omits_language_code_when_unset() -> None:
+    # Backwards compat: if no language_code is supplied, SpeechConfig
+    # is built without the field (Gemini's default locale handling).
+    payload = {"instructions": "hi", "voice": "alloy"}
+    config = build_gemini_live_config(payload, _FakeTypes)
+    assert not hasattr(config.speech_config, "language_code")
 
 
 def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() -> None:

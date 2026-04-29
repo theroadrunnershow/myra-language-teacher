@@ -144,6 +144,7 @@ def build_session_payload(
     return {
         "instructions": profile.instructions,
         "voice": profile.voice,
+        "language_code": profile.language_code,
         "modalities": list(modalities),
         "input_audio_transcription": {"model": _INPUT_TRANSCRIPTION_MODEL},
         "turn_detection": {"type": "server_vad"},

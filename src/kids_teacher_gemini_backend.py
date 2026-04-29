@@ -64,7 +64,12 @@ GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 # explicit; unknown voices fall back to ``_DEFAULT_GEMINI_VOICE``.
 # ``Kore`` is a warm female voice recommended for child-facing use per
 # the migration research.
-_DEFAULT_GEMINI_VOICE = "Kore"
+#
+# Direct Gemini voice names are also accepted (case-insensitive) so the
+# kids-teacher profile can request a voice that has no OpenAI alias —
+# notably ``Sulafat``, ``Aoede``, and ``Vindemiatrix``, which we audition
+# for Indian-English / Telugu pronunciation.
+_DEFAULT_GEMINI_VOICE = "Sulafat"
 _OPENAI_TO_GEMINI_VOICE: dict[str, str] = {
     "alloy": "Kore",
     "echo": "Puck",
@@ -74,6 +79,14 @@ _OPENAI_TO_GEMINI_VOICE: dict[str, str] = {
     "coral": "Aoede",
     "sage": "Kore",
     "verse": "Puck",
+    # Direct Gemini voice passthroughs (lowercase keys, canonical-cased values).
+    "kore": "Kore",
+    "puck": "Puck",
+    "charon": "Charon",
+    "leda": "Leda",
+    "aoede": "Aoede",
+    "sulafat": "Sulafat",
+    "vindemiatrix": "Vindemiatrix",
 }
 
 _SET_ABOUT_TOOL_NAME = "set_about"
@@ -369,13 +382,17 @@ def build_gemini_live_config(
     response_modalities = [m.upper() for m in modalities_raw if m.lower() == "audio"] or ["AUDIO"]
     tool_supports_non_blocking = _gemini_model_supports_non_blocking_tools(model)
 
-    speech_config = types_module.SpeechConfig(
-        voice_config=types_module.VoiceConfig(
+    speech_config_kwargs: dict[str, Any] = {
+        "voice_config": types_module.VoiceConfig(
             prebuilt_voice_config=types_module.PrebuiltVoiceConfig(
                 voice_name=voice_name,
             ),
         ),
-    )
+    }
+    language_code = session_payload.get("language_code")
+    if language_code:
+        speech_config_kwargs["language_code"] = language_code
+    speech_config = types_module.SpeechConfig(**speech_config_kwargs)
 
     return types_module.LiveConnectConfig(
         response_modalities=response_modalities,

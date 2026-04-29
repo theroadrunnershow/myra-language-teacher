@@ -7,6 +7,7 @@ import os
 import pytest
 
 from kids_teacher_profile import (
+    DEFAULT_LANGUAGE_CODE,
     DEFAULT_PROFILE_DIR,
     DEFAULT_VOICE,
     PROFILE_NAME,
@@ -26,8 +27,12 @@ def test_load_profile_happy_path_from_real_profile_dir() -> None:
 
     assert profile.name == PROFILE_NAME
     assert profile.instructions.strip() != ""
-    # voice.txt on disk currently says "alloy"
-    assert profile.voice == "alloy"
+    # voice.txt on disk currently says "Sulafat" (warm Gemini voice
+    # auditioned for Indian-English / Telugu pronunciation).
+    assert profile.voice == "Sulafat"
+    # language_code.txt on disk says "en-IN" — Indian-English locale so
+    # code-switched Telugu words render with retroflex phonemes.
+    assert profile.language_code == "en-IN"
     # V1 ships with no tools allowlisted
     assert profile.allowed_tools == ()
     # locked is True by default
@@ -237,3 +242,24 @@ def test_profile_files_exist_on_disk() -> None:
     assert os.path.exists(os.path.join(DEFAULT_PROFILE_DIR, "instructions.txt"))
     assert os.path.exists(os.path.join(DEFAULT_PROFILE_DIR, "tools.txt"))
     assert os.path.exists(os.path.join(DEFAULT_PROFILE_DIR, "voice.txt"))
+    assert os.path.exists(os.path.join(DEFAULT_PROFILE_DIR, "language_code.txt"))
+
+
+def test_load_profile_missing_language_code_falls_back_to_default(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    profile = load_profile(str(tmp_path))
+    assert profile.language_code == DEFAULT_LANGUAGE_CODE
+
+
+def test_load_profile_empty_language_code_falls_back_to_default(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(tmp_path / "language_code.txt", "   \n\n   \n")
+    profile = load_profile(str(tmp_path))
+    assert profile.language_code == DEFAULT_LANGUAGE_CODE
+
+
+def test_load_profile_reads_language_code_first_non_empty_line(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(tmp_path / "language_code.txt", "te-IN\n# fallback\n")
+    profile = load_profile(str(tmp_path))
+    assert profile.language_code == "te-IN"
