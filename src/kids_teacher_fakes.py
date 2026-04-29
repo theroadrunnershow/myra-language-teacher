@@ -22,7 +22,8 @@ class FakeRealtimeBackend:
 
     Pass a list of events to emit in order. Tests can also push additional
     events mid-run via :meth:`push_event`. All side-effect calls
-    (send_audio, send_text, cancel_response, close) are recorded.
+    (send_audio, send_text, cancel_response, send_tool_response, close)
+    are recorded.
     """
 
     def __init__(
@@ -44,6 +45,7 @@ class FakeRealtimeBackend:
         self.text_messages: List[str] = []
         self.cancel_calls: int = 0
         self.close_calls: int = 0
+        self.tool_responses: List[tuple] = []
 
     async def connect(self, session_payload: dict) -> None:
         self.connect_calls.append(session_payload)
@@ -65,6 +67,9 @@ class FakeRealtimeBackend:
 
     async def cancel_response(self) -> None:
         self.cancel_calls += 1
+
+    async def send_tool_response(self, call_id: str, output: str) -> None:
+        self.tool_responses.append((call_id, output))
 
     async def close(self) -> None:
         self.close_calls += 1

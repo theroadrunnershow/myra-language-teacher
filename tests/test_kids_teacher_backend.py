@@ -358,6 +358,125 @@ def test_normalize_response_done() -> None:
     }
 
 
+def test_normalize_function_call_arguments_done() -> None:
+    event = OpenAIRealtimeBackend._normalize_event(
+        {
+            "type": "response.function_call_arguments.done",
+            "call_id": "call_abc",
+            "name": "play_gesture",
+            "arguments": '{"name": "nod_encourage"}',
+        }
+    )
+    assert event == {
+        "type": "tool.call",
+        "call_id": "call_abc",
+        "name": "play_gesture",
+        "arguments": '{"name": "nod_encourage"}',
+    }
+
+
+def test_normalize_function_call_arguments_done_with_missing_fields() -> None:
+    """Missing fields should normalize to empty strings, not None or KeyError."""
+    event = OpenAIRealtimeBackend._normalize_event(
+        {"type": "response.function_call_arguments.done"}
+    )
+    assert event == {
+        "type": "tool.call",
+        "call_id": "",
+        "name": "",
+        "arguments": "",
+    }
+
+
+# ---------------------------------------------------------------------------
+# additional_tools — motion-director tool injection
+# ---------------------------------------------------------------------------
+
+
+def test_build_session_payload_appends_additional_tools() -> None:
+    profile = _make_profile(tools=("legacy_tool",))
+    extra = [
+        {
+            "type": "function",
+            "name": "play_gesture",
+            "description": "...",
+            "parameters": {"type": "object"},
+        }
+    ]
+    payload = build_session_payload(_make_config(profile), additional_tools=extra)
+    names = [t["name"] for t in payload["tools"]]
+    assert names == ["legacy_tool", "play_gesture"]
+
+
+def test_build_session_payload_does_not_duplicate_overlapping_tool_names() -> None:
+    profile = _make_profile(tools=("play_gesture",))
+    extra = [
+        {"type": "function", "name": "play_gesture", "description": "x"},
+        {"type": "function", "name": "stop_motion", "description": "y"},
+    ]
+    payload = build_session_payload(_make_config(profile), additional_tools=extra)
+    names = [t["name"] for t in payload["tools"]]
+    assert names == ["play_gesture", "stop_motion"]
+
+
+# ---------------------------------------------------------------------------
+# send_tool_response — function_call_output dispatch
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_send_tool_response_creates_function_call_output_item() -> None:
+    """Backend must ack tool calls with the matching call_id + string output."""
+    items_created: list[dict] = []
+
+    class _StubItem:
+        async def create(self, *, item: dict) -> None:
+            items_created.append(item)
+
+    class _StubConversation:
+        def __init__(self) -> None:
+            self.item = _StubItem()
+
+    backend = OpenAIRealtimeBackend(client_factory=lambda: object())
+    backend._connection = SimpleNamespace(conversation=_StubConversation())  # type: ignore[attr-defined]
+
+    await backend.send_tool_response("call_abc", '{"ok": true}')
+
+    assert items_created == [
+        {
+            "type": "function_call_output",
+            "call_id": "call_abc",
+            "output": '{"ok": true}',
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_send_tool_response_no_op_without_connection() -> None:
+    backend = OpenAIRealtimeBackend(client_factory=lambda: object())
+    # Must not raise even though _connection is None.
+    await backend.send_tool_response("call_abc", "{}")
+
+
+@pytest.mark.asyncio
+async def test_send_tool_response_no_op_when_call_id_blank() -> None:
+    items_created: list[dict] = []
+
+    class _StubItem:
+        async def create(self, *, item: dict) -> None:
+            items_created.append(item)
+
+    backend = OpenAIRealtimeBackend(client_factory=lambda: object())
+    backend._connection = SimpleNamespace(  # type: ignore[attr-defined]
+        conversation=SimpleNamespace(item=_StubItem())
+    )
+
+    await backend.send_tool_response("", "{}")
+
+    # Blank call_id is dropped without hitting the SDK.
+    assert items_created == []
+
+
 def test_normalize_unknown_event_returns_none() -> None:
     # Acknowledgements and other unhandled events are silently dropped.
     assert OpenAIRealtimeBackend._normalize_event({"type": "session.created"}) is None

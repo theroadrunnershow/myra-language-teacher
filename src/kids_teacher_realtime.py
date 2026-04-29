@@ -92,7 +92,13 @@ class KidsTeacherRealtimeHandler:
         """Connect the backend and move the session into LISTENING state."""
         if self._started:
             return
-        payload = build_session_payload(self._config)
+        extra_tools = self._collect_additional_tool_specs()
+        extra_instructions = self._collect_additional_instructions()
+        payload = build_session_payload(
+            self._config,
+            additional_tools=extra_tools,
+            additional_instructions=extra_instructions,
+        )
         try:
             await self._backend.connect(payload)
         except Exception as exc:
@@ -202,9 +208,9 @@ class KidsTeacherRealtimeHandler:
         if event_type == "input.speech_started":
             await self._on_speech_started()
         elif event_type == "input.speech_stopped":
-            # VAD end-of-speech signal — no action needed; the final
-            # transcript event drives downstream behavior.
-            pass
+            # VAD end-of-speech signal — no action needed for the handler;
+            # forward the edge so motion-director hooks can update gaze gain.
+            self._notify_hook("on_speech_stopped")
         elif event_type == "input_transcript.delta":
             await self._on_input_delta(event)
         elif event_type == "input_transcript.final":
@@ -215,6 +221,8 @@ class KidsTeacherRealtimeHandler:
             self._on_assistant_final(event)
         elif event_type == "audio.chunk":
             self._on_audio_chunk(event)
+        elif event_type == "tool.call":
+            await self._on_tool_call(event)
         elif event_type == "response.done":
             self._on_response_done()
         elif event_type == "session.reconnecting":
@@ -230,6 +238,7 @@ class KidsTeacherRealtimeHandler:
         """Earliest barge-in signal from server-side VAD."""
         if self._assistant_active:
             await self._cancel_active_response(reason="input.speech_started")
+        self._notify_hook("on_speech_started")
 
     async def _on_input_delta(self, event: dict) -> None:
         text = event.get("text", "") or ""
@@ -301,6 +310,39 @@ class KidsTeacherRealtimeHandler:
         if not self._speaking_published:
             self._speaking_published = True
             self._publish_status(SessionStatus.SPEAKING)
+
+    async def _on_tool_call(self, event: dict) -> None:
+        """Route a function tool call to the runtime hook and ack the model.
+
+        The hook runs synchronously on the event loop; gesture dispatch is
+        non-blocking (just a deque + composer.play_clip). If the hook
+        returns a string we ship it back as ``function_call_output`` so
+        the model can continue its turn without stalling.
+        """
+        handler = getattr(self._hooks, "handle_tool_call", None)
+        if handler is None:
+            logger.debug(
+                "[kids_teacher_realtime] tool.call ignored: hooks expose no handle_tool_call"
+            )
+            return
+        call_id = str(event.get("call_id") or "")
+        name = str(event.get("name") or "")
+        arguments = event.get("arguments", "")
+        if not isinstance(arguments, str):
+            arguments = ""
+        try:
+            output = handler(call_id, name, arguments)
+        except Exception as exc:
+            logger.warning("[kids_teacher_realtime] handle_tool_call raised: %s", exc)
+            return
+        if not call_id or output is None:
+            return
+        try:
+            await self._backend.send_tool_response(call_id, output)
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] send_tool_response raised: %s", exc
+            )
 
     def _on_response_done(self) -> None:
         logger.info("[kids_teacher_realtime] response.done — turn complete")
@@ -421,6 +463,54 @@ class KidsTeacherRealtimeHandler:
         except Exception as exc:
             logger.warning(
                 "[kids_teacher_realtime] publish_transcript raised: %s", exc
+            )
+
+    def _collect_additional_tool_specs(self) -> Optional[list]:
+        """Collect optional extra tool specs from the hooks (e.g. motion-director).
+
+        Hooks that don't provide tools simply omit the method; we fall back
+        to ``None`` so ``build_session_payload`` keeps the existing behaviour.
+        """
+        method = getattr(self._hooks, "additional_tool_specs", None)
+        if method is None:
+            return None
+        try:
+            specs = method()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] additional_tool_specs raised: %s", exc
+            )
+            return None
+        if not specs:
+            return None
+        return list(specs)
+
+    def _collect_additional_instructions(self) -> Optional[str]:
+        """Optional system-prompt extension provided by the hooks layer."""
+        method = getattr(self._hooks, "additional_instructions", None)
+        if method is None:
+            return None
+        try:
+            text = method()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] additional_instructions raised: %s", exc
+            )
+            return None
+        if not text:
+            return None
+        return str(text)
+
+    def _notify_hook(self, method_name: str) -> None:
+        """Call an optional zero-arg hook method, swallowing any exception."""
+        method = getattr(self._hooks, method_name, None)
+        if method is None:
+            return
+        try:
+            method()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] %s raised: %s", method_name, exc
             )
 
     def _publish_status(

@@ -194,3 +194,22 @@ class KidsTeacherRuntimeHooks(Protocol):
         event: KidsTranscriptEvent,
         audio: Optional[bytes] = None,
     ) -> None: ...
+
+    # Optional: handle a function tool call from the realtime model. Hooks
+    # that don't expose tools can omit this method — the handler probes
+    # via ``getattr`` and skips dispatch when absent. The hook is expected
+    # to return a string (typically JSON) the handler will ship back as
+    # the function output, or ``None`` to skip the ack entirely.
+    def handle_tool_call(  # pragma: no cover - protocol-only signature
+        self,
+        call_id: str,
+        name: str,
+        arguments: str,
+    ) -> Optional[str]: ...
+
+    # Optional: VAD edge notifications. The motion-director uses these to
+    # switch the face-tracking gain state and flush in-flight gestures.
+    # Hooks that don't care can omit either method.
+    def on_speech_started(self) -> None: ...  # pragma: no cover - protocol-only
+
+    def on_speech_stopped(self) -> None: ...  # pragma: no cover - protocol-only

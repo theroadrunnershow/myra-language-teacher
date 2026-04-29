@@ -79,6 +79,7 @@ class KidsTeacherRobotHooks:
         play_chunk: Optional[Callable[[Any, bytes, int], None]] = None,
         playback_speed: float = 1.0,
         recovery_cue: Optional[Callable[[Any], None]] = None,
+        motion_stack: Optional[Any] = None,
     ) -> None:
         """Create a hook implementation bound to ``robot_controller``.
 
@@ -109,10 +110,17 @@ class KidsTeacherRobotHooks:
                 gap instead of dead air. Called on a short-lived helper
                 thread so a slow TTS fetch can't block the realtime
                 handler. Tests leave this ``None`` (cue is skipped).
+            motion_stack: Optional :class:`motion.stack.MotionStack`. When
+                present, the bridge routes state and audio through the
+                stack instead of the legacy ``robot.speak/listen/idle``
+                methods — the composer becomes the sole pose driver. Leave
+                ``None`` to preserve the pre-motion-director behaviour
+                (the kill switch).
         """
         self._robot = robot_controller
         self._sample_rate = sample_rate
         self._log = logger_override or logger
+        self._motion_stack = motion_stack
         if play_chunk is not None:
             self._play_chunk = play_chunk
         else:
@@ -160,6 +168,13 @@ class KidsTeacherRobotHooks:
                 self._log.warning(
                     "[kids_teacher_robot_bridge] prime_speaker raised: %s", exc
                 )
+        if self._motion_stack is not None:
+            try:
+                self._motion_stack.start()
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] motion_stack.start raised: %s", exc
+                )
         self._thread = threading.Thread(
             target=self._playback_loop,
             name="kids-teacher-robot-playback",
@@ -184,6 +199,13 @@ class KidsTeacherRobotHooks:
                     timeout,
                 )
         self._thread = None
+        if self._motion_stack is not None:
+            try:
+                self._motion_stack.stop(timeout=min(timeout, 1.0))
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] motion_stack.stop raised: %s", exc
+                )
 
     # ------------------------------------------------------------------
     # KidsTeacherRuntimeHooks protocol
@@ -197,13 +219,27 @@ class KidsTeacherRobotHooks:
             self._queue.append(audio_chunk)
         self._chunk_available.set()
 
+        # Feed the L1 wobble layer every chunk — it modulates a smoothed
+        # loudness envelope and is cheap to call.
+        if self._motion_stack is not None:
+            try:
+                self._motion_stack.feed_assistant_audio(audio_chunk)
+            except Exception as exc:
+                self._log.debug(
+                    "[kids_teacher_robot_bridge] feed_assistant_audio raised: %s",
+                    exc,
+                )
+
         # Only trigger the speak animation on the FIRST chunk of a turn.
         # Subsequent chunks within the same turn should not re-kick the
         # animation — otherwise every delta restarts the nod loop.
         with self._speaking_lock:
             if not self._speaking_active:
                 self._speaking_active = True
-                self._safe_call("speak")
+                if self._motion_stack is not None:
+                    self._motion_stack_call("enter_assistant_speech")
+                else:
+                    self._safe_call("speak")
 
     def stop_assistant_playback(self) -> None:
         """Flush queued audio and restore the listening animation.
@@ -220,7 +256,10 @@ class KidsTeacherRobotHooks:
         with self._speaking_lock:
             self._speaking_active = False
         self._safe_call("flush_output_audio")
-        self._safe_call("listen")
+        if self._motion_stack is not None:
+            self._motion_stack_call("exit_assistant_speech")
+        else:
+            self._safe_call("listen")
 
     def publish_transcript(self, event: KidsTranscriptEvent) -> None:
         """Log transcript events for robot-side observability only."""
@@ -237,26 +276,38 @@ class KidsTeacherRobotHooks:
         """Map session status transitions to robot animations."""
         status = event.status
         if status == SessionStatus.LISTENING:
-            self._safe_call("listen")
+            if self._motion_stack is not None:
+                self._motion_stack_call("exit_assistant_speech")
+            else:
+                self._safe_call("listen")
         elif status == SessionStatus.SPEAKING:
             # Speaking is normally triggered by the first audio chunk.
             # Calling again here is a safe idempotent backstop.
             with self._speaking_lock:
                 if not self._speaking_active:
                     self._speaking_active = True
-                    self._safe_call("speak")
+                    if self._motion_stack is not None:
+                        self._motion_stack_call("enter_assistant_speech")
+                    else:
+                        self._safe_call("speak")
         elif status == SessionStatus.THINKING:
             # RobotController has no dedicated thinking pose; no-op keeps
             # the listen/speak animations intact during the pause.
             return
         elif status == SessionStatus.IDLE:
-            self._safe_call("idle")
+            if self._motion_stack is not None:
+                self._motion_stack_call("set_idle")
+            else:
+                self._safe_call("idle")
         elif status == SessionStatus.ENDED:
             self._log.info(
                 "[kids_teacher_robot_bridge] session ended: %s",
                 event.detail or "goodbye",
             )
-            self._safe_call("idle")
+            if self._motion_stack is not None:
+                self._motion_stack_call("set_idle")
+            else:
+                self._safe_call("idle")
         elif status == SessionStatus.RECONNECTING:
             self._log.info(
                 "[kids_teacher_robot_bridge] session reconnecting: %s",
@@ -270,14 +321,20 @@ class KidsTeacherRobotHooks:
             with self._speaking_lock:
                 self._speaking_active = False
             self._safe_call("flush_output_audio")
-            self._safe_call("listen")
+            if self._motion_stack is not None:
+                self._motion_stack_call("exit_assistant_speech")
+            else:
+                self._safe_call("listen")
             self._fire_recovery_cue()
         elif status == SessionStatus.ERROR:
             self._log.warning(
                 "[kids_teacher_robot_bridge] session error: %s",
                 event.detail or "unknown",
             )
-            self._safe_call("idle")
+            if self._motion_stack is not None:
+                self._motion_stack_call("set_idle")
+            else:
+                self._safe_call("idle")
 
     def persist_artifact(
         self,
@@ -286,6 +343,67 @@ class KidsTeacherRobotHooks:
     ) -> None:
         """No-op. The flow's review-store wrapper handles persistence."""
         return None
+
+    def handle_tool_call(
+        self, call_id: str, name: str, arguments: str
+    ) -> Optional[str]:
+        """Forward a function tool call to the motion stack.
+
+        When no motion stack is configured we ignore the call and return
+        ``None`` so the realtime handler skips the ack. The stack itself
+        validates the tool name + arguments and returns a JSON ack string.
+        """
+        if self._motion_stack is None:
+            return None
+        try:
+            return self._motion_stack.handle_tool_call(call_id, name, arguments)
+        except Exception as exc:
+            self._log.warning(
+                "[kids_teacher_robot_bridge] handle_tool_call raised: %s", exc
+            )
+            return None
+
+    def on_speech_started(self) -> None:
+        """Forward the VAD speech-start edge to the motion stack."""
+        if self._motion_stack is None:
+            return
+        self._motion_stack_call("enter_child_speech")
+
+    def on_speech_stopped(self) -> None:
+        """Forward the VAD speech-stop edge to the motion stack."""
+        if self._motion_stack is None:
+            return
+        self._motion_stack_call("exit_child_speech")
+
+    def additional_tool_specs(self) -> list:
+        """Tool specs the realtime handler should add to ``session.update``.
+
+        Empty when no motion stack is wired or when the gestures layer
+        is disabled.
+        """
+        if self._motion_stack is None:
+            return []
+        try:
+            return list(self._motion_stack.additional_tool_specs())
+        except Exception as exc:
+            self._log.warning(
+                "[kids_teacher_robot_bridge] additional_tool_specs raised: %s",
+                exc,
+            )
+            return []
+
+    def additional_instructions(self) -> str:
+        """Optional system-prompt extension. Empty when motion stack is absent."""
+        if self._motion_stack is None:
+            return ""
+        try:
+            return self._motion_stack.gesture_vocabulary_prompt_block()
+        except Exception as exc:
+            self._log.warning(
+                "[kids_teacher_robot_bridge] gesture_vocabulary_prompt_block raised: %s",
+                exc,
+            )
+            return ""
 
     # ------------------------------------------------------------------
     # Internals
@@ -356,6 +474,28 @@ class KidsTeacherRobotHooks:
         except Exception as exc:
             self._log.warning(
                 "[kids_teacher_robot_bridge] %s() raised: %s", method_name, exc
+            )
+
+    def _motion_stack_call(self, method_name: str) -> None:
+        """Invoke a motion-stack method, swallowing any exception.
+
+        The stack methods are pure local state mutations (compose state,
+        set gain, flush queue) — but if anything raises we'd rather lose
+        the gesture cue than crash the bridge thread.
+        """
+        stack = self._motion_stack
+        if stack is None:
+            return
+        method = getattr(stack, method_name, None)
+        if method is None:
+            return
+        try:
+            method()
+        except Exception as exc:
+            self._log.warning(
+                "[kids_teacher_robot_bridge] motion_stack.%s raised: %s",
+                method_name,
+                exc,
             )
 
 
