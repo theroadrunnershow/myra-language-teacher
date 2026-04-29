@@ -122,6 +122,21 @@ class FaceTracker:
         return _unsubscribe
 
     def _publish(self, target: GazeTarget) -> None:
+        # Diagnostic (temporary): log state transitions at INFO so a single
+        # session leaves evidence of whether L3 produced any targets without
+        # spamming the log per-tick.
+        prev = getattr(self, "_diag_last_published", None)
+        prev_was_target = isinstance(prev, tuple)
+        now_is_target = target is not None
+        if prev_was_target != now_is_target:
+            if now_is_target:
+                logger.info(
+                    "[face_tracker] target acquired → publishing (%.2f, %.2f)",
+                    target[0], target[1],
+                )
+            else:
+                logger.info("[face_tracker] target lost → publishing None")
+        self._diag_last_published = target
         for subscriber in list(self._subscribers):
             try:
                 subscriber(target)

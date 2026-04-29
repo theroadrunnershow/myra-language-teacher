@@ -125,6 +125,15 @@ class MotionStack:
 
         self._first_assistant_chunk_seen = False
 
+        # Diagnostic (temporary): apply_pose success/drop counters + last
+        # observed face offset. Heartbeat-logged every ~2s from _pose_sink
+        # so a single session leaves visible evidence of L3 reaching motors.
+        import time as _time
+        self._diag_clock = _time.monotonic
+        self._diag_apply_ok = 0
+        self._diag_apply_drop = 0
+        self._diag_last_heartbeat_at = self._diag_clock()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -241,8 +250,9 @@ class MotionStack:
         apply = getattr(self._robot, "apply_pose", None)
         if apply is None:
             return
+        result = None
         try:
-            apply(
+            result = apply(
                 head_pitch=offset.head_pitch,
                 head_yaw=offset.head_yaw,
                 head_roll=offset.head_roll,
@@ -255,6 +265,31 @@ class MotionStack:
             )
         except Exception as exc:
             logger.debug("[motion.stack] apply_pose raised: %s", exc)
+        # Diagnostic (temporary): count outcomes + heartbeat every 2s.
+        if result:
+            self._diag_apply_ok += 1
+        else:
+            self._diag_apply_drop += 1
+        now = self._diag_clock()
+        if now - self._diag_last_heartbeat_at >= 2.0:
+            face_yaw_deg = 0.0
+            face_pitch_deg = 0.0
+            if self._face_mixer is not None:
+                fo = self._face_mixer.current_offset()
+                face_yaw_deg = fo.head_yaw * 180.0 / 3.141592653589793
+                face_pitch_deg = fo.head_pitch * 180.0 / 3.141592653589793
+            logger.info(
+                "[motion.stack] heartbeat: apply_ok=%d apply_drop=%d "
+                "face_yaw=%.2f° face_pitch=%.2f° gain_state=%s",
+                self._diag_apply_ok,
+                self._diag_apply_drop,
+                face_yaw_deg,
+                face_pitch_deg,
+                self._face_mixer.gain_state if self._face_mixer else "n/a",
+            )
+            self._diag_apply_ok = 0
+            self._diag_apply_drop = 0
+            self._diag_last_heartbeat_at = now
 
 
 # Convenience used by the CLI factory; importable for tests.
