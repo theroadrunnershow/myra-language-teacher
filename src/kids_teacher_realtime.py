@@ -74,6 +74,12 @@ class KidsTeacherRealtimeHandler:
         # Track whether an assistant response is actively streaming so we
         # can route barge-in and de-dupe overlapping response streams.
         self._assistant_active = False
+        # SPEAKING status is published exactly once per turn, on the first
+        # audio chunk — *not* on the first transcript delta. Gemini Live
+        # often ships transcript text 200–500 ms before the matching audio,
+        # and tying motion to text makes the head start nodding before the
+        # voice plays. Reset on response.done / cancel / reconnect.
+        self._speaking_published = False
         # Pending assistant audio chunks that have not yet been played.
         # Drained on barge-in or stop.
         self._pending_audio: asyncio.Queue[bytes] = asyncio.Queue()
@@ -245,12 +251,15 @@ class KidsTeacherRealtimeHandler:
         self._remember(Speaker.CHILD, text, language)
 
     def _on_assistant_delta(self, event: dict) -> None:
-        # Starting (or continuing) an assistant response. On the first delta
-        # we flip state to SPEAKING.
+        # Open the barge-in gate so a child speech_started in this window
+        # cancels properly. Do NOT publish SPEAKING here — that would start
+        # the robot's speak animation before any audio is queued, since
+        # Gemini Live can ship transcript text well ahead of the matching
+        # audio. SPEAKING is published from _on_audio_chunk so motion and
+        # voice start together.
         if not self._assistant_active:
             self._assistant_active = True
             logger.info("[kids_teacher_realtime] assistant response started")
-            self._publish_status(SessionStatus.SPEAKING)
         text = event.get("text", "") or ""
         self._publish_transcript(Speaker.ASSISTANT, text, is_partial=True)
 
@@ -275,10 +284,12 @@ class KidsTeacherRealtimeHandler:
             logger.info(
                 "[kids_teacher_realtime] assistant response started (audio-first)"
             )
-            self._publish_status(SessionStatus.SPEAKING)
-        # Forward to playback. We also track chunks in the pending queue so
-        # interrupt() can confirm a drain happened — but the queue is
-        # non-authoritative, playback is driven by hooks.
+        # Hand the chunk to playback BEFORE publishing SPEAKING so the speaker
+        # pipeline starts decoding in parallel with the robot's speak animation
+        # — both are triggered off this same chunk, but queueing first lets
+        # the playback thread make progress even if the bridge's status hook
+        # spends a few hundred ms wiring up the motion. The pending queue is
+        # non-authoritative; it just lets interrupt() confirm a drain happened.
         try:
             self._pending_audio.put_nowait(audio)
         except asyncio.QueueFull:  # pragma: no cover - unbounded queue
@@ -287,10 +298,14 @@ class KidsTeacherRealtimeHandler:
             self._hooks.start_assistant_playback(audio)
         except Exception as exc:
             logger.warning("[kids_teacher_realtime] playback hook raised: %s", exc)
+        if not self._speaking_published:
+            self._speaking_published = True
+            self._publish_status(SessionStatus.SPEAKING)
 
     def _on_response_done(self) -> None:
         logger.info("[kids_teacher_realtime] response.done — turn complete")
         self._assistant_active = False
+        self._speaking_published = False
         self._drain_pending_audio()
         self._publish_status(SessionStatus.LISTENING)
 
@@ -306,6 +321,7 @@ class KidsTeacherRealtimeHandler:
         detail = event.get("message")
         logger.info("[kids_teacher_realtime] backend reconnecting (%s)", detail or "")
         self._assistant_active = False
+        self._speaking_published = False
         self._drain_pending_audio()
         try:
             self._hooks.stop_assistant_playback()
@@ -368,6 +384,7 @@ class KidsTeacherRealtimeHandler:
                 "[kids_teacher_realtime] _cancel_active_response no-op (reason=%s, not assistant_active)",
                 reason,
             )
+        self._speaking_published = False
         self._drain_pending_audio()
         try:
             self._hooks.stop_assistant_playback()

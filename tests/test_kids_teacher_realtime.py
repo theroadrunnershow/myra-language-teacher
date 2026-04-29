@@ -286,6 +286,126 @@ async def test_audio_chunk_before_transcript_opens_barge_in_gate() -> None:
     await run_task
 
 
+async def test_assistant_transcript_delta_does_not_publish_speaking() -> None:
+    """Regression: SPEAKING used to fire on the first transcript delta, but
+    Gemini Live can ship transcript text 200–500 ms before the matching
+    audio. Tying motion to text made the head start nodding before the voice
+    played. The status must now stay LISTENING until an audio chunk lands."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "The sky..."}
+    )
+    await asyncio.sleep(0.01)
+
+    speaking = [s for s in hooks.statuses if s.status == SessionStatus.SPEAKING]
+    assert speaking == []  # text alone must not trigger motion
+    # The barge-in gate still opens on text — covered by other tests; here we
+    # just confirm motion stays gated.
+    assert hooks.playback_chunks == []
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_audio_chunk_publishes_speaking_once_per_turn() -> None:
+    """First audio chunk publishes SPEAKING; subsequent chunks of the same
+    turn don't re-publish (avoid restart-of-animation thrash)."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x00\x01"})
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x02\x03"})
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x04\x05"})
+    await asyncio.sleep(0.01)
+
+    speaking = [s for s in hooks.statuses if s.status == SessionStatus.SPEAKING]
+    assert len(speaking) == 1
+    assert hooks.playback_chunks == [b"\x00\x01", b"\x02\x03", b"\x04\x05"]
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_audio_queued_before_speaking_status_published() -> None:
+    """On the first audio chunk, ``start_assistant_playback`` must be
+    invoked before SPEAKING is published, so the speaker pipeline can begin
+    decoding in parallel with the robot's speak animation rather than after
+    a synchronous motion dispatch returns."""
+
+    class OrderingHooks(FakeHooks):
+        """Record every hook call into one ordered list so we can assert
+        the sequencing between audio queueing and status publication."""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.event_log: List[str] = []
+
+        def start_assistant_playback(self, audio_chunk: bytes) -> None:
+            self.event_log.append("start_assistant_playback")
+            super().start_assistant_playback(audio_chunk)
+
+        def publish_status(self, event: KidsStatusEvent) -> None:
+            self.event_log.append(f"publish_status:{event.status.value}")
+            super().publish_status(event)
+
+    backend = FakeRealtimeBackend()
+    hooks = OrderingHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x00\x01"})
+    await asyncio.sleep(0.01)
+
+    # Find the first audio handover and the first SPEAKING publish — the
+    # playback hand-off must precede the motion trigger.
+    play_idx = hooks.event_log.index("start_assistant_playback")
+    speak_idx = hooks.event_log.index(
+        f"publish_status:{SessionStatus.SPEAKING.value}"
+    )
+    assert play_idx < speak_idx
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_response_done_resets_speaking_gate_so_next_turn_publishes_again() -> None:
+    """The once-per-turn SPEAKING gate must reset on response.done; otherwise
+    the second assistant turn would never re-trigger the speak animation."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Turn 1: audio chunk → SPEAKING fires once → response.done → LISTENING.
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x00\x01"})
+    await backend.push_event({"type": "response.done"})
+    await asyncio.sleep(0.01)
+
+    # Turn 2: a fresh audio chunk must publish SPEAKING again.
+    await backend.push_event({"type": "audio.chunk", "audio": b"\x02\x03"})
+    await asyncio.sleep(0.01)
+
+    speaking = [s for s in hooks.statuses if s.status == SessionStatus.SPEAKING]
+    assert len(speaking) == 2
+
+    await backend.end_stream()
+    await run_task
+
+
 async def test_speech_stopped_does_not_cancel() -> None:
     """VAD speech_stopped is an informational marker — no barge-in."""
     backend = FakeRealtimeBackend()
