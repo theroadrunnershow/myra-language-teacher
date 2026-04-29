@@ -172,6 +172,20 @@ class RealtimeBackend(Protocol):
 
     async def close(self) -> None: ...
 
+    async def wait_until_ready(self) -> None:
+        """Block until the underlying session is fully connected and able
+        to transcribe / respond.
+
+        Backends with a distinct readiness signal (e.g. Gemini Live's first
+        ``session_resumption_update``) set this when they observe it. Backends
+        whose ``connect()`` already implies readiness (OpenAI Realtime, the
+        in-process fake) should set it on connect. Callers use this to gate
+        anything that would be silently dropped during the warm-up window —
+        see :func:`pump_microphone_to_backend` and the startup-greeting wiring
+        in :mod:`kids_teacher_flow`.
+        """
+        ...
+
     def events(self) -> AsyncIterator[dict]:
         """Yield backend events as normalized dicts.
 
@@ -221,6 +235,11 @@ class OpenAIRealtimeBackend:
         # disabled: provider=openai" exactly once per session, not per
         # frame. OpenAI Realtime does not accept video input.
         self._send_video_logged = False
+        # OpenAI Realtime's session.update completes synchronously inside
+        # connect(), so the session is hot the moment connect() returns.
+        # Set on a successful connect; readers wait on this through
+        # wait_until_ready().
+        self._ready_event: asyncio.Event = asyncio.Event()
 
     @property
     def model(self) -> str:
@@ -242,6 +261,10 @@ class OpenAIRealtimeBackend:
             logger.warning("[kids_teacher_backend] connect failed: %s", exc)
             raise
         self._reader_task = asyncio.create_task(self._reader_loop())
+        self._ready_event.set()
+
+    async def wait_until_ready(self) -> None:
+        await self._ready_event.wait()
 
     async def _open_connection(self, session_payload: dict) -> Any:
         """Open the SDK-level connection and send the session.update payload.

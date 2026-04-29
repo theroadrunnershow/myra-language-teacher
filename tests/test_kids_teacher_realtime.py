@@ -730,3 +730,43 @@ async def test_session_reconnecting_publishes_reconnecting_status_no_fallback():
 
     await backend.end_stream()
     await run_task
+
+
+# ---------------------------------------------------------------------------
+# Readiness proxy
+#
+# Handler.wait_until_ready forwards to the backend so the flow / bridge /
+# face-rec loop can gate behavior without holding the backend reference.
+# ---------------------------------------------------------------------------
+
+
+async def test_handler_wait_until_ready_proxies_to_backend_ready() -> None:
+    """Default fake backend: ready as soon as connect() returns. Awaiting
+    handler.wait_until_ready must complete immediately."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+    await handler.start()
+    try:
+        await asyncio.wait_for(handler.wait_until_ready(), timeout=0.5)
+    finally:
+        await backend.end_stream()
+
+
+async def test_handler_wait_until_ready_blocks_until_backend_signals_ready() -> None:
+    """When the fake defers readiness, the proxy must block until
+    mark_ready() flips the underlying event."""
+    backend = FakeRealtimeBackend(defer_ready=True)
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+    await handler.start()
+    try:
+        waiter = asyncio.create_task(handler.wait_until_ready())
+        # Yield once so the waiter enters the wait state.
+        await asyncio.sleep(0)
+        assert waiter.done() is False
+
+        backend.mark_ready()
+        await asyncio.wait_for(waiter, timeout=0.5)
+    finally:
+        await backend.end_stream()

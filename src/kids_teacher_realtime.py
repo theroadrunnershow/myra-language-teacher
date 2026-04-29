@@ -104,6 +104,16 @@ class KidsTeacherRealtimeHandler:
         self._started = True
         self._publish_status(SessionStatus.LISTENING)
 
+    async def wait_until_ready(self) -> None:
+        """Block until the backend's session is fully warmed up.
+
+        Thin proxy over :meth:`RealtimeBackend.wait_until_ready` so the mic
+        pump, startup-greeting wiring, and face-rec announce loop don't need
+        to hold a reference to the backend itself. Returns immediately if
+        the session is already ready (idempotent).
+        """
+        await self._backend.wait_until_ready()
+
     async def push_audio(self, chunk: bytes) -> None:
         """Forward a child audio chunk to the backend."""
         if self._stopped:

@@ -590,3 +590,110 @@ def test_faces_pkl_persists_across_sessions(monkeypatch, tmp_path) -> None:
     with expected_path.open("rb") as handle:
         on_disk = pickle.load(handle)
     assert "Myra" in on_disk
+
+
+# ---------------------------------------------------------------------------
+# Readiness gating for face-rec announcements
+#
+# The on-demand re-check loop must hold off on push_text calls until the
+# backend session is fully warmed up. Pre-warmup announcements land in a
+# session that hasn't finished initialization and disappear silently — the
+# exact failure mode the 2026-04-29 myra.log captured (Abi's "just joined"
+# at 05:37:09 with no assistant response).
+# ---------------------------------------------------------------------------
+
+
+class _GatedRecordingHandler(_RecordingHandler):
+    """Handler with a controllable readiness event."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._ready = asyncio.Event()
+
+    def mark_ready(self) -> None:
+        self._ready.set()
+
+    async def wait_until_ready(self) -> None:
+        await self._ready.wait()
+
+
+def test_face_rec_loop_holds_announcements_until_handler_ready(monkeypatch) -> None:
+    """Without readiness, even a clear "Daddy" arrival must not be pushed.
+    Once the handler signals ready, the same arrival is announced."""
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+    monkeypatch.setattr(
+        face_service,
+        "detect_face_bboxes",
+        lambda frame, downscale=True: [(0, 0, 0, 0)],
+    )
+    monkeypatch.setattr(
+        face_service,
+        "identify_in_frame",
+        lambda frame, tolerance=None: ["Daddy"],
+    )
+
+    factory = robot_kids_teacher._make_face_rec_loop_factory(
+        _FrameSourceWorker(),
+        initial_names=[],
+        interval_sec=0.0,
+    )
+    handler = _GatedRecordingHandler()
+    stop = asyncio.Event()
+
+    async def driver() -> None:
+        task = asyncio.create_task(factory(handler, stop))
+        # Give the loop a chance to enter wait_until_ready and confirm the
+        # gate is holding — no announcements should be pushed yet.
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert handler.texts == [], (
+            "face-rec loop pushed before readiness — gate is broken"
+        )
+        # Flip readiness; the loop should now drive its first tick.
+        handler.mark_ready()
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if "Daddy just joined." in handler.texts:
+                break
+        stop.set()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(driver())
+    assert "Daddy just joined." in handler.texts
+
+
+def test_face_rec_loop_exits_during_warmup_when_stop_event_fires(monkeypatch) -> None:
+    """Shutdown during the warm-up wait must end the loop without pushing
+    any announcements."""
+    monkeypatch.setattr(face_service, "HAS_FACE_REC", True, raising=False)
+    monkeypatch.setattr(
+        face_service,
+        "detect_face_bboxes",
+        lambda frame, downscale=True: [(0, 0, 0, 0)],
+    )
+    monkeypatch.setattr(
+        face_service,
+        "identify_in_frame",
+        lambda frame, tolerance=None: ["Daddy"],
+    )
+
+    factory = robot_kids_teacher._make_face_rec_loop_factory(
+        _FrameSourceWorker(),
+        initial_names=[],
+        interval_sec=0.0,
+    )
+    handler = _GatedRecordingHandler()  # never flips ready
+    stop = asyncio.Event()
+
+    async def driver() -> None:
+        task = asyncio.create_task(factory(handler, stop))
+        await asyncio.sleep(0)
+        stop.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(driver())
+    assert handler.texts == []

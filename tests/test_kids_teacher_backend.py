@@ -8,6 +8,7 @@ must work on a lightweight image where openai is not installed.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import SimpleNamespace
 
@@ -383,3 +384,56 @@ def test_encode_audio_chunk_round_trip() -> None:
     # Encoded value is a base64 ASCII string.
     assert isinstance(encoded, str)
     assert _decode_audio_delta(encoded) == payload
+
+
+# ---------------------------------------------------------------------------
+# Readiness signal
+#
+# OpenAI Realtime's session.update completes synchronously inside connect()
+# — there is no separate "session ready" message — so connect() returning
+# implies readiness. wait_until_ready() must reflect that contract so flow
+# callers (mic pump, startup greeting, face-rec) don't block forever waiting
+# for a signal that doesn't exist on this provider.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_ready_event_set_after_successful_connect() -> None:
+    connection = _StubConnection()
+    manager = _StubConnectionManager(connection)
+    realtime = _StubRealtimeNamespace(manager)
+    client = SimpleNamespace(beta=SimpleNamespace(realtime=realtime))
+    backend = OpenAIRealtimeBackend(
+        model="gpt-realtime-mini",
+        client_factory=lambda: client,
+    )
+
+    assert backend._ready_event.is_set() is False
+    await backend.connect({"instructions": "hi"})
+    try:
+        # connect() returning implies the session is hot — wait_until_ready
+        # must complete immediately.
+        await asyncio.wait_for(backend.wait_until_ready(), timeout=0.5)
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_backend_ready_event_unset_after_failed_connect() -> None:
+    """A failed connect leaves the session never-ready. wait_until_ready
+    must NOT spuriously return — callers should hang until close, just
+    like with a real broken connection."""
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            realtime=SimpleNamespace(
+                connect=lambda *, model: _FailingConnectionManager()
+            )
+        )
+    )
+    backend = OpenAIRealtimeBackend(client_factory=lambda: client)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await backend.connect({"instructions": "Only safe topics."})
+
+    # Still unset — caller's wait would block.
+    assert backend._ready_event.is_set() is False

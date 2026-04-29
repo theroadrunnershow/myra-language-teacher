@@ -30,12 +30,20 @@ class FakeRealtimeBackend:
         scripted_events: Optional[List[dict]] = None,
         *,
         connect_error: Optional[Exception] = None,
+        defer_ready: bool = False,
     ) -> None:
         self._scripted = list(scripted_events or [])
         self._connect_error = connect_error
         self._queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
         self._connected = False
         self._closed = False
+        # Most tests want the fake to behave like a "fast" backend whose
+        # session is hot the moment connect() returns. Tests that need to
+        # exercise the warm-up gate (mic-pump waiting, greeting waiting,
+        # face-rec waiting) set ``defer_ready=True`` and call
+        # :meth:`mark_ready` when they want callers to unblock.
+        self._defer_ready = defer_ready
+        self._ready_event: asyncio.Event = asyncio.Event()
 
         # Call recorders for assertions.
         self.connect_calls: List[dict] = []
@@ -50,9 +58,19 @@ class FakeRealtimeBackend:
         if self._connect_error is not None:
             raise self._connect_error
         self._connected = True
+        if not self._defer_ready:
+            self._ready_event.set()
         # Seed scripted events into the queue so events() can yield them.
         for event in self._scripted:
             await self._queue.put(event)
+
+    def mark_ready(self) -> None:
+        """Manually flip the readiness signal — used by tests that opt into
+        ``defer_ready=True`` to verify the warm-up gate."""
+        self._ready_event.set()
+
+    async def wait_until_ready(self) -> None:
+        await self._ready_event.wait()
 
     async def send_audio(self, chunk: bytes) -> None:
         self.audio_chunks.append(chunk)
