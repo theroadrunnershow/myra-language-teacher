@@ -131,6 +131,12 @@ Most of the migration landed; remaining follow-ups:
 - `Medium` Terraform wiring for `GEMINI_API_KEY` in `infra/secret_manager.tf` + Cloud Run service env so the Gemini path works in deployed environments, not just locally
 - `Low` Revisit the free-tier privacy trade-off (Google may train on child audio on free tier). Either enable billing with a low budget cap, or move to Vertex AI for a ZDR-eligible path, once the app is used beyond the family
 
+### Voice strength filter
+
+### Animations fixing
+
+### Face tracking
+
 ### Gemini Live reconnect polish
 
 Auto-reconnect with session resumption is in (commit `73cdabb`,
