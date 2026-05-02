@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import random
 from typing import Iterable, Optional
 
 from kids_teacher_types import KidsTeacherProfile
@@ -85,16 +86,23 @@ def format_telugu_lesson_vocabulary() -> str:
     The block is appended after ``language_lesson.txt`` so the realtime
     model can pick concrete seed words from a categorized list instead
     of leaning on the same hardcoded examples each session.
+
+    Category order and per-category word order are reshuffled on every
+    call so what the model sees first varies per session — without this,
+    the model gravitates to the same attractors (e.g. monkey + banana)
+    despite the prompt's "rotate themes" instruction.
     """
     seed = get_lesson_seed_vocabulary()
     lines: list[str] = [_VOCAB_HEADING, "", _VOCAB_INTRO]
-    for key, title in _CATEGORY_TITLES:
+    categories = random.sample(_CATEGORY_TITLES, k=len(_CATEGORY_TITLES))
+    for key, title in categories:
         entries = seed.get(key) or []
         if not entries:
             continue
+        shuffled = random.sample(entries, k=len(entries))
         lines.append("")
         lines.append(f"## {title}")
-        lines.extend(_format_vocab_entry(entry) for entry in entries)
+        lines.extend(_format_vocab_entry(entry) for entry in shuffled)
     return "\n".join(lines)
 
 
