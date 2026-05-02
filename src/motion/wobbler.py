@@ -19,14 +19,15 @@ barge-in (plan §7 rule 4).
 
 Oscillators
 -----------
-Three slow sinusoids: a head-yaw "no-no" shake plus antiphase antenna
-flaps. Each is driven by the wall clock so motion stays continuous
-across feeds. The envelope multiplies the amplitude of every oscillator
-uniformly — quiet audio = small motion, loud audio = full-amplitude.
+A single slow head-yaw sinusoid that sways the head side to side. The
+oscillator is driven by the wall clock so motion stays continuous across
+feeds. The envelope multiplies its amplitude — quiet audio = small
+sway, loud audio = full-amplitude.
 
-Frequencies are sub-Hz so the result reads as a deliberate slow shake
-suitable for a young child, not a jittery wobble. Per-channel amplitudes
-are conservative; the composer also has its own final-output safety cap.
+The frequency is sub-Hz (~8s per full cycle) so the result reads as a
+deliberate sway suitable for a young child, not a jittery wobble. The
+amplitude is conservative; the composer also has its own final-output
+safety cap.
 """
 
 from __future__ import annotations
@@ -64,18 +65,11 @@ class _Oscillator:
     phase_offset: float = 0.0
 
 
-# Slow head shake + ear shake. Sub-Hz frequencies so the motion reads as
-# deliberate rather than jittery. Amplitudes are conservative — caps in
-# plan §9.
+# Slow side-to-side head sway. Sub-Hz frequency (~8s per full cycle) so
+# the motion reads as a deliberate sway rather than a wobble. Amplitude
+# is conservative — caps in plan §9.
 _DEFAULT_OSCILLATORS = (
-    _Oscillator("head_yaw", frequency_hz=0.35, peak_amplitude=4.0 * _DEG),
-    _Oscillator("antenna_left", frequency_hz=0.5, peak_amplitude=8.0 * _DEG),
-    _Oscillator(
-        "antenna_right",
-        frequency_hz=0.5,
-        peak_amplitude=8.0 * _DEG,
-        phase_offset=math.pi,  # antiphase with left so they alternate
-    ),
+    _Oscillator("head_yaw", frequency_hz=0.12, peak_amplitude=6.0 * _DEG),
 )
 
 
