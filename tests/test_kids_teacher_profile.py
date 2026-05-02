@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 
 import pytest
 
@@ -12,6 +13,7 @@ from kids_teacher_profile import (
     DEFAULT_VOICE,
     PROFILE_NAME,
     ProfileValidationError,
+    format_telugu_lesson_vocabulary,
     load_profile,
     validate_tool_names,
 )
@@ -230,6 +232,27 @@ def test_validate_tool_names_rejects_unknown() -> None:
 
 def test_validate_tool_names_empty_input_is_ok() -> None:
     assert validate_tool_names([], {"wave"}) == []
+
+
+def test_format_telugu_lesson_vocabulary_shuffles_per_call() -> None:
+    # Pin two distinct seeds to compare two deterministic shuffles.
+    random.seed(0)
+    first = format_telugu_lesson_vocabulary()
+    random.seed(1)
+    second = format_telugu_lesson_vocabulary()
+    assert first != second
+    # Same content, only order differs — no entries gained or lost.
+    assert sorted(first.splitlines()) == sorted(second.splitlines())
+
+
+def test_format_telugu_lesson_vocabulary_preserves_heading_and_intro() -> None:
+    random.seed(0)
+    rendered = format_telugu_lesson_vocabulary()
+    lines = rendered.splitlines()
+    # Heading and intro stay pinned at the top; only the category/word
+    # blocks below them get reshuffled.
+    assert lines[0].startswith("# Telugu starter vocabulary")
+    assert lines[2].startswith("Use this list as the seed")
 
 
 def test_validate_tool_names_empty_known_rejects_any_name() -> None:
