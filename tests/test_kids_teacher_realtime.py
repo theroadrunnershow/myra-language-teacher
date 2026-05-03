@@ -918,6 +918,96 @@ async def test_tool_call_event_with_non_string_arguments_normalizes_to_empty() -
     assert hooks.tool_calls == [("call_xyz", "play_gesture", "")]
 
 
+class _AsyncToolHooks(FakeHooks):
+    """FakeHooks whose ``handle_tool_call`` is itself a coroutine.
+
+    Exercises the realtime handler's ``asyncio.iscoroutine`` branch so the
+    tools-framework registry (which dispatches asynchronously) round-trips
+    its ack back to the model.
+    """
+
+    def __init__(
+        self,
+        *,
+        return_value: Optional[str] = '{"ok": true}',
+        raise_exc: Optional[Exception] = None,
+    ) -> None:
+        super().__init__()
+        self.tool_calls: List[tuple] = []
+        self._return_value = return_value
+        self._raise_exc = raise_exc
+
+    async def handle_tool_call(
+        self, call_id: str, name: str, arguments: str
+    ) -> Optional[str]:
+        self.tool_calls.append((call_id, name, arguments))
+        await asyncio.sleep(0)  # force a real coroutine boundary
+        if self._raise_exc is not None:
+            raise self._raise_exc
+        return self._return_value
+
+
+async def test_tool_call_async_hook_is_awaited_and_acked() -> None:
+    """A hook returning a coroutine must be awaited before the ack ships.
+
+    Without ``await``, the coroutine would be silently dropped and the
+    model's tool call would hang.
+    """
+    backend = FakeRealtimeBackend()
+    hooks = _AsyncToolHooks(return_value='{"ok": true, "location": "Seattle"}')
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_async",
+            "name": "register_current_location",
+            "arguments": '{"location": "Seattle"}',
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    assert hooks.tool_calls == [
+        ("call_async", "register_current_location", '{"location": "Seattle"}')
+    ]
+    assert backend.tool_responses == [
+        ("call_async", '{"ok": true, "location": "Seattle"}')
+    ]
+
+
+async def test_tool_call_async_hook_exception_is_swallowed() -> None:
+    """Exceptions raised inside the awaited coroutine must not crash the loop."""
+    backend = FakeRealtimeBackend()
+    hooks = _AsyncToolHooks(raise_exc=RuntimeError("boom"))
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {
+            "type": "tool.call",
+            "call_id": "call_async",
+            "name": "register_current_location",
+            "arguments": "{}",
+        }
+    )
+    await asyncio.sleep(0.01)
+    await backend.end_stream()
+    await run_task
+
+    # Hook ran, raised, was swallowed — no ack.
+    assert hooks.tool_calls == [("call_async", "register_current_location", "{}")]
+    assert backend.tool_responses == []
+
+
 # ---------------------------------------------------------------------------
 # Behavior 13: VAD edges forwarded to optional hooks (motion-director)
 # ---------------------------------------------------------------------------

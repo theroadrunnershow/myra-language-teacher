@@ -314,10 +314,12 @@ class KidsTeacherRealtimeHandler:
     async def _on_tool_call(self, event: dict) -> None:
         """Route a function tool call to the runtime hook and ack the model.
 
-        The hook runs synchronously on the event loop; gesture dispatch is
-        non-blocking (just a deque + composer.play_clip). If the hook
-        returns a string we ship it back as ``function_call_output`` so
-        the model can continue its turn without stalling.
+        The hook may run synchronously (gesture dispatch is non-blocking
+        — just a deque + composer.play_clip) or return an awaitable for
+        I/O-bound tools (the tools-framework registry's GCS-backed
+        location store). If the result is a coroutine we await it before
+        shipping the ack so async tools don't drop their reply on the
+        floor.
         """
         handler = getattr(self._hooks, "handle_tool_call", None)
         if handler is None:
@@ -332,6 +334,8 @@ class KidsTeacherRealtimeHandler:
             arguments = ""
         try:
             output = handler(call_id, name, arguments)
+            if asyncio.iscoroutine(output):
+                output = await output
         except Exception as exc:
             logger.warning("[kids_teacher_realtime] handle_tool_call raised: %s", exc)
             return

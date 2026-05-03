@@ -8,6 +8,7 @@ inject a ``FakeRobotController`` for all animation + playback assertions.
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import threading
 import time
@@ -1049,3 +1050,195 @@ def test_motion_stack_absent_preserves_legacy_speak_listen_calls():
     hooks.stop_assistant_playback()
     assert "speak" in robot.calls
     assert "listen" in robot.calls
+
+
+# ---------------------------------------------------------------------------
+# Tools-framework registry mount (Step 4 of plan-tools-framework.md)
+# ---------------------------------------------------------------------------
+
+
+from tools.base import ToolRegistry, ToolResult
+
+
+class _FakeRegistryTool:
+    """Stand-in ``Tool`` for registry-mounting tests."""
+
+    def __init__(
+        self,
+        name: str,
+        *,
+        prompt: str = "",
+        result: Optional[ToolResult] = None,
+        raises: Optional[Exception] = None,
+    ) -> None:
+        self.name = name
+        self._prompt = prompt
+        self._result = result or ToolResult(ok=True, detail=f"{name} ok")
+        self._raises = raises
+        self.calls: List[dict] = []
+
+    def spec(self) -> dict:
+        return {
+            "type": "function",
+            "name": self.name,
+            "description": f"{self.name} test tool",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+                "additionalProperties": False,
+            },
+        }
+
+    def prompt_block(self) -> str:
+        return self._prompt
+
+    async def call(self, arguments):
+        self.calls.append(dict(arguments))
+        if self._raises is not None:
+            raise self._raises
+        return self._result
+
+
+def _make_hooks_with_registry(*, registry, motion_stack=None):
+    robot = FakeRobotController()
+    recorder = RecordingPlayChunk()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        sample_rate=24000,
+        play_chunk=recorder,
+        motion_stack=motion_stack,
+        tool_registry=registry,
+    )
+    return hooks, robot, recorder
+
+
+async def test_handle_tool_call_routes_unknown_motion_name_to_registry():
+    """A tool name that motion doesn't own falls through to the registry."""
+    tool = _FakeRegistryTool(
+        "register_current_location",
+        result=ToolResult(
+            ok=True, detail="ok", data={"location": "Seattle, WA 98177"}
+        ),
+    )
+    registry = ToolRegistry([tool])
+    motion_stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_registry(
+        registry=registry, motion_stack=motion_stack
+    )
+
+    awaitable = hooks.handle_tool_call(
+        "c1", "register_current_location", '{"location": "Seattle"}'
+    )
+    payload = await awaitable
+
+    assert tool.calls == [{"location": "Seattle"}]
+    assert payload is not None
+    body = json.loads(payload)
+    assert body["ok"] is True
+    assert body["location"] == "Seattle, WA 98177"
+    # Motion stack must NOT see registry tool calls.
+    assert motion_stack.tool_calls == []
+
+
+async def test_handle_tool_call_motion_name_takes_precedence_over_registry():
+    """If a motion tool name is invoked, motion handles it sync — even
+    when the registry also exposes a same-named tool. Motion's tighter
+    integration with the bridge is the reason §3.3 (a) keeps it
+    separate from the registry."""
+    motion_stack = _RecordingMotionStack(tool_payload='{"ok": true, "detail": "motion"}')
+    # Registry shadows the motion name on purpose to prove precedence.
+    shadow = _FakeRegistryTool("play_gesture")
+    registry = ToolRegistry([shadow])
+    hooks, _, _ = _make_hooks_with_registry(
+        registry=registry, motion_stack=motion_stack
+    )
+
+    payload = hooks.handle_tool_call("c1", "play_gesture", '{"name": "nod"}')
+
+    assert payload == '{"ok": true, "detail": "motion"}'
+    assert motion_stack.tool_calls == [("c1", "play_gesture", '{"name": "nod"}')]
+    assert shadow.calls == []
+
+
+async def test_handle_tool_call_unknown_name_falls_through_to_registry():
+    """A name owned by neither motion nor the registry routes to the
+    registry's unknown-tool error payload (motion isn't asked)."""
+    tool = _FakeRegistryTool("register_current_location")
+    registry = ToolRegistry([tool])
+    motion_stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_registry(
+        registry=registry, motion_stack=motion_stack
+    )
+
+    payload = await hooks.handle_tool_call("c1", "totally_unknown", "{}")
+
+    assert motion_stack.tool_calls == []
+    assert payload is not None
+    body = json.loads(payload)
+    assert body["ok"] is False
+    assert "unknown tool" in body["detail"]
+
+
+async def test_handle_tool_call_registry_dispatch_exception_returns_none():
+    """An exception inside the registry's dispatch must not crash the bridge."""
+
+    class _BoomRegistry:
+        def specs(self):
+            return []
+
+        def prompt_block(self):
+            return ""
+
+        async def dispatch(self, name, arguments):
+            raise RuntimeError("kaboom")
+
+    hooks, _, _ = _make_hooks_with_registry(registry=_BoomRegistry())
+    awaitable = hooks.handle_tool_call("c1", "anything", "{}")
+    payload = await awaitable
+    assert payload is None
+
+
+def test_additional_tool_specs_merges_motion_and_registry():
+    motion_stack = _RecordingMotionStack()
+    # _RecordingMotionStack didn't expose additional_tool_specs originally;
+    # patch via subclass for this test.
+
+    class _StackWithSpecs(_RecordingMotionStack):
+        def additional_tool_specs(self):
+            return [{"type": "function", "name": "play_gesture", "parameters": {}}]
+
+        def gesture_vocabulary_prompt_block(self):
+            return "Use play_gesture for nods."
+
+    motion_stack = _StackWithSpecs()
+    tool = _FakeRegistryTool(
+        "register_current_location", prompt="Use register_current_location for the city."
+    )
+    registry = ToolRegistry([tool])
+    hooks, _, _ = _make_hooks_with_registry(
+        registry=registry, motion_stack=motion_stack
+    )
+
+    specs = hooks.additional_tool_specs()
+    names = {s["name"] for s in specs}
+    assert names == {"play_gesture", "register_current_location"}
+
+    instructions = hooks.additional_instructions()
+    assert "Use play_gesture for nods." in instructions
+    assert "Use register_current_location for the city." in instructions
+
+
+def test_additional_tool_specs_only_registry_when_motion_absent():
+    tool = _FakeRegistryTool("register_current_location")
+    registry = ToolRegistry([tool])
+    hooks, _, _ = _make_hooks_with_registry(registry=registry, motion_stack=None)
+
+    specs = hooks.additional_tool_specs()
+    assert [s["name"] for s in specs] == ["register_current_location"]
+
+
+def test_additional_tool_specs_empty_when_neither_configured():
+    hooks, _, _ = _make_hooks()  # no motion, no registry
+    assert hooks.additional_tool_specs() == []
+    assert hooks.additional_instructions() == ""

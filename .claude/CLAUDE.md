@@ -17,12 +17,15 @@ get scored via on-device speech recognition with fuzzy matching.
 ## Layout
 ```
 src/            # FastAPI app + STT/TTS/translate services, words DB, robot controller
+src/motion/     # motion-director (composer + scheduler + L2 gesture tools)
+src/tools/      # kids-teacher tools framework (registry + location tools + Gemini adapter)
 templates/      # index (learning page) + config (settings)
 static/         # CSS/JS, mascot SVGs
 tests/          # pytest suite — see pytest.ini (pythonpath=src, asyncio_mode=auto)
 infra/          # Terraform for Cloud Run, Artifact Registry, budget kill-switch
 deploy/         # bootstrap + build-push scripts
 tasks/          # planning docs, security review, UX notes
+profiles/       # locked kids-teacher profile (instructions.txt, voice, tools allowlist)
 ```
 
 ## Running locally
@@ -43,6 +46,14 @@ ffmpeg is required on the host. First STT call loads Whisper (~30s); subsequent 
 - **Dual-pass Whisper**: one pass in the target language (native script), one in
   English (romanization). The higher similarity score wins.
 - **Dynamic words** (outside the static DB) are cached in GCS via `dynamic_words_store.py`.
+- **Tools framework** (`src/tools/`): a `ToolRegistry` mounted on the robot bridge
+  alongside the motion stack — exposes `register_current_location` /
+  `get_current_location` plus Gemini Live's built-in `google_search` grounding
+  tool. Memory and face tools stay inline in the Gemini config (intentionally —
+  they have tighter integration than the registry's async dispatch warrants).
+  Specs are kept in OpenAI-Realtime shape internally; the Gemini adapter
+  (`tools/gemini_adapter.py`) is the only place that boundary lives. Plan:
+  `tasks/plan-tools-framework.md`.
 - **Cloud Run** runs min=0 / max=2; startup probe allows 120s for Whisper to warm.
 - For deeper details, read the source — this file is intentionally a map, not a mirror.
 

@@ -225,6 +225,7 @@ async def _run_session_async(
     motion_layers_spec: Optional[str] = None,
 ) -> None:
     from kids_teacher_flow import build_robot_hooks
+    from tools.registry import build_default_registry
 
     # Run the session-start face sweep BEFORE building the config so the
     # present-names note is available to ``load_profile`` (FR-KID-15 /
@@ -245,7 +246,15 @@ async def _run_session_async(
         robot_controller,
         layers_spec=_resolve_motion_layers_spec(motion_layers_spec),
     )
-    hooks = build_robot_hooks(robot_controller, motion_stack=motion_stack)
+    # Build the tools-framework registry once per session and load its
+    # GCS-backed location store before the bridge starts dispatching.
+    # See tasks/plan-tools-framework.md §3.7.
+    tool_registry = await build_default_registry()
+    hooks = build_robot_hooks(
+        robot_controller,
+        motion_stack=motion_stack,
+        tool_registry=tool_registry,
+    )
     backend_factory = _build_backend_factory(provider, camera_worker)
     video_pump_factory = (
         _make_video_pump_factory(camera_worker)

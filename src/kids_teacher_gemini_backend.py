@@ -40,6 +40,7 @@ from memory_file import ALLOWED_KEYS as _MEMORY_ALLOWED_KEYS
 from memory_file import remove_notes_starting_with as memory_remove_notes_starting_with
 from memory_file import set_key as set_memory_key
 from memory_reconciler import add_note as reconcile_add_note
+from tools.gemini_adapter import GOOGLE_SEARCH_TOOL, build_gemini_tools
 
 load_project_dotenv()
 
@@ -438,6 +439,14 @@ def build_gemini_live_config(
             _build_memory_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_remember_face_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_forget_face_tool(types_module, non_blocking=tool_supports_non_blocking),
+            # Built-in grounding tool — lets the model search the web
+            # mid-turn for weather / current events. See
+            # tasks/plan-tools-framework.md §3.5.
+            GOOGLE_SEARCH_TOOL,
+            # Anything mounted via the tools-framework registry (e.g.
+            # the location tools) flows through session_payload["tools"]
+            # and is translated by the adapter.
+            *build_gemini_tools(types_module, session_payload.get("tools")),
         ],
     )
 

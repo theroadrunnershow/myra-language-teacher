@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional, Protocol, runtime_checkable
+from typing import Awaitable, Optional, Protocol, Union, runtime_checkable
 
 
 # V1 allowlist: only these OpenAI realtime models may be selected via
@@ -199,13 +199,17 @@ class KidsTeacherRuntimeHooks(Protocol):
     # that don't expose tools can omit this method — the handler probes
     # via ``getattr`` and skips dispatch when absent. The hook is expected
     # to return a string (typically JSON) the handler will ship back as
-    # the function output, or ``None`` to skip the ack entirely.
+    # the function output, or ``None`` to skip the ack entirely. The hook
+    # may also return an ``Awaitable`` of either — the realtime handler
+    # awaits it before sending the ack, so async tool dispatch (e.g. the
+    # tools-framework registry's GCS-backed location store) can do I/O
+    # without blocking the event loop.
     def handle_tool_call(  # pragma: no cover - protocol-only signature
         self,
         call_id: str,
         name: str,
         arguments: str,
-    ) -> Optional[str]: ...
+    ) -> Union[Optional[str], Awaitable[Optional[str]]]: ...
 
     # Optional: VAD edge notifications. The motion-director uses these to
     # switch the face-tracking gain state and flush in-flight gestures.

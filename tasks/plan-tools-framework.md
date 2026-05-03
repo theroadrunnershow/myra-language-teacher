@@ -32,11 +32,13 @@ fix:
   Motion tools just enqueue into a scheduler — no I/O, no blocking. The
   location tools need GCS I/O on writes, so the framework must support
   an async dispatch path.
-- Tool hooks today are only on the **robot bridge**. The browser/SSE
-  flow does not implement them. If we want the web-only deployment to
-  call the location tools too, the pack must mount somewhere both the
-  web and robot paths share — most naturally as a small mixin/composer
-  added to whichever hooks class the path uses.
+- Tool hooks today live only on the **robot bridge**, and that turns
+  out to be the *only* place the kids-teacher Gemini Live session runs:
+  `GeminiRealtimeBackend` is constructed exclusively in
+  `robot_kids_teacher.py:651-657`; the kids-teacher web routes
+  (`kids_teacher_routes.py`) only serve a page + status endpoint, no
+  SSE/WebSocket. So the framework only ever needs to mount once, at
+  the robot bridge layer.
 - Tool *output* is plain JSON (e.g. `{"ok": true, "detail": "..."}`).
   The model reads it and produces speech in the lesson language. Tools
   do not need to localise their payloads.
@@ -52,7 +54,9 @@ fix:
 2. Works for the Gemini Live backend (the active path). Keep tool
    specs in OpenAI-Realtime shape internally so a later OpenAI Realtime
    adapter is possible, but parity is *not* a V1 goal.
-3. Works in both surfaces (web/SSE flow *and* robot bridge).
+3. Mounts in one place — the robot bridge — because that is the only
+   surface that today instantiates the kids-teacher Gemini Live session
+   (no separate web/SSE realtime path exists).
 4. Async-friendly — a tool can `await` an HTTP/GCS call without
    blocking the event loop or stalling the assistant turn.
 5. Failure-safe — a tool that errors or times out returns a structured

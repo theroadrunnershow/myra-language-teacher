@@ -34,6 +34,8 @@ from kids_teacher_types import (
     SessionStatus,
     Speaker,
 )
+from motion.tool_specs import MOTION_TOOL_NAMES
+from tools.base import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +82,7 @@ class KidsTeacherRobotHooks:
         playback_speed: float = 1.0,
         recovery_cue: Optional[Callable[[Any], None]] = None,
         motion_stack: Optional[Any] = None,
+        tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
         """Create a hook implementation bound to ``robot_controller``.
 
@@ -116,11 +119,20 @@ class KidsTeacherRobotHooks:
                 methods — the composer becomes the sole pose driver. Leave
                 ``None`` to preserve the pre-motion-director behaviour
                 (the kill switch).
+            tool_registry: Optional :class:`tools.base.ToolRegistry`
+                exposing the kids-teacher tools framework (location
+                tools and any future plug-ins). When present, the bridge
+                merges its specs with motion's and falls back to the
+                registry for any tool name motion does not own. Motion
+                names take precedence; the registry's dispatch is async
+                so ``handle_tool_call`` may return a coroutine for
+                registry calls — the realtime handler awaits it.
         """
         self._robot = robot_controller
         self._sample_rate = sample_rate
         self._log = logger_override or logger
         self._motion_stack = motion_stack
+        self._tool_registry = tool_registry
         if play_chunk is not None:
             self._play_chunk = play_chunk
         else:
@@ -344,24 +356,45 @@ class KidsTeacherRobotHooks:
         """No-op. The flow's review-store wrapper handles persistence."""
         return None
 
-    def handle_tool_call(
-        self, call_id: str, name: str, arguments: str
-    ) -> Optional[str]:
-        """Forward a function tool call to the motion stack.
+    def handle_tool_call(self, call_id: str, name: str, arguments: str):
+        """Forward a function tool call to motion or the tools registry.
 
-        When no motion stack is configured we ignore the call and return
-        ``None`` so the realtime handler skips the ack. The stack itself
-        validates the tool name + arguments and returns a JSON ack string.
+        Motion names (``play_gesture`` / ``stop_motion``) route into the
+        synchronous motion stack; the JSON ack returns immediately.
+        Anything else falls through to the tools-framework registry,
+        whose dispatch is async — we return its coroutine and the
+        realtime handler awaits it (see Step 2 of plan-tools-framework).
+
+        When neither surface is configured (or the requested name is
+        unknown to both) we return ``None`` so the realtime handler
+        skips the ack.
         """
-        if self._motion_stack is None:
-            return None
+        if self._motion_stack is not None and name in MOTION_TOOL_NAMES:
+            try:
+                return self._motion_stack.handle_tool_call(
+                    call_id, name, arguments
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] motion handle_tool_call raised: %s",
+                    exc,
+                )
+                return None
+        if self._tool_registry is not None:
+            return self._dispatch_via_registry(name, arguments)
+        return None
+
+    async def _dispatch_via_registry(
+        self, name: str, arguments: str
+    ) -> Optional[str]:
         try:
-            return self._motion_stack.handle_tool_call(call_id, name, arguments)
+            result = await self._tool_registry.dispatch(name, arguments)
         except Exception as exc:
             self._log.warning(
-                "[kids_teacher_robot_bridge] handle_tool_call raised: %s", exc
+                "[kids_teacher_robot_bridge] registry dispatch raised: %s", exc
             )
             return None
+        return result.to_payload()
 
     def on_speech_started(self) -> None:
         """Forward the VAD speech-start edge to the motion stack."""
@@ -378,32 +411,59 @@ class KidsTeacherRobotHooks:
     def additional_tool_specs(self) -> list:
         """Tool specs the realtime handler should add to ``session.update``.
 
-        Empty when no motion stack is wired or when the gestures layer
-        is disabled.
+        Concatenates motion specs (when the motion stack is present and
+        gestures enabled) with the tools-framework registry's specs
+        (when wired). Each subsystem's exceptions are swallowed
+        independently — a broken motion layer must not silence the
+        registry, and vice versa.
         """
-        if self._motion_stack is None:
-            return []
-        try:
-            return list(self._motion_stack.additional_tool_specs())
-        except Exception as exc:
-            self._log.warning(
-                "[kids_teacher_robot_bridge] additional_tool_specs raised: %s",
-                exc,
-            )
-            return []
+        specs: list = []
+        if self._motion_stack is not None:
+            try:
+                specs.extend(list(self._motion_stack.additional_tool_specs()))
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] motion additional_tool_specs raised: %s",
+                    exc,
+                )
+        if self._tool_registry is not None:
+            try:
+                specs.extend(self._tool_registry.specs())
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] registry specs() raised: %s",
+                    exc,
+                )
+        return specs
 
     def additional_instructions(self) -> str:
-        """Optional system-prompt extension. Empty when motion stack is absent."""
-        if self._motion_stack is None:
-            return ""
-        try:
-            return self._motion_stack.gesture_vocabulary_prompt_block()
-        except Exception as exc:
-            self._log.warning(
-                "[kids_teacher_robot_bridge] gesture_vocabulary_prompt_block raised: %s",
-                exc,
-            )
-            return ""
+        """Optional system-prompt extension.
+
+        Concatenates motion's gesture vocabulary block with the
+        registry's prompt block; either may be empty.
+        """
+        blocks: list[str] = []
+        if self._motion_stack is not None:
+            try:
+                block = self._motion_stack.gesture_vocabulary_prompt_block()
+                if block:
+                    blocks.append(block)
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] gesture_vocabulary_prompt_block raised: %s",
+                    exc,
+                )
+        if self._tool_registry is not None:
+            try:
+                block = self._tool_registry.prompt_block()
+                if block:
+                    blocks.append(block)
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] registry prompt_block() raised: %s",
+                    exc,
+                )
+        return "\n\n".join(blocks)
 
     # ------------------------------------------------------------------
     # Internals

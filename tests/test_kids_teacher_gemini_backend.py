@@ -173,9 +173,13 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     assert config.output_audio_transcription is not None
     # Memory tool exposes two FunctionDeclarations (set_about + add_note);
     # face tools (remember_face, forget_face) are separate Tool entries
-    # asserted in their own test below.
-    assert len(config.tools) == 3
-    memory_decls = config.tools[0].function_declarations
+    # asserted in their own test below. The built-in google_search tool
+    # rides as a single-key dict per the Gemini Live docs (added by the
+    # tools-framework wiring; see tasks/plan-tools-framework.md §3.5).
+    assert len(config.tools) == 4
+    assert {"google_search": {}} in config.tools
+    function_tools = [t for t in config.tools if hasattr(t, "function_declarations")]
+    memory_decls = function_tools[0].function_declarations
     memory_names = [d.name for d in memory_decls]
     assert memory_names == ["set_about", "add_note"]
     for d in memory_decls:
@@ -1932,6 +1936,88 @@ def test_face_tools_not_registered_on_openai_backend() -> None:
     assert "forget_face" not in profile.allowed_tools
 
 
+def test_build_live_config_always_includes_google_search() -> None:
+    """The built-in ``google_search`` grounding tool must be wired into
+    every Gemini Live session, regardless of what (if anything) the
+    session payload provides via ``additional_tools``. See plan §3.5.
+    """
+    # Empty session payload → google_search still present.
+    config = build_gemini_live_config(
+        {"instructions": "hi", "voice": "alloy"}, _FakeTypes
+    )
+    assert {"google_search": {}} in config.tools
+
+    # With session_payload["tools"] populated → still exactly one
+    # google_search entry (no duplication).
+    payload_with_tools = {
+        "instructions": "hi",
+        "voice": "alloy",
+        "tools": [
+            {
+                "type": "function",
+                "name": "register_current_location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                    "additionalProperties": False,
+                },
+            }
+        ],
+    }
+    config = build_gemini_live_config(payload_with_tools, _FakeTypes)
+    google_search_entries = [
+        t for t in config.tools if isinstance(t, dict) and "google_search" in t
+    ]
+    assert google_search_entries == [{"google_search": {}}]
+
+
+def test_build_live_config_translates_session_payload_tools_via_adapter() -> None:
+    """``session_payload["tools"]`` round-trips through the Gemini adapter
+    so registry-mounted tools (e.g. ``register_current_location``) reach
+    ``LiveConnectConfig.tools``. Previously the field was dropped on the
+    floor — see plan §1 "Bug-shaped gap".
+    """
+    payload = {
+        "instructions": "hi",
+        "voice": "alloy",
+        "tools": [
+            {
+                "type": "function",
+                "name": "register_current_location",
+                "description": "Save the kid's current city.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"location": {"type": "string"}},
+                    "required": ["location"],
+                    "additionalProperties": False,
+                },
+            },
+            # Stub spec from the profile.allowed_tools loop — adapter
+            # must skip it so the explicit memory builder isn't shadowed.
+            {"type": "function", "name": "set_about"},
+        ],
+    }
+    config = build_gemini_live_config(payload, _FakeTypes)
+    declared_names: set[str] = set()
+    for tool in config.tools:
+        if not hasattr(tool, "function_declarations"):
+            continue
+        for decl in tool.function_declarations:
+            declared_names.add(decl.name)
+    assert "register_current_location" in declared_names
+    # Stub didn't shadow the explicit memory declaration.
+    assert "set_about" in declared_names
+    # Each name appears exactly once (stub was filtered).
+    name_counts: dict[str, int] = {}
+    for tool in config.tools:
+        if not hasattr(tool, "function_declarations"):
+            continue
+        for decl in tool.function_declarations:
+            name_counts[decl.name] = name_counts.get(decl.name, 0) + 1
+    assert name_counts["set_about"] == 1
+
+
 def test_remember_face_tool_declaration_present_on_gemini() -> None:
     """The Gemini live config must register the memory tools (set_about /
     add_note) alongside the face tools (remember_face / forget_face). The
@@ -1943,6 +2029,10 @@ def test_remember_face_tool_declaration_present_on_gemini() -> None:
     )
     declared_names: set[str] = set()
     for tool in config.tools:
+        # Built-in tools (e.g. google_search) ride as plain dicts and have
+        # no FunctionDeclaration list — skip them.
+        if not hasattr(tool, "function_declarations"):
+            continue
         for decl in tool.function_declarations:
             declared_names.add(decl.name)
     assert "set_about" in declared_names

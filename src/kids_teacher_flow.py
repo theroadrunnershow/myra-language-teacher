@@ -186,7 +186,10 @@ def _default_recovery_cue(robot_controller: object) -> None:
 
 
 def build_robot_hooks(
-    robot_controller: object, *, motion_stack: object = None
+    robot_controller: object,
+    *,
+    motion_stack: object = None,
+    tool_registry: object = None,
 ) -> KidsTeacherRuntimeHooks:
     """Build the real robot audio bridge hooks for a running session.
 
@@ -198,6 +201,11 @@ def build_robot_hooks(
     ``motion_stack`` is the optional motion-director orchestrator. When
     provided, the bridge routes state and audio through it; when ``None``,
     the legacy speak/listen/idle path runs unchanged.
+
+    ``tool_registry`` is the optional tools-framework
+    :class:`tools.base.ToolRegistry`. When provided, the bridge merges
+    its specs / prompt blocks with motion's and dispatches any tool
+    name motion does not own through the registry's async path.
     """
     from kids_teacher_robot_bridge import KidsTeacherRobotHooks
 
@@ -206,6 +214,7 @@ def build_robot_hooks(
         playback_speed=_resolve_playback_speed(),
         recovery_cue=_default_recovery_cue,
         motion_stack=motion_stack,
+        tool_registry=tool_registry,
     )
 
 
