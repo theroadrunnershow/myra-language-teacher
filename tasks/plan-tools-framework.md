@@ -1,10 +1,13 @@
-# Plan: Tools framework for Myra (weather, kids-events, …)
+# Plan: Tools framework for Myra (location + Google Search grounding)
 
-**Status**: design draft, not started.
+**Status**: design complete (open questions resolved 2026-05-03), not started.
 **Owner**: TBD.
-**Trajectory**: 5+ tools (weather, local kids events, story picker, joke,
-calendar/timer, …). Inline-per-tool wiring will not scale; standing up a
-proper pack + registry now is justified.
+**Backend scope**: Gemini Live only.
+**Trajectory**: V1 ships two location tools (register/get) plus the
+built-in `google_search` grounding tool. Future tools (story picker,
+joke, calendar/timer, …) plug in via the same registry. Inline-per-tool
+wiring will not scale; standing up a proper pack + registry now is
+justified.
 
 ---
 
@@ -21,20 +24,19 @@ fix:
 | Hooks adapter | `src/kids_teacher_robot_bridge.py:347-406` | Forwards hook calls through to the motion stack. |
 | Hook protocol | `src/kids_teacher_types.py:176` (`KidsTeacherRuntimeHooks`) | Declares `handle_tool_call`; `additional_tool_specs` / `additional_instructions` are probed via `getattr` (`kids_teacher_realtime.py:468-499`). |
 | Aggregator | `src/kids_teacher_backend.py:122` (`build_session_payload`) | Merges profile-allowlisted tools + `additional_tools` into `session_payload["tools"]`. |
-| OpenAI Realtime path | (downstream of `build_session_payload`) | Sends `session_payload["tools"]` directly. |
-| Gemini Live path | `src/kids_teacher_gemini_backend.py:408` | **Bug-shaped gap:** `LiveConnectConfig(tools=[...])` is hardcoded to memory/face tools. `session_payload["tools"]` is dropped on the floor. |
+| Gemini Live path | `src/kids_teacher_gemini_backend.py:408` | **Bug-shaped gap:** `LiveConnectConfig(tools=[...])` is hardcoded to memory/face tools. `session_payload["tools"]` is dropped on the floor; the built-in `google_search` tool is also not wired. |
 
 ### Other observations
 
 - Tool dispatch is **sync** (`handle_tool_call(...) -> Optional[str]`).
-  Motion tools just enqueue into a scheduler — no I/O, no blocking. Weather
-  and kids-events both need network I/O, so the framework must support an
-  async dispatch path.
+  Motion tools just enqueue into a scheduler — no I/O, no blocking. The
+  location tools need GCS I/O on writes, so the framework must support
+  an async dispatch path.
 - Tool hooks today are only on the **robot bridge**. The browser/SSE
   flow does not implement them. If we want the web-only deployment to
-  call weather/events too, the pack must mount somewhere both the web and
-  robot paths share — most naturally as a small mixin/composer added to
-  whichever hooks class the path uses.
+  call the location tools too, the pack must mount somewhere both the
+  web and robot paths share — most naturally as a small mixin/composer
+  added to whichever hooks class the path uses.
 - Tool *output* is plain JSON (e.g. `{"ok": true, "detail": "..."}`).
   The model reads it and produces speech in the lesson language. Tools
   do not need to localise their payloads.
@@ -45,17 +47,19 @@ fix:
 
 **Goals**
 
-1. One module per tool — adding a 6th tool means writing one file and
+1. One module per tool — adding a new tool means writing one file and
    registering it, no edits in the realtime/backend layers.
-2. Works in both backends (OpenAI Realtime *and* Gemini Live) without
-   per-tool branching.
+2. Works for the Gemini Live backend (the active path). Keep tool
+   specs in OpenAI-Realtime shape internally so a later OpenAI Realtime
+   adapter is possible, but parity is *not* a V1 goal.
 3. Works in both surfaces (web/SSE flow *and* robot bridge).
-4. Async-friendly — a tool can `await` an HTTP call without blocking the
-   event loop or stalling the assistant turn.
+4. Async-friendly — a tool can `await` an HTTP/GCS call without
+   blocking the event loop or stalling the assistant turn.
 5. Failure-safe — a tool that errors or times out returns a structured
    `ok=False` payload; the assistant turn keeps going.
-6. Configurable per-profile — `profile.allowed_tools` already exists; the
-   framework should opt tools in/out via that allowlist.
+6. Always-on for the kids profile — the registry does not filter by
+   allowlist. Existing `profile.allowed_tools` continues to gate legacy
+   memory/face stubs untouched.
 
 **Non-goals (V1)**
 
@@ -63,6 +67,7 @@ fix:
 - Per-tool quota / rate limiting (revisit after we have 3+ live tools).
 - Multi-turn tool conversations (the model gets one response per call).
 - Tools that mutate device state outside the existing motion surface.
+- OpenAI Realtime parity.
 
 ---
 
@@ -75,14 +80,14 @@ src/tools/
   registry.py         # default_registry(): wires built-in tools
   gemini_adapter.py   # OpenAI-shaped spec → google.genai types.Tool
   hooks.py            # ToolsHooksMixin: provides the three hook methods
-  weather.py          # WeatherTool
-  kids_events.py      # KidsEventsTool
+  location.py         # RegisterCurrentLocationTool, GetCurrentLocationTool
+  location_store.py   # GCS-backed location cache (loaded once at startup)
 
 tests/tools/
   test_base.py
   test_gemini_adapter.py
-  test_weather.py
-  test_kids_events.py
+  test_location.py
+  test_location_store.py
   test_hooks_integration.py
 ```
 
@@ -105,7 +110,7 @@ class Tool(Protocol):
 
 `ToolResult` mirrors `motion.tool_specs.ToolCallResult` (an `ok` bool +
 `detail` string), with one addition — an optional `data: dict` for
-structured payloads (weather: temp/condition/forecast). `to_payload()`
+structured payloads (e.g. the registered location). `to_payload()`
 emits the JSON the model receives.
 
 ### 3.2 The registry
@@ -122,12 +127,13 @@ class ToolRegistry:
 
     async def dispatch(self, name: str, arguments: Any) -> ToolResult:
         # parse arguments (reuse motion's _coerce_arguments), look up by
-        # name, await tool.call(args), wrap exceptions into ok=False.
+        # name, await tool.call(args) under a 3s wall-clock cap, wrap
+        # exceptions / timeouts into ok=False.
 ```
 
 The registry is the single place that knows about argument coercion,
-exception trapping, and unknown-name handling — individual tools stay
-small.
+exception trapping, the 3s timeout (Q5), and unknown-name handling —
+individual tools stay small.
 
 ### 3.3 The hooks mixin
 
@@ -162,11 +168,11 @@ class compose this mixin. The robot bridge already has its own
   doing tool plumbing entirely.
 
 **Recommendation: (a).** Motion has a *much* tighter integration with the
-bridge (lifecycle, scheduler, decision logger) than weather/events ever
-will. Forcing it through the registry's async dispatch buys nothing. The
-mixin's outputs are merged with motion's at the bridge layer — a few
-lines of `list(motion_specs) + list(registry_specs)` — preserving each
-subsystem's existing tests.
+bridge (lifecycle, scheduler, decision logger) than the location tools
+ever will. Forcing it through the registry's async dispatch buys
+nothing. The mixin's outputs are merged with motion's at the bridge
+layer — a few lines of `list(motion_specs) + list(registry_specs)` —
+preserving each subsystem's existing tests.
 
 ### 3.4 The async dispatch change
 
@@ -185,7 +191,7 @@ if asyncio.iscoroutine(output):
 
 Backwards-compatible — motion's sync return still works.
 
-### 3.5 The Gemini adapter (closing the bug)
+### 3.5 The Gemini adapter (closing the bug + enabling google_search)
 
 `gemini_adapter.py` translates the canonical OpenAI-shaped spec list into
 `types.Tool(function_declarations=[...])` and is invoked from
@@ -199,24 +205,54 @@ return types_module.LiveConnectConfig(
         _build_memory_tool(...),
         _build_remember_face_tool(...),
         _build_forget_face_tool(...),
+        {"google_search": {}},     # built-in grounding tool — no schema needed
         *extra_tools,
     ],
 )
 ```
 
-This single adapter is the only place backend-shape divergence lives.
-Tests cover: enum properties, `additionalProperties: False`, empty-args
+`google_search` is a Gemini-native built-in tool: declared inline as a
+single-key dict, no `FunctionDeclaration`, no registry round-trip. It
+runs inside the model's turn so the registry's 3s cap does not apply
+(documented trade — see §6).
+
+This adapter is the only place backend-shape divergence lives. Tests
+cover: enum properties, `additionalProperties: False`, empty-args
 schemas, and dropping any spec the adapter can't translate (with a
 warning) so a malformed entry doesn't take down the session.
 
-### 3.6 Per-profile allowlist
+### 3.6 Allowlist gating
 
-`profile.allowed_tools` is already used by `build_session_payload` to add
-empty stub specs for allowlisted names (`kids_teacher_backend.py:148`).
-The registry takes the allowlist as a constructor arg and filters tools
-whose `name` is not in it. The `{"type": "function", "name": name}` stub
-loop in `build_session_payload` becomes dead code once the registry
-provides full specs and is removed (Step 7).
+**Decision (Q3): always-on for the kids profile.** The registry takes no
+allowlist arg. The existing `profile.allowed_tools` stub loop in
+`build_session_payload` (`kids_teacher_backend.py:148`) is left alone —
+its concerns (gating legacy memory/face stubs) are orthogonal to the
+new framework.
+
+### 3.7 Location persistence
+
+```python
+# src/tools/location_store.py
+class LocationStore:
+    """In-memory cache backed by a single GCS object.
+
+    Loaded once at server startup; reads always hit the cache.
+    Writes update the cache and persist to GCS in the same call.
+    """
+    DEFAULT = {"location": "Seattle, WA 98177"}
+
+    async def load(self) -> None: ...    # called from FastAPI startup
+    def get(self) -> dict: ...           # sync, cache-only
+    async def set(self, location: str) -> None: ...   # cache + GCS write
+```
+
+- Same pattern as `dynamic_words_store.py`.
+- GCS object key: `kids_teacher/location.json` (single object, not
+  per-profile — Myra is the only user).
+- Pre-populates with `"Seattle, WA 98177"` if the GCS object is missing.
+- The location is also injected into the system prompt at session
+  start (so the model knows it without a tool call), *and* exposed via
+  `get_current_location` for mid-session refresh after a register call.
 
 ---
 
@@ -227,11 +263,12 @@ step's verification fails.
 
 ### Step 1 — Framework skeleton (no real tools)
 
-- Add `src/tools/base.py` with `Tool`, `ToolResult`, `ToolRegistry`.
+- Add `src/tools/base.py` with `Tool`, `ToolResult`, `ToolRegistry`
+  (3s `asyncio.wait_for` cap baked into `dispatch`).
 - Add `src/tools/hooks.py` with `ToolsHooksMixin`.
 - Tests: registry dispatch (happy path, unknown tool, exception in
-  `call`, malformed JSON args), prompt-block concatenation, allowlist
-  filtering.
+  `call`, malformed JSON args, timeout → ok=False), prompt-block
+  concatenation.
 
 ✅ `pytest tests/tools/test_base.py` green.
 
@@ -246,17 +283,20 @@ step's verification fails.
 
 ✅ Existing motion tests pass; new test for awaitable return passes.
 
-### Step 3 — Gemini adapter
+### Step 3 — Gemini adapter + google_search
 
 - Add `src/tools/gemini_adapter.py` translating OpenAI-shaped specs to
   `types.Tool(function_declarations=[FunctionDeclaration(...)])`.
-- Wire it into `_build_live_connect_config`.
+- Wire it into `_build_live_connect_config`, and add the inline
+  `{"google_search": {}}` entry alongside the existing memory/face
+  tools.
 - Tests: schema translation for required-only, optional, enum, empty;
-  malformed spec → warning + skip, not crash.
+  malformed spec → warning + skip, not crash; `google_search` always
+  present in the resulting `tools` list regardless of `extra_tools`.
 
 ✅ A fake `additional_tools=[{"type":"function","name":"X","parameters":{...}}]`
-makes it into `LiveConnectConfig.tools`; existing memory/face tools
-unchanged.
+makes it into `LiveConnectConfig.tools`; `google_search` present;
+existing memory/face tools unchanged.
 
 ### Step 4 — Mount on robot bridge (no new tool yet)
 
@@ -271,93 +311,126 @@ unchanged.
 ✅ Robot bridge integration test passes both motion and registry tool
 calls.
 
-### Step 5 — First real tool: weather
+### Step 5 — Location store + register/get tools
 
-- `src/tools/weather.py` — `WeatherTool` calling a chosen API
-  (Open-Meteo is keyless and fits "minimal infra"; revisit if accuracy is
-  poor).
-- Args: `{ "location": "string" }` (start with city name; geocode via
-  Open-Meteo's geocoding endpoint).
-- Returns a small payload: `{ ok, condition, temp_c, summary }`.
-- Cache-by-location for ~10 min in-process.
-- 2s timeout; on timeout/network error return `ok=False` with a kid-safe
-  detail.
-- Tests: happy path with a stubbed HTTP client, cache hit, timeout
-  returns `ok=False`, malformed location returns `ok=False`.
-- Manual smoke: ask Myra "what's the weather?" → mascot answers
-  appropriately in Telugu/English.
+- `src/tools/location_store.py` — `LocationStore` per §3.7. Load once
+  on FastAPI startup; cache-only reads; cache+GCS writes.
+- `src/tools/location.py`:
+  - `RegisterCurrentLocationTool` — args `{"location": "string"}`.
+    Calls `store.set(location)`. Returns
+    `{"ok": true, "location": "..."}`.
+  - `GetCurrentLocationTool` — no args. Returns
+    `{"ok": true, "location": "..."}` from cache.
+- Wire both into the default registry.
+- Inject the current location into the system prompt at
+  `build_session_payload` time (read from `LocationStore.get()`).
+- Pre-populate Seattle ZIP 98177 if the GCS object is absent on first
+  load.
+- Tests: register updates cache + writes once to a stubbed GCS client;
+  get returns the cached value; missing-GCS-object path falls back to
+  default; cache survives across `get()` calls without re-reading GCS.
+- Manual smoke: ask Myra "where do I live?" → "Seattle"; "I moved to
+  San Francisco" → register fires, GCS object updated; restart server
+  → location persists.
 
 ✅ Manual smoke succeeds end-to-end on both web flow and (if available)
 robot.
 
-### Step 6 — Second real tool: kids events (proof of pluggability)
+### Step 6 — Prompt hint for google_search usage
 
-- `src/tools/kids_events.py` — pick a source (Eventbrite kids-category
-  API? city-specific? local JSON file?). **Open question — pick during
-  implementation.** If no good free API exists, ship a static JSON
-  fixture so the framework can be exercised end-to-end and revisit data
-  source separately.
-- Should require **zero** changes outside `src/tools/` and the
-  registry's default tool list.
+- Update the kids profile system prompt: "If the kid asks about
+  weather, current events, or anything that needs up-to-date facts,
+  use Google Search. If asked about location and you don't have one,
+  call register_current_location after the kid tells you their city."
+- No code in `src/tools/` for this — it's a prompt change only;
+  google_search is already wired via Step 3.
+- Manual smoke: ask "what's the weather?" — verify in the Gemini
+  trace that `google_search` was invoked and that the answer
+  references current Seattle weather. Verify the assistant
+  paraphrases in Telugu/English at the lesson level.
 
-✅ Adding the tool is a pure-additive diff, no edits to backend / realtime
-/ bridge.
+✅ Manual smoke succeeds; no false-positive search calls when the
+question is answerable from the lesson DB.
 
 ### Step 7 — Cleanup
 
-- Remove the `{"type": "function", "name": name}` stub loop in
-  `build_session_payload` once the registry produces full specs (verify
-  no remaining caller relies on it).
 - Update `.claude/CLAUDE.md` "Layout" section: add `src/tools/`.
 - Update `.claude/CLAUDE.md` "Key architectural notes": one sentence
-  describing the tools framework.
+  describing the tools framework + `google_search` grounding.
 
 ✅ `pytest` full suite green.
 
 ---
 
-## 5. Open questions
+## 5. Decisions (closed open questions)
 
-| # | Question | Default if not answered |
+| # | Question | Decision (2026-05-03) |
 | --- | --- | --- |
-| Q1 | Weather data source — Open-Meteo (keyless, free) vs OpenWeatherMap (key, richer)? | Open-Meteo for V1; revisit if Myra notices wrong forecasts. |
-| Q2 | Kids-events data source. | Static JSON fixture for first ship; real source as a follow-up. |
-| Q3 | Should tools be opt-in per `profile.allowed_tools`, or always-on for the kids profile? | Per-profile allowlist (matches existing pattern). |
-| Q4 | Where do tool API keys live — env vars, settings UI, GCP Secret Manager? | Env vars first (matches current pattern); Secret Manager when we deploy. |
-| Q5 | Does the realtime handler need a per-tool-call timeout in addition to the tool's own timeout? | Yes — defensive 5s upper bound at the registry layer. |
+| Q1 | Weather data source | **N/A** — no weather tool. The model uses built-in `google_search` to answer weather questions via Gemini Live grounding. |
+| Q2 | Kids-events data source | **N/A** — no events tool. `google_search` covers it. **No hard-coded JSON fixtures.** |
+| Q3 | Tool gating | **Always-on** for the kids profile. Registry does not filter by allowlist. |
+| Q4 | API key storage | **Env vars** for now (matches existing pattern); GCS Secret Manager when we deploy. The location tools need no third-party keys; only existing GCS credentials. |
+| Q5 | Per-call timeout | **3s registry-level cap**, in addition to per-tool timeouts. Tighter than the original 5s default to maintain a high latency bar. The built-in `google_search` tool bypasses this cap because it runs inside the Gemini Live model's turn. |
+
+Additional decisions made while closing Q1–Q5:
+
+- **OpenAI Realtime parity dropped.** Gemini Live is the only target
+  backend. Internal spec shape stays OpenAI-flavoured so a future
+  adapter is still possible, but no V1 testing or wiring.
+- **Pre-populated location**: `Seattle, WA 98177` — written into the
+  `LocationStore` at first boot if the GCS object is missing.
+- **Persistence shape**: GCS-backed key/value, loaded once into an
+  in-memory cache at server startup. Reads always hit the cache; writes
+  go through both the cache and a single GCS write.
+- **`get_current_location` tool ships in V1** alongside `register`,
+  even though the location is also injected into the system prompt —
+  so the model can re-read after a mid-session register call without
+  waiting for the next session.
 
 ---
 
 ## 6. Risks
 
-- **Latency on the audio path.** A tool call inserts an HTTP round-trip
-  between the child's question and the assistant's reply. Mitigation:
-  hard 2s tool-side timeout, plus aggressive caching where possible
-  (weather is the obvious win). If latency becomes painful, consider
-  pre-fetching the most common tool (today's weather for the
-  configured location) at session start.
-- **Spec drift between OpenAI Realtime and Gemini Live.** The adapter
-  is the only place this lives, but Gemini's schema field names have
-  changed across SDK releases. Pin the adapter against a specific
-  `google.genai` version range and test it.
-- **Inappropriate tool output for a 4-year-old.** Weather and events
-  payloads are factual, but free-text fields (event names, weather
-  descriptions) could surface things outside Myra's vocabulary. Mitigate
-  by having tools only return short, structured fields; the model
-  paraphrases them in the lesson language.
+- **`google_search` latency on the audio path.** Search runs inside the
+  model's turn and the 3s registry cap does not apply. Variable
+  latency is the trade for skipping a custom weather/events tool.
+  Mitigation: the system prompt should restrict `google_search` to
+  questions that genuinely need fresh facts (weather, "what's
+  happening this weekend") and forbid it for content already in the
+  lesson DB.
+- **Spec drift between Gemini SDK versions.** The adapter is the only
+  place this lives, but Gemini's schema field names have changed across
+  SDK releases. Pin against a specific `google.genai` version range and
+  test it.
+- **`google_search` returning content unsafe for a 4-year-old.** Free
+  text from search results is harder to constrain than a structured
+  weather payload. Mitigations: system prompt instructs the assistant
+  to *paraphrase in the lesson language* (so verbatim odd English
+  doesn't leak through) and to skip results that reference adult
+  topics. Watch the first week's transcripts for slips.
 - **Tool failures during a turn.** A `ToolResult(ok=False, detail=...)`
   reaches the model as JSON — the system prompt should explicitly tell
   the assistant: *"if a tool reports `ok=false`, gently say you couldn't
   find out and move on."* Add this prompt hint as part of the
   registry's `prompt_block()`.
+- **GCS read at startup is a cold-start cost.** Cloud Run min=0 means
+  cold starts. The first request after a cold start pays the GCS read
+  once. Acceptable; same pattern as `dynamic_words_store.py`.
+- **`google_search` billing meter.** Gemini 2.5 Flash gets 500 grounded
+  requests/day free, then $14/1K. With one kid, this is functionally
+  unlimited — but the Cloud Run kill-switch budget should still flag
+  any spike (existing infra/ alarm covers this).
 
 ---
 
 ## 7. Verification gates
 
-- Step 1–4 are infrastructure; verified by unit tests.
-- Step 5 is the first real-world signal — manual smoke test on both web
-  and robot before declaring the framework working.
-- Step 6 is the *real* validation: it should be additive only. If Step 6
-  requires touching anything outside `src/tools/` and the registry's tool
-  list, the framework's abstraction is wrong and we re-plan.
+- Steps 1–4 are infrastructure; verified by unit tests.
+- Step 5 is the first runtime signal — manual smoke per the step's
+  bullets (register → restart → persist).
+- Step 6 — manual smoke: weather question goes through `google_search`,
+  comes back paraphrased in the lesson language; non-weather question
+  doesn't trigger a search call.
+- Adding a *future* tool should be additive only. If it requires
+  touching anything outside `src/tools/` and the registry's tool list,
+  the framework's abstraction is wrong and we re-plan.
