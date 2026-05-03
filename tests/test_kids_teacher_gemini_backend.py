@@ -46,6 +46,12 @@ class _Record:
         self.__dict__.update(kwargs)
 
 
+class _FakeStartSensitivity:
+    START_SENSITIVITY_UNSPECIFIED = "START_SENSITIVITY_UNSPECIFIED"
+    START_SENSITIVITY_HIGH = "START_SENSITIVITY_HIGH"
+    START_SENSITIVITY_LOW = "START_SENSITIVITY_LOW"
+
+
 class _FakeTypes:
     Blob = _Record
     Content = _Record
@@ -59,6 +65,9 @@ class _FakeTypes:
     AudioTranscriptionConfig = _Record
     LiveConnectConfig = _Record
     SessionResumptionConfig = _Record
+    RealtimeInputConfig = _Record
+    AutomaticActivityDetection = _Record
+    StartSensitivity = _FakeStartSensitivity
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +211,24 @@ def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() ->
     config = build_gemini_live_config(payload, _FakeTypes)
     assert "set_about" in config.system_instruction
     assert "add_note" in config.system_instruction
+
+
+def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
+    # Gemini's defaults (start_sensitivity=HIGH, prefix_padding=20ms,
+    # silence_duration=100ms) are too eager — small noises trigger
+    # barge-in mid-sentence. The backend must override with LOW start
+    # sensitivity and longer prefix/silence windows.
+    payload = {"instructions": "hi", "voice": "alloy"}
+    config = build_gemini_live_config(payload, _FakeTypes)
+
+    rt = config.realtime_input_config
+    aad = rt.automatic_activity_detection
+    assert (
+        aad.start_of_speech_sensitivity
+        == _FakeStartSensitivity.START_SENSITIVITY_LOW
+    )
+    assert aad.prefix_padding_ms == 300
+    assert aad.silence_duration_ms == 500
 
 
 def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:

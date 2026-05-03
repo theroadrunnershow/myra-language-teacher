@@ -60,6 +60,17 @@ GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
 GEMINI_INPUT_SAMPLE_RATE = 16000
 GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 
+# Server-side VAD tuning. Gemini's defaults
+# (start_sensitivity=HIGH, prefix_padding=20ms, silence_duration=100ms)
+# are the most aggressive setting on the dial — any 20ms blip past the
+# energy bar fires a barge-in. For a kid talking to a robot in a noisy
+# room (and with the robot's own speaker leaking back into the mic),
+# that produces constant false interrupts. These values raise the bar:
+# require ~300ms of clearer-onset audio before declaring "speech started"
+# and ~500ms of silence before ending the turn.
+_VAD_PREFIX_PADDING_MS = 300
+_VAD_SILENCE_DURATION_MS = 500
+
 # OpenAI voice names → Gemini prebuilt voice names. Kept tiny and
 # explicit; unknown voices fall back to ``_DEFAULT_GEMINI_VOICE``.
 # ``Kore`` is a warm female voice recommended for child-facing use per
@@ -367,7 +378,14 @@ def build_gemini_live_config(
       **always enabled** (empty config dicts). The safety layer depends
       on child transcripts; without them topic classification regresses.
     * ``turn_detection`` with ``type == "server_vad"`` → Gemini's
-      default automatic activity detection (no explicit config needed).
+      automatic activity detection, tuned via ``realtime_input_config``
+      (see :data:`_VAD_*` constants). Defaults are far too eager for the
+      kids-teacher use case — small noises (clicks, coughs, the robot's
+      own speaker bleed) trigger barge-in mid-sentence — so we override:
+
+      - ``start_of_speech_sensitivity = LOW`` (fires less often)
+      - ``prefix_padding_ms = 300`` (~300ms of clear onset required)
+      - ``silence_duration_ms = 500`` (gives Myra room to think)
 
     ``resumption_handle`` enables Gemini Live's session-resumption protocol:
     pass ``None`` on the first connect (server starts emitting
@@ -394,6 +412,16 @@ def build_gemini_live_config(
         speech_config_kwargs["language_code"] = language_code
     speech_config = types_module.SpeechConfig(**speech_config_kwargs)
 
+    realtime_input_config = types_module.RealtimeInputConfig(
+        automatic_activity_detection=types_module.AutomaticActivityDetection(
+            start_of_speech_sensitivity=(
+                types_module.StartSensitivity.START_SENSITIVITY_LOW
+            ),
+            prefix_padding_ms=_VAD_PREFIX_PADDING_MS,
+            silence_duration_ms=_VAD_SILENCE_DURATION_MS,
+        ),
+    )
+
     return types_module.LiveConnectConfig(
         response_modalities=response_modalities,
         system_instruction=_append_memory_tool_instructions(
@@ -402,6 +430,7 @@ def build_gemini_live_config(
         speech_config=speech_config,
         input_audio_transcription=types_module.AudioTranscriptionConfig(),
         output_audio_transcription=types_module.AudioTranscriptionConfig(),
+        realtime_input_config=realtime_input_config,
         session_resumption=types_module.SessionResumptionConfig(
             handle=resumption_handle
         ),

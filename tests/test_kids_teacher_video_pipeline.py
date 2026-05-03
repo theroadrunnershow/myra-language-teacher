@@ -50,6 +50,12 @@ class _Record:
         self.__dict__.update(kwargs)
 
 
+class _FakeStartSensitivity:
+    START_SENSITIVITY_UNSPECIFIED = "START_SENSITIVITY_UNSPECIFIED"
+    START_SENSITIVITY_HIGH = "START_SENSITIVITY_HIGH"
+    START_SENSITIVITY_LOW = "START_SENSITIVITY_LOW"
+
+
 class _FakeTypes:
     Blob = _Record
     Content = _Record
@@ -63,6 +69,9 @@ class _FakeTypes:
     AudioTranscriptionConfig = _Record
     LiveConnectConfig = _Record
     SessionResumptionConfig = _Record
+    RealtimeInputConfig = _Record
+    AutomaticActivityDetection = _Record
+    StartSensitivity = _FakeStartSensitivity
 
 
 class _FakeSession:
