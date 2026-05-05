@@ -43,12 +43,14 @@ _DEG = math.pi / 180.0
 
 
 # State -> pose mapping. ``idle`` is neutral so the wobble / face layers
-# define the only motion at rest; ``listen`` reproduces the existing
-# RobotController.listen() pose; ``speak`` is neutral because L1 wobble
-# drives the head-bob equivalent.
+# define the only motion at rest; ``listen`` is neutral on Reachy Mini
+# until we re-tune (the inherited 15° head_roll from RobotController.listen()
+# was effectively dormant under the apply_pose degree/radian bug fixed in
+# b193519 and felt excessive once it actually reached the joint); ``speak``
+# is neutral because L1 wobble drives the head-bob equivalent.
 DEFAULT_STATE_POSES: Dict[str, PoseOffset] = {
     "idle": NEUTRAL,
-    "listen": PoseOffset(head_roll=15.0 * _DEG),
+    "listen": NEUTRAL,
     "speak": NEUTRAL,
 }
 
