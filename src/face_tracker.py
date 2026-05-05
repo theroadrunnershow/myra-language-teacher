@@ -46,7 +46,7 @@ Subscriber = Callable[[GazeTarget], None]
 
 GAZE_HZ_ENV_VAR = "KIDS_TEACHER_GAZE_HZ"
 GAZE_DEAD_ZONE_ENV_VAR = "KIDS_TEACHER_GAZE_DEAD_ZONE"
-DEFAULT_GAZE_HZ = 1.0
+DEFAULT_GAZE_HZ = 3.0
 DEFAULT_GAZE_DEAD_ZONE = 0.05
 DEFAULT_HOLD_SECONDS = 1.0
 # Cache the enrolled-child assignment for at most this long even when the
