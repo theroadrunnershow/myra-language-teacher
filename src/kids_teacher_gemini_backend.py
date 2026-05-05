@@ -442,7 +442,14 @@ def build_gemini_live_config(
             # Built-in grounding tool — lets the model search the web
             # mid-turn for weather / current events. See
             # tasks/plan-tools-framework.md §3.5.
-            GOOGLE_SEARCH_TOOL,
+            # Disabled: google_search grounding is a paid-tier feature
+            # on the Gemini API. Including it in the tools array of a
+            # free-tier project causes session.setup to be rejected
+            # with a misleading 1011 "exceeded your current quota"
+            # error — same code path as actual rate-limit exhaustion.
+            # Re-enable once the project is on a billed tier (or gate
+            # behind an env var if mixed-tier support is needed).
+            # GOOGLE_SEARCH_TOOL,
             # Anything mounted via the tools-framework registry (e.g.
             # the location tools) flows through session_payload["tools"]
             # and is translated by the adapter.
