@@ -132,6 +132,37 @@ async def test_start_emits_listening_status() -> None:
     assert hooks.statuses[0].session_id == "s1"
 
 
+async def test_start_skips_greeting_when_prompt_unset() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    handler = _handler(backend, hooks)
+
+    await handler.start()
+    await backend.end_stream()
+
+    assert backend.text_messages == []
+
+
+async def test_start_sends_greeting_after_listening_when_prompt_set() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()
+    greeting = 'Greet the child by saying exactly: "Hi there!" Nothing else.'
+    handler = KidsTeacherRealtimeHandler(
+        config=_config(),
+        backend=backend,
+        hooks=hooks,
+        greeting_prompt=greeting,
+    )
+
+    await handler.start()
+    await backend.end_stream()
+
+    assert backend.text_messages == [greeting]
+    # Greeting must fire after the LISTENING status so the bridge has
+    # already swapped to the listening pose by the time audio arrives.
+    assert hooks.statuses[0].status == SessionStatus.LISTENING
+
+
 # ---------------------------------------------------------------------------
 # Behavior 2: transcript ordering for delta/delta/final
 # ---------------------------------------------------------------------------

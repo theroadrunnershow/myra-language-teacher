@@ -59,12 +59,14 @@ class KidsTeacherRealtimeHandler:
         hooks: KidsTeacherRuntimeHooks,
         clock: Optional[Callable[[], float]] = None,
         memory_turns: int = 5,
+        greeting_prompt: Optional[str] = None,
     ) -> None:
         self._config = config
         self._backend = backend
         self._hooks = hooks
         self._clock = clock or time.time
         self._memory: Deque[SessionMemoryTurn] = deque(maxlen=max(1, memory_turns))
+        self._greeting_prompt = greeting_prompt
 
         self._started = False
         self._stopped = False
@@ -109,6 +111,13 @@ class KidsTeacherRealtimeHandler:
         self._connect_failed = False
         self._started = True
         self._publish_status(SessionStatus.LISTENING)
+        if self._greeting_prompt:
+            try:
+                await self._backend.send_text(self._greeting_prompt)
+            except Exception as exc:
+                logger.warning(
+                    "[kids_teacher_realtime] greeting send_text raised: %s", exc
+                )
 
     async def push_audio(self, chunk: bytes) -> None:
         """Forward a child audio chunk to the backend."""

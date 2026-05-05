@@ -311,6 +311,7 @@ async def run_kids_teacher_session(
         backend=backend,
         hooks=effective_hooks,
         clock=deps.clock,
+        greeting_prompt='Greet the child by saying exactly: "Hi there!" Nothing else.',
     )
     # Let the safety layer stop an in-flight assistant response when it
     # detects unsafe child input. Done after handler construction to avoid
