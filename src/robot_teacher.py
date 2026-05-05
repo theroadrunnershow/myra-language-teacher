@@ -651,6 +651,7 @@ class RobotController:
                 x=head_x,
                 y=head_y,
                 z=head_z,
+                degrees=False,
             )
             antennas = np.array([antenna_left, antenna_right], dtype=float)
             self._mini.goto_target(
