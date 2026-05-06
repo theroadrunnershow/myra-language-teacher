@@ -692,6 +692,17 @@ class GeminiRealtimeBackend:
         async with self._reconnect_lock:
             if self._closed:
                 return
+            # If the WebSocket died mid-turn (input transcription was in
+            # flight), the server-side resumed session re-enters that
+            # half-open turn and never processes further user audio.
+            # Force a fresh reconnect so the next turn boundary is clean.
+            # Issue #41.
+            if self._input_speech_active:
+                logger.info(
+                    "[kids_teacher_gemini_backend] mid-turn disconnect; "
+                    "dropping saved handle to force fresh reconnect"
+                )
+                self._latest_resumption_handle = None
             await self._event_queue.put({"type": "session.reconnecting"})
             await self._dispose_connection()
 

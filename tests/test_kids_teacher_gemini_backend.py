@@ -2450,3 +2450,55 @@ async def test_reconnect_gives_up_after_max_attempts_and_emits_single_error() ->
     assert types.count("error") == 1, (
         f"expected exactly one error after retry exhaustion, got types={types}"
     )
+
+
+@pytest.mark.asyncio
+async def test_reconnect_drops_saved_handle_when_disconnect_is_mid_turn() -> None:
+    """Issue #41: a Gemini Live 1008 that lands mid-turn (input
+    transcription was in flight) leaves the server-side session in a
+    half-open turn boundary. Resuming with the saved handle re-enters
+    that poisoned turn and silently drops further user audio. The
+    backend must drop the saved handle so the reconnect uses
+    handle=fresh — losing context but recovering responsiveness.
+    """
+    first_session = _MultiTurnFakeSession(turns=[])
+    second_session = _MultiTurnFakeSession(turns=[])
+    client = _RotatingFakeClient(
+        [_FakeConnectionCM(first_session), _FakeConnectionCM(second_session)]
+    )
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    # Simulate the live state at the moment of a mid-turn 1008: a
+    # resumption handle has been cached from a prior server update,
+    # and the input_transcription delta flipped _input_speech_active
+    # to True before the socket died.
+    backend._latest_resumption_handle = "saved-mid-turn-handle"
+    backend._input_speech_active = True
+
+    try:
+        # Drive the same path the reader-loop exception handler takes
+        # without depending on the in-flight async-generator timing.
+        backend._session_dead = True
+        backend._schedule_reconnect()
+        await asyncio.wait_for(backend._reconnect_task, timeout=2.0)
+    finally:
+        await backend.close()
+
+    # Two connects total: initial + the post-1008 reconnect. The
+    # reconnect must NOT carry the saved handle — it must be a
+    # fresh session so the server starts a clean turn.
+    assert len(client._live.connect_calls) == 2
+    second_config = client._live.connect_calls[1]["config"]
+    assert second_config.session_resumption.handle is None, (
+        "mid-turn 1008 must reconnect with a fresh handle (issue #41); "
+        f"got handle={second_config.session_resumption.handle!r}"
+    )
+    # And the cached handle should have been cleared so a future drop
+    # doesn't try to reuse the now-poisoned token.
+    assert backend._latest_resumption_handle is None
