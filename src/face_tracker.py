@@ -106,13 +106,6 @@ class FaceTracker:
 
         self._stopped = False
 
-        # Diagnostic (temporary): track which of {no_frame, no_face,
-        # has_face} the gaze loop is observing, so the log shows one line
-        # per state change instead of one per tick. Pair counter throttles
-        # the full-res rescue check below.
-        self._diag_last_state: Optional[str] = None
-        self._diag_fullres_modulo = 0
-
     # ------------------------------------------------------------------
     # Subscriber registration
     # ------------------------------------------------------------------
@@ -159,7 +152,7 @@ class FaceTracker:
         try:
             while not stop_event.is_set() and not self._stopped:
                 try:
-                    await self._tick()
+                    self._tick()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -179,45 +172,18 @@ class FaceTracker:
     # ------------------------------------------------------------------
     # Per-tick logic
     # ------------------------------------------------------------------
-    async def _tick(self) -> None:
+    def _tick(self) -> None:
         frame = self._camera_worker.get_latest_frame()
         if frame is None:
-            self._diag_log_state_transition("no_frame")
             self._publish(None)
             self._last_target = None
             self._last_seen_monotonic = None
             return
 
-        # Dlib calls are CPU-bound and hold _DLIB_LOCK for ~50ms. Running
-        # them on the asyncio loop thread starves the mic pump and makes
-        # Gemini Live's server VAD see late audio bursts as the child
-        # starting to speak — barging in over the assistant's response.
-        # Offload to a worker thread so the loop keeps reading audio.
-        bboxes = await asyncio.to_thread(
-            face_service.detect_face_bboxes, frame, downscale=True
-        )
+        bboxes = face_service.detect_face_bboxes(frame, downscale=True)
         now = time.monotonic()
 
         if not bboxes:
-            self._diag_log_state_transition("no_face")
-            # Diagnostic (temporary): every 5th empty tick, retry the same
-            # frame at full resolution. If full-res reliably finds faces
-            # the downscale path missed, the gaze loop's downscale=True
-            # is the bottleneck.
-            self._diag_fullres_modulo = (self._diag_fullres_modulo + 1) % 5
-            if self._diag_fullres_modulo == 0:
-                try:
-                    fullres = await asyncio.to_thread(
-                        face_service.detect_face_bboxes, frame, downscale=False
-                    )
-                except Exception:
-                    fullres = []
-                if fullres:
-                    logger.info(
-                        "[face_tracker] fullres rescue: downscale found 0, "
-                        "fullres found %d",
-                        len(fullres),
-                    )
             # FR-KID-29: hold the last target briefly before falling back to None.
             if (
                 self._last_target is not None
@@ -231,8 +197,7 @@ class FaceTracker:
             self._last_seen_monotonic = None
             return
 
-        self._diag_log_state_transition("has_face")
-        chosen = await self._pick_subject(frame, bboxes, now)
+        chosen = self._pick_subject(frame, bboxes, now)
         if chosen is None:
             # No subject selectable from a non-empty bbox set is unexpected,
             # but treat it the same as the empty-frame branch.
@@ -252,18 +217,7 @@ class FaceTracker:
 
         self._publish(target)
 
-    # ------------------------------------------------------------------
-    # Diagnostic helpers (temporary)
-    # ------------------------------------------------------------------
-    def _diag_log_state_transition(self, state: str) -> None:
-        """Log when the per-tick observation state changes between
-        no_frame / no_face / has_face. One line per transition keeps the
-        log signal-rich without spamming at 3 Hz."""
-        if state != self._diag_last_state:
-            logger.info("[face_tracker] tick state: %s", state)
-            self._diag_last_state = state
-
-    async def _pick_subject(
+    def _pick_subject(
         self,
         frame,
         bboxes: List[Tuple[int, int, int, int]],
@@ -271,14 +225,14 @@ class FaceTracker:
     ) -> Optional[Tuple[int, int, int, int]]:
         """Apply FR-KID-27 selection: enrolled child > largest > none."""
         if self._child_name and bboxes:
-            child_idx = await self._resolve_child_index(frame, bboxes, now)
+            child_idx = self._resolve_child_index(frame, bboxes, now)
             if child_idx is not None and 0 <= child_idx < len(bboxes):
                 return bboxes[child_idx]
 
         # Fallback: largest bbox by area.
         return max(bboxes, key=_bbox_area, default=None)
 
-    async def _resolve_child_index(
+    def _resolve_child_index(
         self,
         frame,
         bboxes: List[Tuple[int, int, int, int]],
@@ -293,9 +247,7 @@ class FaceTracker:
         if cache_valid:
             return self._cached_child_idx
 
-        # identify_in_frame runs face encoding under _DLIB_LOCK (~50ms).
-        # Offload for the same reason _tick threads the bbox detect call.
-        names = await asyncio.to_thread(face_service.identify_in_frame, frame)
+        names = face_service.identify_in_frame(frame)
         child_idx: Optional[int] = None
         if self._child_name and self._child_name in names:
             # identify_in_frame returns deduped names, not per-bbox alignment.

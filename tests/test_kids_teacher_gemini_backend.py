@@ -174,9 +174,10 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     # Memory tool exposes two FunctionDeclarations (set_about + add_note);
     # face tools (remember_face, forget_face) are separate Tool entries
     # asserted in their own test below. The built-in google_search tool
-    # is intentionally not wired in — see the regression test
-    # ``test_build_live_config_excludes_google_search_for_free_tier_compat``.
-    assert len(config.tools) == 3
+    # rides as a single-key dict per the Gemini Live docs (added by the
+    # tools-framework wiring; see tasks/plan-tools-framework.md §3.5).
+    assert len(config.tools) == 4
+    assert {"google_search": {}} in config.tools
     function_tools = [t for t in config.tools if hasattr(t, "function_declarations")]
     memory_decls = function_tools[0].function_declarations
     memory_names = [d.name for d in memory_decls]
@@ -1935,22 +1936,19 @@ def test_face_tools_not_registered_on_openai_backend() -> None:
     assert "forget_face" not in profile.allowed_tools
 
 
-def test_build_live_config_excludes_google_search_for_free_tier_compat() -> None:
-    """``google_search`` grounding is a paid-tier feature on the Gemini
-    API. Including ``{"google_search": {}}`` in a free-tier project's
-    session.setup gets the connect rejected with 1011 "exceeded your
-    current quota" — the same code path as actual rate-limit exhaustion.
-    The tool is intentionally commented out in ``build_gemini_live_config``
-    until the project is on a billed tier. This test exists to catch
-    accidental re-enables.
+def test_build_live_config_always_includes_google_search() -> None:
+    """The built-in ``google_search`` grounding tool must be wired into
+    every Gemini Live session, regardless of what (if anything) the
+    session payload provides via ``additional_tools``. See plan §3.5.
     """
-    # Empty session payload → no google_search entry.
+    # Empty session payload → google_search still present.
     config = build_gemini_live_config(
         {"instructions": "hi", "voice": "alloy"}, _FakeTypes
     )
-    assert {"google_search": {}} not in config.tools
+    assert {"google_search": {}} in config.tools
 
-    # With session_payload["tools"] populated → still no google_search.
+    # With session_payload["tools"] populated → still exactly one
+    # google_search entry (no duplication).
     payload_with_tools = {
         "instructions": "hi",
         "voice": "alloy",
@@ -1971,7 +1969,7 @@ def test_build_live_config_excludes_google_search_for_free_tier_compat() -> None
     google_search_entries = [
         t for t in config.tools if isinstance(t, dict) and "google_search" in t
     ]
-    assert google_search_entries == []
+    assert google_search_entries == [{"google_search": {}}]
 
 
 def test_build_live_config_translates_session_payload_tools_via_adapter() -> None:

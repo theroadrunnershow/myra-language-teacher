@@ -78,15 +78,15 @@ async def _drive_loop(tracker: FaceTracker, ticks: int = 1) -> List:
     return published
 
 
-async def _drive_tick(tracker: FaceTracker) -> List:
-    """Run a single tick (skip the asyncio loop overhead)."""
+def _drive_tick(tracker: FaceTracker) -> List:
+    """Run a single synchronous tick (skip the asyncio loop overhead)."""
     published: List = []
 
     def _record(target):
         published.append(target)
 
     tracker.subscribe(_record)
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     return published
 
 
@@ -95,7 +95,7 @@ async def _drive_tick(tracker: FaceTracker) -> List:
 # ---------------------------------------------------------------------------
 
 
-async def test_gaze_target_picks_enrolled_child_when_present(monkeypatch) -> None:
+def test_gaze_target_picks_enrolled_child_when_present(monkeypatch) -> None:
     """FR-KID-27 step 1: the enrolled child wins over a larger bbox.
 
     With ``identify_in_frame`` returning the child's name, the tracker
@@ -120,7 +120,7 @@ async def test_gaze_target_picks_enrolled_child_when_present(monkeypatch) -> Non
     tracker = FaceTracker(
         worker, hz=100.0, dead_zone=0.0, child_name="Myra"
     )
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert len(published) == 1
     pan, tilt = published[0]
@@ -133,7 +133,7 @@ async def test_gaze_target_picks_enrolled_child_when_present(monkeypatch) -> Non
     assert tilt == pytest.approx(expected_tilt, abs=1e-6)
 
 
-async def test_gaze_target_falls_back_to_largest_when_child_absent(monkeypatch) -> None:
+def test_gaze_target_falls_back_to_largest_when_child_absent(monkeypatch) -> None:
     """FR-KID-27 step 2: pick the largest bbox when no enrolled match."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     big_right = (40, 180, 160, 100)  # area = 80*80 = 6400
@@ -143,7 +143,7 @@ async def test_gaze_target_falls_back_to_largest_when_child_absent(monkeypatch) 
     tracker = FaceTracker(
         worker, hz=100.0, dead_zone=0.0, child_name="Myra"
     )
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert len(published) == 1
     pan, tilt = published[0]
@@ -152,18 +152,18 @@ async def test_gaze_target_falls_back_to_largest_when_child_absent(monkeypatch) 
     assert tilt == pytest.approx((100 - 100) / 100, abs=1e-6)
 
 
-async def test_gaze_target_emits_none_when_no_faces(monkeypatch) -> None:
+def test_gaze_target_emits_none_when_no_faces(monkeypatch) -> None:
     """Empty bbox set → publish None (and no held last-target)."""
     worker = FakeCameraWorker(_frame())
     _patch_detector(monkeypatch, [])
 
     tracker = FaceTracker(worker, hz=100.0, dead_zone=0.0)
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert published == [None]
 
 
-async def test_gaze_target_emits_none_when_frame_is_none(monkeypatch) -> None:
+def test_gaze_target_emits_none_when_frame_is_none(monkeypatch) -> None:
     """Camera not yet warm → publish None, never call the detector."""
     worker = FakeCameraWorker(None)
     detect_mock = MagicMock(return_value=[])
@@ -171,7 +171,7 @@ async def test_gaze_target_emits_none_when_frame_is_none(monkeypatch) -> None:
     monkeypatch.setattr(face_service, "identify_in_frame", MagicMock(return_value=[]))
 
     tracker = FaceTracker(worker, hz=100.0, dead_zone=0.0)
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert published == [None]
     assert detect_mock.call_count == 0
@@ -182,7 +182,7 @@ async def test_gaze_target_emits_none_when_frame_is_none(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_gaze_target_holds_one_second_after_subject_lost(monkeypatch) -> None:
+def test_gaze_target_holds_one_second_after_subject_lost(monkeypatch) -> None:
     """FR-KID-29: hold the last target for ``hold_seconds`` after loss."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     bbox = (40, 180, 120, 100)  # center (140, 80)
@@ -210,7 +210,7 @@ async def test_gaze_target_holds_one_second_after_subject_lost(monkeypatch) -> N
     tracker.subscribe(_record)
 
     # Tick 1 — subject visible.
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert len(published) == 1
     last_target = published[0]
     assert last_target is not None
@@ -220,17 +220,17 @@ async def test_gaze_target_holds_one_second_after_subject_lost(monkeypatch) -> N
 
     # Tick 2 — within hold window.
     now[0] += 0.3
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert published[-1] == last_target  # held
 
     # Tick 3 — still within hold window.
     now[0] += 0.5  # total 0.8 s since last seen.
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert published[-1] == last_target  # still held
 
     # Tick 4 — past hold window.
     now[0] += 0.5  # total 1.3 s since last seen.
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert published[-1] is None
 
 
@@ -239,7 +239,7 @@ async def test_gaze_target_holds_one_second_after_subject_lost(monkeypatch) -> N
 # ---------------------------------------------------------------------------
 
 
-async def test_gaze_dead_zone_suppresses_centered_target(monkeypatch) -> None:
+def test_gaze_dead_zone_suppresses_centered_target(monkeypatch) -> None:
     """FR-KID-28: bbox center within ±dead_zone → no publish."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     # Center the bbox right on frame center.
@@ -247,19 +247,19 @@ async def test_gaze_dead_zone_suppresses_centered_target(monkeypatch) -> None:
     _patch_detector(monkeypatch, [bbox], identified=[])
 
     tracker = FaceTracker(worker, hz=100.0, dead_zone=0.05)
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert published == []  # suppressed
 
 
-async def test_gaze_dead_zone_publishes_when_outside(monkeypatch) -> None:
+def test_gaze_dead_zone_publishes_when_outside(monkeypatch) -> None:
     """Dead-zone is symmetric — targets outside the band are published."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     bbox = (40, 180, 120, 100)  # off-center
     _patch_detector(monkeypatch, [bbox], identified=[])
 
     tracker = FaceTracker(worker, hz=100.0, dead_zone=0.05)
-    published = await _drive_tick(tracker)
+    published = _drive_tick(tracker)
 
     assert len(published) == 1
     assert published[0] is not None
@@ -367,7 +367,7 @@ async def test_gaze_emits_none_on_session_teardown(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_gaze_recognition_runs_only_on_candidate_set_change(monkeypatch) -> None:
+def test_gaze_recognition_runs_only_on_candidate_set_change(monkeypatch) -> None:
     """FR-KID-27 step 1 cache: stable bbox set → identify called once."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     bbox = (40, 180, 120, 100)
@@ -384,12 +384,12 @@ async def test_gaze_recognition_runs_only_on_candidate_set_change(monkeypatch) -
     )
 
     for _ in range(3):
-        await tracker._tick()  # type: ignore[attr-defined]
+        tracker._tick()  # type: ignore[attr-defined]
 
     assert identify_mock.call_count == 1
 
 
-async def test_gaze_recognition_re_runs_when_bbox_set_changes(monkeypatch) -> None:
+def test_gaze_recognition_re_runs_when_bbox_set_changes(monkeypatch) -> None:
     """Bbox set churn → identify is re-run for the new candidate set."""
     worker = FakeCameraWorker(_frame(h=200, w=200))
     bbox_a = (40, 180, 120, 100)
@@ -403,12 +403,12 @@ async def test_gaze_recognition_re_runs_when_bbox_set_changes(monkeypatch) -> No
     tracker = FaceTracker(
         worker, hz=100.0, dead_zone=0.0, child_name="Myra"
     )
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert identify_mock.call_count == 1
 
     # New bbox set on next tick.
     detect_mock.return_value = [bbox_a, bbox_b]
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert identify_mock.call_count == 2
 
 
@@ -417,7 +417,7 @@ async def test_gaze_recognition_re_runs_when_bbox_set_changes(monkeypatch) -> No
 # ---------------------------------------------------------------------------
 
 
-async def test_subscribe_returns_unsubscribe_handle(monkeypatch) -> None:
+def test_subscribe_returns_unsubscribe_handle(monkeypatch) -> None:
     """Calling the returned handle removes the subscriber."""
     worker = FakeCameraWorker(_frame())
     _patch_detector(monkeypatch, [])
@@ -426,15 +426,15 @@ async def test_subscribe_returns_unsubscribe_handle(monkeypatch) -> None:
     received: List = []
     unsubscribe = tracker.subscribe(lambda t: received.append(t))
 
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert len(received) == 1
 
     unsubscribe()
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert len(received) == 1  # no new event after unsubscribe
 
 
-async def test_subscriber_exception_does_not_break_tracker(monkeypatch) -> None:
+def test_subscriber_exception_does_not_break_tracker(monkeypatch) -> None:
     """A throwing subscriber must not stop downstream subscribers."""
     worker = FakeCameraWorker(_frame())
     _patch_detector(monkeypatch, [])
@@ -448,5 +448,5 @@ async def test_subscriber_exception_does_not_break_tracker(monkeypatch) -> None:
     tracker.subscribe(_boom)
     tracker.subscribe(lambda t: other.append(t))
 
-    await tracker._tick()  # type: ignore[attr-defined]
+    tracker._tick()  # type: ignore[attr-defined]
     assert other == [None]
