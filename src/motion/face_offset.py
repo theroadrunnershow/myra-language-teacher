@@ -82,8 +82,13 @@ DEFAULT_GAINS = {
     "robot_speaking": 0.4,
 }
 
-# Mapping convention: pan > 0 is right-of-center → head_yaw > 0 (head turns
+# Mapping convention (empirically verified against the Reachy Mini SDK +
+# IPC camera): pan > 0 is right-of-center → head_yaw < 0 (head turns
 # right). tilt > 0 is below-center → head_pitch > 0 (head looks down).
+# The yaw axis is negated relative to the naive "pan scales to yaw"
+# mapping — either Reachy's body-Y points right (so +yaw is left) or the
+# IPC camera image is left-right mirrored. Either way, applying the
+# negative produces convergent tracking.
 
 
 GazeTarget = Optional[Tuple[float, float]]
@@ -256,7 +261,7 @@ class FaceOffsetMixer:
             return self._displayed_offset
 
         pan, tilt = target
-        head_yaw = _clamp(pan * self._half_hfov_rad * gain, self._max_pan)
+        head_yaw = _clamp(-pan * self._half_hfov_rad * gain, self._max_pan)
         head_pitch = _clamp(tilt * self._half_vfov_rad * gain, self._max_tilt)
         return PoseOffset(head_yaw=head_yaw, head_pitch=head_pitch)
 

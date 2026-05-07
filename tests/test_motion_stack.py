@@ -197,8 +197,9 @@ def test_face_tracker_target_drives_pose_sink():
 
     assert robot.pose_calls
     last = robot.pose_calls[-1]
-    # head_yaw should be > 0 (positive pan -> turn right).
-    assert last["head_yaw"] > 0
+    # Empirical SDK convention: positive pan → negative head_yaw (head
+    # turns right via negated mapping). See motion.face_offset.
+    assert last["head_yaw"] < 0
 
 
 def test_pose_sink_with_robot_lacking_apply_pose_is_silent():

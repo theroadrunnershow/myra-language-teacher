@@ -148,23 +148,25 @@ def test_none_publish_yields_neutral_when_never_tracked():
 # ---------------------------------------------------------------------------
 
 
-def test_positive_pan_yields_positive_yaw_scaled_by_half_hfov():
+def test_positive_pan_yields_negative_yaw_scaled_by_half_hfov():
+    """Empirical SDK convention: face on right of frame → head turns right
+    via *negative* yaw. The naive `pan * (HFOV/2)` is negated."""
     mixer, tracker, clock = _make()
     mixer.set_gain_state("child_speaking")  # gain = 1.0 to avoid scaling
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(_HALF_HFOV_RAD)
+    assert offset.head_yaw == pytest.approx(-_HALF_HFOV_RAD)
     assert offset.head_pitch == pytest.approx(0.0)
 
 
-def test_negative_pan_yields_negative_yaw_scaled_by_half_hfov():
+def test_negative_pan_yields_positive_yaw_scaled_by_half_hfov():
     mixer, tracker, clock = _make()
     mixer.set_gain_state("child_speaking")
     tracker.publish((-1.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+    assert offset.head_yaw == pytest.approx(_HALF_HFOV_RAD)
 
 
 def test_positive_tilt_yields_positive_pitch_scaled_by_half_vfov():
@@ -181,11 +183,12 @@ def test_pan_beyond_unit_clamps_to_safety_cap():
     mixer.set_gain_state("child_speaking")
     # An out-of-range value the tracker would clip first, but the mixer
     # also clips against its safety cap. Use a value × half-HFOV that
-    # exceeds MAX_PAN_RAD (35°) so the cap is the binding limit.
+    # exceeds MAX_PAN_RAD (35°) so the cap is the binding limit. Sign is
+    # negated by the empirical convention (see _target_offset_locked).
     tracker.publish((5.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(MAX_PAN_RAD)
+    assert offset.head_yaw == pytest.approx(-MAX_PAN_RAD)
 
 
 def test_tilt_beyond_unit_clamps_to_safety_cap():
@@ -211,8 +214,8 @@ def test_hfov_env_var_overrides_default(monkeypatch):
     mixer.set_gain_state("child_speaking")
     tracker.publish((0.5, 0.0))
     _settle(mixer, clock)
-    # 0.5 × (90°/2) = 22.5° — well inside the 35° cap.
-    assert mixer.current_offset().head_yaw == pytest.approx(math.radians(22.5))
+    # 0.5 × (90°/2) = 22.5°, then negated for SDK convention.
+    assert mixer.current_offset().head_yaw == pytest.approx(-math.radians(22.5))
 
 
 def test_vfov_env_var_overrides_default(monkeypatch):
@@ -237,7 +240,7 @@ def test_invalid_fov_env_var_falls_back_to_default(monkeypatch):
     mixer.set_gain_state("child_speaking")
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(_HALF_HFOV_RAD)
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +254,7 @@ def test_idle_gain_scales_offset():
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw == pytest.approx(
-        _HALF_HFOV_RAD * DEFAULT_GAINS["idle"]
+        -_HALF_HFOV_RAD * DEFAULT_GAINS["idle"]
     )
 
 
@@ -260,7 +263,7 @@ def test_child_speaking_gain_is_one():
     mixer.set_gain_state("child_speaking")
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(_HALF_HFOV_RAD * 1.0)
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * 1.0)
 
 
 def test_robot_speaking_gain_reduces_offset():
@@ -269,7 +272,7 @@ def test_robot_speaking_gain_reduces_offset():
     mixer.set_gain_state("robot_speaking")
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw == pytest.approx(
-        _HALF_HFOV_RAD * DEFAULT_GAINS["robot_speaking"]
+        -_HALF_HFOV_RAD * DEFAULT_GAINS["robot_speaking"]
     )
 
 
@@ -322,7 +325,7 @@ def test_set_robot_speaking_snaps_held_to_latest_target():
     _settle(mixer, clock)
     # Held value should reflect the 0.8 publish, not the earlier 0.2.
     assert mixer.current_offset().head_yaw == pytest.approx(
-        _HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"]
+        -_HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"]
     )
 
 
@@ -334,10 +337,11 @@ def test_idle_state_follows_new_target_after_publish():
     tracker.publish((0.2, 0.0))
     _settle(mixer, clock)
     initial = mixer.current_offset().head_yaw
-    assert initial > 0
+    # pan>0 produces yaw<0 under the empirical SDK convention.
+    assert initial < 0
     tracker.publish((-0.2, 0.0))
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw < 0
+    assert mixer.current_offset().head_yaw > 0
 
 
 # ---------------------------------------------------------------------------
@@ -355,6 +359,7 @@ def test_target_lost_holds_last_offset():
     tracker.publish((1.0, 0.5))
     _settle(mixer, clock)
     held = mixer.current_offset()
+    # Sign-agnostic: just confirm we settled off-neutral on both axes.
     assert held.head_yaw != 0.0
     assert held.head_pitch != 0.0
 
@@ -381,7 +386,8 @@ def test_tracker_silence_holds_last_offset():
     tracker.publish((0.5, 0.0))
     _settle(mixer, clock)
     held = mixer.current_offset()
-    assert held.head_yaw > 0
+    # pan>0 → head_yaw<0 under the empirical SDK convention.
+    assert held.head_yaw < 0
 
     # Tracker goes silent — no further publishes (e.g. dead-zone suppression).
     _settle(mixer, clock, ticks=300, dt=0.05)
@@ -420,7 +426,7 @@ def test_slew_eventually_converges_to_target():
     tracker.publish((1.0, 0.0))
     # 100 ticks × 33 ms = 3.3 s — comfortably more than (HFOV/2) / 30°/s.
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(_HALF_HFOV_RAD)
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
 
 
 def test_slew_rate_max_step_per_tick_respects_velocity_cap():
@@ -438,5 +444,6 @@ def test_slew_rate_max_step_per_tick_respects_velocity_cap():
     tracker.publish((1.0, 0.0))
     clock.advance(0.1)  # 100 ms at 30°/s = 3° max step
     step = mixer.current_offset().head_yaw
-    assert step <= math.radians(3.0) + 1e-9
-    assert step > 0.0  # actually moved
+    # pan>0 drives yaw negative; |step| ≤ 3° and the head moved.
+    assert abs(step) <= math.radians(3.0) + 1e-9
+    assert step < 0.0

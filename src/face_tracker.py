@@ -46,10 +46,10 @@ Subscriber = Callable[[GazeTarget], None]
 
 GAZE_HZ_ENV_VAR = "KIDS_TEACHER_GAZE_HZ"
 GAZE_DEAD_ZONE_ENV_VAR = "KIDS_TEACHER_GAZE_DEAD_ZONE"
-DEFAULT_GAZE_HZ = 0.5
+DEFAULT_GAZE_HZ = 1.0
 DEFAULT_GAZE_DEAD_ZONE = 0.05
-# Bridges across one missed publish at 0.5 Hz (period = 2 s).
-DEFAULT_HOLD_SECONDS = 2.5
+# Bridges across one missed publish at 1 Hz (period = 1 s).
+DEFAULT_HOLD_SECONDS = 1.5
 # Cache the enrolled-child assignment for at most this long even when the
 # bbox set is stable (FR-KID-27 step 1).
 _IDENTIFY_CACHE_TTL = 2.0
