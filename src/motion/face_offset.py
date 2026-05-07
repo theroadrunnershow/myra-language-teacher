@@ -26,6 +26,10 @@ Behaviour summary:
   between candidates) gets averaged out over 2-3 publishes; sustained real
   movement still converges in a few seconds. The first publish snaps so a
   fresh acquisition isn't damped.
+* Per-axis hysteresis deadband at ``hold_band_rad`` (default 1.5°): when
+  the smoothed target sits within the deadband of the currently displayed
+  offset, that axis holds — the slew limiter doesn't keep firing motor
+  commands chasing residual EMA ripple.
 * Three gain states tied to VAD / playback edges:
 
   ============  ======  ===========
@@ -88,6 +92,13 @@ MAX_ANGULAR_VELOCITY_RAD_S = 15.0 * _DEG
 # smoothed = α·new + (1-α)·smoothed.  α=1.0 disables smoothing.
 DEFAULT_TARGET_SMOOTHING = 0.4
 
+# Hysteresis deadband. When the smoothed target is within this many
+# radians of the displayed offset on a given axis, that axis holds —
+# the slew limiter doesn't burn motor commands chasing sub-threshold
+# wiggle that the EMA didn't fully damp. 1.5° is below human visual
+# acuity at arm's length, so the residual standing error is invisible.
+DEFAULT_HOLD_BAND_RAD = 1.5 * _DEG
+
 # Default gain table.
 DEFAULT_GAINS = {
     "idle": 0.7,
@@ -137,6 +148,7 @@ class FaceOffsetMixer:
         max_tilt_rad: float = MAX_TILT_RAD,
         max_angular_velocity_rad_s: float = MAX_ANGULAR_VELOCITY_RAD_S,
         target_smoothing: float = DEFAULT_TARGET_SMOOTHING,
+        hold_band_rad: float = DEFAULT_HOLD_BAND_RAD,
         logger_override: Optional[logging.Logger] = None,
     ) -> None:
         self._clock = clock
@@ -155,6 +167,7 @@ class FaceOffsetMixer:
         # Clamp into [0, 1] so a misconfigured value can't reverse direction
         # or amplify jitter past the raw sample.
         self._target_smoothing = max(0.0, min(1.0, target_smoothing))
+        self._hold_band = max(0.0, hold_band_rad)
         self._log = logger_override or logger
 
         self._lock = threading.Lock()
@@ -306,8 +319,9 @@ class FaceOffsetMixer:
     def _slew_locked(self, target: PoseOffset, now: float) -> PoseOffset:
         """Move the displayed offset toward ``target`` under the velocity cap.
 
-        Always slews — there is no first-tick snap. With a NEUTRAL initial
-        displayed offset, the first publish ramps in smoothly from zero.
+        Each axis applies a per-axis hold band: when the target is within
+        ``hold_band_rad`` of the displayed offset on that axis, the axis
+        holds. This kills sub-threshold wiggle the EMA can't fully damp.
         """
         last_at = self._displayed_at
         if last_at is None:
@@ -319,12 +333,19 @@ class FaceOffsetMixer:
         if dt <= 0.0:
             return self._displayed_offset
         max_step = self._max_velocity * dt
-        return PoseOffset(
-            head_yaw=_step_toward(self._displayed_offset.head_yaw, target.head_yaw, max_step),
-            head_pitch=_step_toward(
-                self._displayed_offset.head_pitch, target.head_pitch, max_step
-            ),
+
+        current = self._displayed_offset
+        new_yaw = (
+            current.head_yaw
+            if abs(target.head_yaw - current.head_yaw) < self._hold_band
+            else _step_toward(current.head_yaw, target.head_yaw, max_step)
         )
+        new_pitch = (
+            current.head_pitch
+            if abs(target.head_pitch - current.head_pitch) < self._hold_band
+            else _step_toward(current.head_pitch, target.head_pitch, max_step)
+        )
+        return PoseOffset(head_yaw=new_yaw, head_pitch=new_pitch)
 
 
 def _clamp(value: float, cap: float) -> float:

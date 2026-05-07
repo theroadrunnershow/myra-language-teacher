@@ -12,11 +12,19 @@ from motion.face_offset import (
     CAMERA_VFOV_ENV_VAR,
     DEFAULT_GAINS,
     DEFAULT_HFOV_DEG,
+    DEFAULT_HOLD_BAND_RAD,
     DEFAULT_VFOV_DEG,
     MAX_PAN_RAD,
     MAX_TILT_RAD,
     FaceOffsetMixer,
 )
+
+
+# At settlement the deadband leaves a per-axis residual of up to
+# ``DEFAULT_HOLD_BAND_RAD``. Tests that assert "head reached target X"
+# allow that much wiggle room so the deadband contract stays compatible
+# with convergence assertions.
+_BAND_TOL = DEFAULT_HOLD_BAND_RAD
 from motion.types import NEUTRAL, PoseOffset
 
 
@@ -156,7 +164,7 @@ def test_positive_pan_yields_negative_yaw_scaled_by_half_hfov():
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+    assert offset.head_yaw == pytest.approx(-_HALF_HFOV_RAD, abs=_BAND_TOL)
     assert offset.head_pitch == pytest.approx(0.0)
 
 
@@ -166,7 +174,7 @@ def test_negative_pan_yields_positive_yaw_scaled_by_half_hfov():
     tracker.publish((-1.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(_HALF_HFOV_RAD)
+    assert offset.head_yaw == pytest.approx(_HALF_HFOV_RAD, abs=_BAND_TOL)
 
 
 def test_positive_tilt_yields_positive_pitch_scaled_by_half_vfov():
@@ -175,7 +183,7 @@ def test_positive_tilt_yields_positive_pitch_scaled_by_half_vfov():
     tracker.publish((0.0, 1.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_pitch == pytest.approx(_HALF_VFOV_RAD)
+    assert offset.head_pitch == pytest.approx(_HALF_VFOV_RAD, abs=_BAND_TOL)
 
 
 def test_pan_beyond_unit_clamps_to_safety_cap():
@@ -188,7 +196,7 @@ def test_pan_beyond_unit_clamps_to_safety_cap():
     tracker.publish((5.0, 0.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_yaw == pytest.approx(-MAX_PAN_RAD)
+    assert offset.head_yaw == pytest.approx(-MAX_PAN_RAD, abs=_BAND_TOL)
 
 
 def test_tilt_beyond_unit_clamps_to_safety_cap():
@@ -197,7 +205,7 @@ def test_tilt_beyond_unit_clamps_to_safety_cap():
     tracker.publish((0.0, 5.0))
     _settle(mixer, clock)
     offset = mixer.current_offset()
-    assert offset.head_pitch == pytest.approx(MAX_TILT_RAD)
+    assert offset.head_pitch == pytest.approx(MAX_TILT_RAD, abs=_BAND_TOL)
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +223,9 @@ def test_hfov_env_var_overrides_default(monkeypatch):
     tracker.publish((0.5, 0.0))
     _settle(mixer, clock)
     # 0.5 × (90°/2) = 22.5°, then negated for SDK convention.
-    assert mixer.current_offset().head_yaw == pytest.approx(-math.radians(22.5))
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -math.radians(22.5), abs=_BAND_TOL
+    )
 
 
 def test_vfov_env_var_overrides_default(monkeypatch):
@@ -228,7 +238,9 @@ def test_vfov_env_var_overrides_default(monkeypatch):
     tracker.publish((0.0, 0.5))
     _settle(mixer, clock)
     # 0.5 × (70°/2) = 17.5° — inside the 25° tilt cap.
-    assert mixer.current_offset().head_pitch == pytest.approx(math.radians(17.5))
+    assert mixer.current_offset().head_pitch == pytest.approx(
+        math.radians(17.5), abs=_BAND_TOL
+    )
 
 
 def test_invalid_fov_env_var_falls_back_to_default(monkeypatch):
@@ -240,7 +252,9 @@ def test_invalid_fov_env_var_falls_back_to_default(monkeypatch):
     mixer.set_gain_state("child_speaking")
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD, abs=_BAND_TOL
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -254,7 +268,7 @@ def test_idle_gain_scales_offset():
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw == pytest.approx(
-        -_HALF_HFOV_RAD * DEFAULT_GAINS["idle"]
+        -_HALF_HFOV_RAD * DEFAULT_GAINS["idle"], abs=_BAND_TOL
     )
 
 
@@ -263,7 +277,9 @@ def test_child_speaking_gain_is_one():
     mixer.set_gain_state("child_speaking")
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * 1.0)
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD * 1.0, abs=_BAND_TOL
+    )
 
 
 def test_robot_speaking_gain_reduces_offset():
@@ -272,7 +288,7 @@ def test_robot_speaking_gain_reduces_offset():
     mixer.set_gain_state("robot_speaking")
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw == pytest.approx(
-        -_HALF_HFOV_RAD * DEFAULT_GAINS["robot_speaking"]
+        -_HALF_HFOV_RAD * DEFAULT_GAINS["robot_speaking"], abs=_BAND_TOL
     )
 
 
@@ -329,7 +345,7 @@ def test_set_robot_speaking_snaps_held_to_latest_target():
     tracker.publish(None)
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw == pytest.approx(
-        -_HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"], abs=1e-3
+        -_HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"], abs=_BAND_TOL
     )
 
 
@@ -433,7 +449,9 @@ def test_slew_eventually_converges_to_target():
     tracker.publish((1.0, 0.0))
     # 100 ticks × 33 ms = 3.3 s — comfortably more than (HFOV/2) / 30°/s.
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD, abs=_BAND_TOL
+    )
 
 
 def test_slew_rate_max_step_per_tick_respects_velocity_cap():
@@ -471,8 +489,10 @@ def test_target_smoothing_first_sample_snaps():
     tracker.publish((1.0, 0.0))
     _settle(mixer, clock)
     # Smoothed target snapped to (1.0, 0.0) on the first sample, then the
-    # slew limiter drove the head all the way there.
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+    # slew limiter drove the head all the way there (within deadband).
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD, abs=_BAND_TOL
+    )
 
 
 def test_target_smoothing_dampens_jitter():
@@ -513,7 +533,9 @@ def test_target_smoothing_alpha_one_disables_smoothing():
     tracker.publish((0.8, 0.0))
     _settle(mixer, clock)
     # No damping: head goes all the way to the second publish.
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * 0.8)
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD * 0.8, abs=_BAND_TOL
+    )
 
 
 def test_target_smoothing_resets_after_none():
@@ -527,4 +549,84 @@ def test_target_smoothing_resets_after_none():
     tracker.publish(None)         # smoothed reset
     tracker.publish((-0.7, 0.0))  # snaps to -0.7 (no damping)
     _settle(mixer, clock)
-    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * -0.7)
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD * -0.7, abs=_BAND_TOL
+    )
+
+
+# ---------------------------------------------------------------------------
+# Hysteresis deadband
+# ---------------------------------------------------------------------------
+
+
+def test_hold_band_holds_when_target_stays_within_band():
+    """Once the head is within hold_band of the target, sub-band wiggle is ignored."""
+    clock = _FakeClock()
+    # Disable smoothing so we can drive the target directly.
+    mixer = FaceOffsetMixer(
+        clock=clock, target_smoothing=1.0, hold_band_rad=math.radians(1.5)
+    )
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+
+    # Settle on a target.
+    tracker.publish((0.3, 0.0))
+    _settle(mixer, clock)
+    settled_yaw = mixer.current_offset().head_yaw
+
+    # Synthesize a follow-up target whose yaw lands 0.5° away from where
+    # we settled — comfortably inside the 1.5° deadband. Working from the
+    # settled position (not the prior target) avoids inheriting the
+    # deadband residual that already exists between target and displayed.
+    sub_band_yaw = settled_yaw + math.radians(0.5)
+    sub_band_pan = -sub_band_yaw / _HALF_HFOV_RAD
+    tracker.publish((sub_band_pan, 0.0))
+    _settle(mixer, clock)
+    assert mixer.current_offset().head_yaw == pytest.approx(settled_yaw, abs=1e-9)
+
+
+def test_hold_band_does_not_block_motion_outside_band():
+    """A target change beyond the deadband still drives the head."""
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(
+        clock=clock, target_smoothing=1.0, hold_band_rad=math.radians(1.5)
+    )
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+
+    tracker.publish((0.0, 0.0))
+    _settle(mixer, clock)
+    # Step the target by clearly more than the deadband.
+    tracker.publish((0.5, 0.0))
+    _settle(mixer, clock)
+    # Within deadband of the FOV-scaled target.
+    assert mixer.current_offset().head_yaw == pytest.approx(
+        -_HALF_HFOV_RAD * 0.5, abs=_BAND_TOL
+    )
+
+
+def test_hold_band_is_per_axis():
+    """Yaw outside band slews; pitch inside band holds — independently."""
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(
+        clock=clock, target_smoothing=1.0, hold_band_rad=math.radians(1.5)
+    )
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+
+    # Settle near zero on both axes.
+    tracker.publish((0.0, 0.0))
+    _settle(mixer, clock)
+
+    # Move yaw far, leave pitch within deadband.
+    sub_band_tilt = math.radians(1.0) / _HALF_VFOV_RAD
+    tracker.publish((0.5, sub_band_tilt))
+    _settle(mixer, clock)
+    offset = mixer.current_offset()
+    # Yaw moved (within deadband of target).
+    assert offset.head_yaw == pytest.approx(-_HALF_HFOV_RAD * 0.5, abs=_BAND_TOL)
+    # Pitch held at zero — never crossed the deadband.
+    assert offset.head_pitch == pytest.approx(0.0, abs=1e-9)
