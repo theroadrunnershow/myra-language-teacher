@@ -255,7 +255,9 @@ async def _run_session_async(
         motion_stack=motion_stack,
         tool_registry=tool_registry,
     )
-    backend_factory = _build_backend_factory(provider, camera_worker)
+    backend_factory = _build_backend_factory(
+        provider, camera_worker, tool_registry=tool_registry
+    )
     video_pump_factory = (
         _make_video_pump_factory(camera_worker)
         if camera_worker is not None
@@ -645,7 +647,10 @@ def _make_face_rec_loop_factory(
 
 
 def _build_backend_factory(
-    provider: str, camera_worker: Any = None
+    provider: str,
+    camera_worker: Any = None,
+    *,
+    tool_registry: Any = None,
 ) -> Callable[[], Any]:
     """Return a zero-arg factory for the active realtime backend.
 
@@ -655,6 +660,9 @@ def _build_backend_factory(
     as ``face_frame_provider`` so the ``remember_face`` tool handler can
     grab the latest frame at tool-call time. ``camera_worker is None``
     leaves the provider unset and the tool returns a polite refusal.
+    The same registry the bridge uses is also passed to the Gemini
+    backend so registry-mounted tools (location and any future plug-ins)
+    dispatch end-to-end on the Gemini path.
     """
     if provider == "gemini":
         from kids_teacher_gemini_backend import GeminiRealtimeBackend
@@ -663,7 +671,8 @@ def _build_backend_factory(
             camera_worker.get_latest_frame if camera_worker is not None else None
         )
         return lambda: GeminiRealtimeBackend(
-            face_frame_provider=face_frame_provider
+            face_frame_provider=face_frame_provider,
+            tool_registry=tool_registry,
         )
     from kids_teacher_backend import OpenAIRealtimeBackend
 

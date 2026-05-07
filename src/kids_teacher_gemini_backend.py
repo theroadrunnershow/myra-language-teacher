@@ -40,6 +40,7 @@ from memory_file import ALLOWED_KEYS as _MEMORY_ALLOWED_KEYS
 from memory_file import remove_notes_starting_with as memory_remove_notes_starting_with
 from memory_file import set_key as set_memory_key
 from memory_reconciler import add_note as reconcile_add_note
+from tools.base import ToolRegistry
 from tools.gemini_adapter import GOOGLE_SEARCH_TOOL, build_gemini_tools
 
 load_project_dotenv()
@@ -482,6 +483,7 @@ class GeminiRealtimeBackend:
         set_key_fn: Optional[Callable[[str, str, Optional[str]], None]] = None,
         add_note_fn: Optional[Callable[..., Any]] = None,
         face_frame_provider: Optional[Callable[[], Any]] = None,
+        tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
         self._model = model or resolve_gemini_model()
         self._client_factory = client_factory
@@ -493,6 +495,13 @@ class GeminiRealtimeBackend:
         # introductions get deduped/merged/replaced rather than piling up.
         self._add_note = add_note_fn or reconcile_add_note
         self._face_frame_provider = face_frame_provider
+        # Generic registry path: anything in here is dispatched in
+        # _handle_tool_call_message after the inline memory/face handlers.
+        # The inline four stay inline because their semantics
+        # (scheduled-write ack for set_about/add_note, biometric capture
+        # for remember_face) don't fit the registry's "await dispatch →
+        # ack with payload" contract.
+        self._tool_registry = tool_registry
         self._client: Any = None
         self._connection_cm: Any = None
         self._session: Any = None
@@ -888,6 +897,25 @@ class GeminiRealtimeBackend:
                         call_id=call_id,
                         name=name,
                         response=response,
+                        non_blocking=non_blocking,
+                    )
+                )
+                continue
+
+            if (
+                self._tool_registry is not None
+                and name in self._tool_registry.tool_names
+            ):
+                result = await self._tool_registry.dispatch(name, args)
+                output: dict[str, Any] = {"ok": result.ok, "detail": result.detail}
+                if result.data is not None:
+                    output.update(result.data)
+                function_responses.append(
+                    _build_function_response(
+                        self._types_module,
+                        call_id=call_id,
+                        name=name,
+                        response={"output": output},
                         non_blocking=non_blocking,
                     )
                 )

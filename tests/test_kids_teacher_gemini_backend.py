@@ -2502,3 +2502,173 @@ async def test_reconnect_drops_saved_handle_when_disconnect_is_mid_turn() -> Non
     # And the cached handle should have been cleared so a future drop
     # doesn't try to reuse the now-poisoned token.
     assert backend._latest_resumption_handle is None
+
+
+# ---------------------------------------------------------------------------
+# Generic ToolRegistry dispatch path
+#
+# Anything mounted via ToolRegistry should round-trip through the Gemini
+# backend without per-tool changes — that's the whole point of the
+# tools-framework. These tests exercise an in-test fake tool to prove the
+# generic path; per-tool behavior (e.g. location persistence) is covered
+# in the registry's own test suite.
+# ---------------------------------------------------------------------------
+
+
+def _build_registry_tool_call(
+    *, name: str, args: dict[str, Any] | None = None, call_id: str = "call-reg-1"
+) -> Any:
+    function_call = SimpleNamespace(
+        id=call_id,
+        name=name,
+        args=args or {},
+    )
+    return SimpleNamespace(tool_call=SimpleNamespace(function_calls=[function_call]))
+
+
+class _FakeRegistryTool:
+    """Minimal Tool that records call args and returns a scripted ToolResult."""
+
+    name = "fake_tool"
+
+    def __init__(self, result: Any) -> None:
+        self._result = result
+        self.calls: list[dict] = []
+
+    def spec(self) -> dict:
+        return {
+            "type": "function",
+            "name": self.name,
+            "description": "A test tool.",
+            "parameters": {
+                "type": "object",
+                "properties": {"x": {"type": "string"}},
+                "required": ["x"],
+                "additionalProperties": False,
+            },
+        }
+
+    def prompt_block(self) -> str:
+        return ""
+
+    async def call(self, arguments):
+        self.calls.append(dict(arguments))
+        return self._result
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_call_dispatches_and_acks_with_payload() -> None:
+    from tools.base import ToolRegistry, ToolResult
+
+    fake = _FakeRegistryTool(
+        ToolResult(ok=True, detail="did the thing", data={"echo": "hi"})
+    )
+    registry = ToolRegistry([fake])
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_registry_tool_call(name="fake_tool", args={"x": "hello"}),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        tool_registry=registry,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(session.tool_responses))
+        sent = session.tool_responses[0][0]
+        assert sent.name == "fake_tool"
+        assert sent.response == {
+            "output": {"ok": True, "detail": "did the thing", "echo": "hi"}
+        }
+        assert fake.calls == [{"x": "hello"}]
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_unknown_tool_call_warns_when_registry_missing_name(caplog) -> None:
+    from tools.base import ToolRegistry, ToolResult
+
+    fake = _FakeRegistryTool(ToolResult(ok=True, detail="ok"))
+    registry = ToolRegistry([fake])
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_registry_tool_call(name="not_in_registry", args={}),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        tool_registry=registry,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        with caplog.at_level("WARNING", logger="kids_teacher_gemini_backend"):
+            event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+            assert event["type"] == "response.done"
+            await _wait_until(lambda: bool(session.tool_responses))
+        sent = session.tool_responses[0][0]
+        assert sent.name == "not_in_registry"
+        assert sent.response == {"output": {"status": "ignored"}}
+        assert any(
+            "unknown tool call" in r.message and "not_in_registry" in r.message
+            for r in caplog.records
+        )
+        assert fake.calls == []
+    finally:
+        await backend.close()
+
+
+@pytest.mark.asyncio
+async def test_registry_tool_failure_is_acked_with_ok_false() -> None:
+    """Registry traps tool exceptions into ok=False; the backend must
+    forward that payload rather than dropping the response."""
+    from tools.base import ToolRegistry, ToolResult
+
+    fake = _FakeRegistryTool(ToolResult(ok=False, detail="nope"))
+    registry = ToolRegistry([fake])
+
+    session = _MultiTurnFakeSession(
+        turns=[[
+            _build_registry_tool_call(name="fake_tool", args={"x": "hi"}),
+            _build_server_message(turn_complete=True),
+        ]]
+    )
+    manager = _FakeConnectionCM(session)
+    client = _FakeClient(manager)
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+        tool_registry=registry,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    gen = backend.events()
+    try:
+        event = await asyncio.wait_for(gen.__anext__(), timeout=1.0)
+        assert event["type"] == "response.done"
+        await _wait_until(lambda: bool(session.tool_responses))
+        sent = session.tool_responses[0][0]
+        assert sent.name == "fake_tool"
+        assert sent.response == {"output": {"ok": False, "detail": "nope"}}
+    finally:
+        await backend.close()
