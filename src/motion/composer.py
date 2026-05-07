@@ -53,12 +53,13 @@ DEFAULT_STATE_POSES: Dict[str, PoseOffset] = {
 }
 
 
-# Final output safety caps. Generous enough to accommodate the listen-state
-# 15° roll plus a clip envelope; tight enough that a runaway source can't
-# whip the head. Tune in Phase 1+ once we have hardware in the loop.
+# Final output safety caps. Yaw cap matches the FaceOffsetMixer's pan cap
+# (35°) so face-tracking commands aren't re-clipped here. Pitch and roll
+# stay tighter — only the listen-state 15° roll + small clip envelopes
+# need room there.
 DEFAULT_SAFETY_CAPS = PoseOffset(
     head_pitch=25.0 * _DEG,
-    head_yaw=25.0 * _DEG,
+    head_yaw=35.0 * _DEG,
     head_roll=25.0 * _DEG,
     head_x=0.020,  # 20 mm
     head_y=0.020,
