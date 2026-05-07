@@ -17,9 +17,15 @@ overridable via ``KIDS_TEACHER_CAMERA_HFOV_DEG`` and
 
 Behaviour summary:
 
-* Smooth slew at ``max_angular_velocity_rad_s`` (default 30°/s) — no first-
+* Smooth slew at ``max_angular_velocity_rad_s`` (default 15°/s) — no first-
   tick snap. The composer ticks at ~30 Hz; the slew limiter spreads any
   jump over multiple ticks.
+* EMA target smoothing at ``target_smoothing`` (default 0.4): each publish
+  only moves the smoothed target a fraction of the way toward the new raw
+  sample. Tracker bbox jitter (especially when subject identity flips
+  between candidates) gets averaged out over 2-3 publishes; sustained real
+  movement still converges in a few seconds. The first publish snaps so a
+  fresh acquisition isn't damped.
 * Three gain states tied to VAD / playback edges:
 
   ============  ======  ===========
@@ -73,7 +79,14 @@ CAMERA_VFOV_ENV_VAR = "KIDS_TEACHER_CAMERA_VFOV_DEG"
 # var still can't drive the joints past their limit.
 MAX_PAN_RAD = 35.0 * _DEG
 MAX_TILT_RAD = 25.0 * _DEG
-MAX_ANGULAR_VELOCITY_RAD_S = 30.0 * _DEG
+# Slew rate. 15°/s × 1 s tick budget = 15° per tick max — slow enough
+# that mid-publish jitter doesn't fully express, fast enough that a
+# genuine head-sized target swing converges within a couple of ticks.
+MAX_ANGULAR_VELOCITY_RAD_S = 15.0 * _DEG
+
+# EMA blend factor for tracker target smoothing.
+# smoothed = α·new + (1-α)·smoothed.  α=1.0 disables smoothing.
+DEFAULT_TARGET_SMOOTHING = 0.4
 
 # Default gain table.
 DEFAULT_GAINS = {
@@ -123,6 +136,7 @@ class FaceOffsetMixer:
         max_pan_rad: float = MAX_PAN_RAD,
         max_tilt_rad: float = MAX_TILT_RAD,
         max_angular_velocity_rad_s: float = MAX_ANGULAR_VELOCITY_RAD_S,
+        target_smoothing: float = DEFAULT_TARGET_SMOOTHING,
         logger_override: Optional[logging.Logger] = None,
     ) -> None:
         self._clock = clock
@@ -138,14 +152,20 @@ class FaceOffsetMixer:
         self._max_pan = max_pan_rad
         self._max_tilt = max_tilt_rad
         self._max_velocity = max_angular_velocity_rad_s
+        # Clamp into [0, 1] so a misconfigured value can't reverse direction
+        # or amplify jitter past the raw sample.
+        self._target_smoothing = max(0.0, min(1.0, target_smoothing))
         self._log = logger_override or logger
 
         self._lock = threading.Lock()
         self._gain_state: str = "idle"
-        # Latest target from the tracker. ``None`` means "no subject right
-        # now"; we hold the displayed offset in that case.
+        # Latest raw target from the tracker. ``None`` means "no subject
+        # right now"; we hold the displayed offset in that case.
         self._tracker_target: GazeTarget = None
         self._tracker_target_at: Optional[float] = None
+        # EMA-smoothed target. The slew limiter chases this (not the raw
+        # tracker target) so per-publish jitter is averaged out.
+        self._smoothed_target: GazeTarget = None
         # Cached last good target — used during robot_speaking to lock onto
         # whoever we were looking at when the assistant started talking.
         self._held_target: GazeTarget = None
@@ -191,13 +211,30 @@ class FaceOffsetMixer:
         with self._lock:
             self._tracker_target = target
             self._tracker_target_at = now
+            # EMA-smooth the target. First sample after a None (or the very
+            # first publish) snaps so a fresh acquisition isn't damped.
+            if target is None:
+                self._smoothed_target = None
+            elif self._smoothed_target is None:
+                self._smoothed_target = target
+            else:
+                a = self._target_smoothing
+                pan_old, tilt_old = self._smoothed_target
+                pan_new, tilt_new = target
+                self._smoothed_target = (
+                    a * pan_new + (1.0 - a) * pan_old,
+                    a * tilt_new + (1.0 - a) * tilt_old,
+                )
             # Update the held-target snapshot so a future transition into
             # robot_speaking locks onto the freshest known subject. While
             # already in robot_speaking we MUST NOT overwrite — the contract
             # is "do not re-pick mid-utterance". The lock-on snapshot taken
             # in set_gain_state covers entry to that state.
-            if target is not None and self._gain_state != "robot_speaking":
-                self._held_target = target
+            if (
+                self._smoothed_target is not None
+                and self._gain_state != "robot_speaking"
+            ):
+                self._held_target = self._smoothed_target
 
     # ------------------------------------------------------------------
     # Gain state
@@ -212,10 +249,11 @@ class FaceOffsetMixer:
                     state,
                 )
                 return
-            if state == "robot_speaking" and self._tracker_target is not None:
-                # Lock onto the freshest known target so a stale held value
-                # doesn't make us look at the wrong place.
-                self._held_target = self._tracker_target
+            if state == "robot_speaking" and self._smoothed_target is not None:
+                # Lock onto the freshest smoothed target so a stale held
+                # value doesn't make us look at the wrong place — and so
+                # the lock-on doesn't inherit per-publish jitter.
+                self._held_target = self._smoothed_target
             self._gain_state = state
 
     @property
@@ -253,7 +291,7 @@ class FaceOffsetMixer:
         if self._gain_state == "robot_speaking":
             target = self._held_target
         else:
-            target = self._tracker_target
+            target = self._smoothed_target
 
         if target is None:
             # No subject — hold whatever we last commanded. The slew

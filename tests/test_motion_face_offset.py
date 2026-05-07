@@ -316,16 +316,20 @@ def test_robot_speaking_holds_target_when_tracker_re_publishes_different_target(
 
 
 def test_set_robot_speaking_snaps_held_to_latest_target():
-    """Entering robot_speaking should lock onto the freshest known target."""
+    """Entering robot_speaking should lock onto the latest smoothed target.
+
+    EMA smoothing damps jitter, so we publish (0.8) repeatedly to let the
+    smoothed target converge before locking.
+    """
     mixer, tracker, clock = _make()
     tracker.publish((0.2, 0.0))
-    tracker.publish((0.8, 0.0))  # newest target right before the lock
+    for _ in range(20):
+        tracker.publish((0.8, 0.0))  # converge smoothed → 0.8
     mixer.set_gain_state("robot_speaking")
     tracker.publish(None)
     _settle(mixer, clock)
-    # Held value should reflect the 0.8 publish, not the earlier 0.2.
     assert mixer.current_offset().head_yaw == pytest.approx(
-        -_HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"]
+        -_HALF_HFOV_RAD * 0.8 * DEFAULT_GAINS["robot_speaking"], abs=1e-3
     )
 
 
@@ -339,7 +343,10 @@ def test_idle_state_follows_new_target_after_publish():
     initial = mixer.current_offset().head_yaw
     # pan>0 produces yaw<0 under the empirical SDK convention.
     assert initial < 0
-    tracker.publish((-0.2, 0.0))
+    # Sustained move to the other side — repeat publishes so the EMA
+    # converges past zero, then assert the head followed.
+    for _ in range(20):
+        tracker.publish((-0.2, 0.0))
     _settle(mixer, clock)
     assert mixer.current_offset().head_yaw > 0
 
@@ -447,3 +454,77 @@ def test_slew_rate_max_step_per_tick_respects_velocity_cap():
     # pan>0 drives yaw negative; |step| ≤ 3° and the head moved.
     assert abs(step) <= math.radians(3.0) + 1e-9
     assert step < 0.0
+
+
+# ---------------------------------------------------------------------------
+# Target smoothing (EMA)
+# ---------------------------------------------------------------------------
+
+
+def test_target_smoothing_first_sample_snaps():
+    """The very first publish (or first after None) is not damped."""
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(clock=clock, target_smoothing=0.4)
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+    tracker.publish((1.0, 0.0))
+    _settle(mixer, clock)
+    # Smoothed target snapped to (1.0, 0.0) on the first sample, then the
+    # slew limiter drove the head all the way there.
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD)
+
+
+def test_target_smoothing_dampens_jitter():
+    """Alternating publishes around a centerline produce a damped output.
+
+    Without smoothing, alternating (+0.5, 0) and (-0.5, 0) would whip the
+    head between ±_HALF_HFOV_RAD/2 each tick. With α=0.4 the smoothed
+    target converges toward the mean (≈0) over many publishes.
+    """
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(clock=clock, target_smoothing=0.4)
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+
+    # First sample snaps to +0.5 — accept the snap, then alternate.
+    tracker.publish((0.5, 0.0))
+    for _ in range(40):
+        tracker.publish((-0.5, 0.0))
+        tracker.publish((0.5, 0.0))
+    _settle(mixer, clock)
+    # An unsmoothed mixer would whip the head to ±0.5 × _HALF_HFOV_RAD
+    # each tick. With α=0.4 the smoothed target settles into a small
+    # oscillation around the mean, so the steady-state yaw is at least
+    # 3× smaller than a single ±0.5 publish would produce.
+    unsmoothed_amplitude = _HALF_HFOV_RAD * 0.5
+    assert abs(mixer.current_offset().head_yaw) < unsmoothed_amplitude / 3.0
+
+
+def test_target_smoothing_alpha_one_disables_smoothing():
+    """α=1.0 makes the smoothed target equal the raw target on every publish."""
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(clock=clock, target_smoothing=1.0)
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+    tracker.publish((0.2, 0.0))
+    tracker.publish((0.8, 0.0))
+    _settle(mixer, clock)
+    # No damping: head goes all the way to the second publish.
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * 0.8)
+
+
+def test_target_smoothing_resets_after_none():
+    """A None publish resets the smoothed-target state so the next publish snaps."""
+    clock = _FakeClock()
+    mixer = FaceOffsetMixer(clock=clock, target_smoothing=0.4)
+    tracker = _FakeTracker()
+    mixer.attach(tracker)
+    mixer.set_gain_state("child_speaking")
+    tracker.publish((0.5, 0.0))  # smoothed = 0.5
+    tracker.publish(None)         # smoothed reset
+    tracker.publish((-0.7, 0.0))  # snaps to -0.7 (no damping)
+    _settle(mixer, clock)
+    assert mixer.current_offset().head_yaw == pytest.approx(-_HALF_HFOV_RAD * -0.7)
