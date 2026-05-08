@@ -11,14 +11,16 @@ access using the same ``_is_local_request`` heuristic as the rest of the app.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
 
+import face_admin_ssh
 from env_loader import load_project_dotenv
 from kids_review_store import KidsReviewStore
 from kids_teacher_backend import resolve_realtime_model
@@ -122,6 +124,15 @@ async def kids_teacher_page(request: Request):
     )
 
 
+@router.get("/kids-teacher/faces")
+async def kids_teacher_faces_page(request: Request):
+    return _TEMPLATES.TemplateResponse(
+        "kids_teacher_faces.html",
+        {"request": request},
+        headers=_NO_CACHE,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Status endpoint
 # ---------------------------------------------------------------------------
@@ -197,6 +208,124 @@ async def kids_teacher_review_session(request: Request, session_id: str):
             }
         )
     return data
+
+
+# ---------------------------------------------------------------------------
+# Faces admin endpoints (local-only HTTP gate; SSH to the robot for the data)
+# ---------------------------------------------------------------------------
+
+MAX_PHOTO_BYTES = 10 * 1024 * 1024
+MAX_FACE_NAME_LEN = 100
+
+_ENROLL_RESULT_TO_HTTP = {
+    "no_face": (422, "No face detected in image."),
+    "multiple_faces": (422, "Multiple faces detected; upload a photo with exactly one face."),
+    "capacity_exceeded": (409, "Capacity exceeded; remove an existing name first."),
+    "library_missing": (503, "face_recognition library is not installed on the robot."),
+}
+
+
+def _require_local(request: Request) -> None:
+    """Gate admin endpoints to the local browser only — SSH creds stay on-host."""
+    if not _is_local_request(request):
+        raise HTTPException(
+            status_code=403,
+            detail="Faces admin is only available from the local machine.",
+        )
+
+
+def _parse_conn(raw: object) -> face_admin_ssh.SshConn:
+    try:
+        return face_admin_ssh.SshConn.parse(raw)
+    except face_admin_ssh.SshError as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid connection: {exc}")
+
+
+async def _json_body(request: Request) -> dict:
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON body")
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be a JSON object")
+    return body
+
+
+@_api.post("/faces/list")
+async def list_faces(request: Request):
+    _require_local(request)
+    body = await _json_body(request)
+    conn = _parse_conn(body.get("connection"))
+    try:
+        faces = face_admin_ssh.remote_list(conn)
+    except face_admin_ssh.SshError as exc:
+        raise HTTPException(status_code=502, detail=f"SSH error: {exc}")
+    return {"faces": faces}
+
+
+@_api.post("/faces/delete")
+async def delete_faces(request: Request):
+    _require_local(request)
+    body = await _json_body(request)
+    conn = _parse_conn(body.get("connection"))
+    names = body.get("names")
+    if not isinstance(names, list) or not all(isinstance(n, str) for n in names):
+        raise HTTPException(status_code=400, detail="'names' must be a list of strings")
+    cleaned = [n.strip() for n in names if n.strip()]
+    try:
+        result = face_admin_ssh.remote_delete(conn, cleaned)
+    except face_admin_ssh.SshError as exc:
+        raise HTTPException(status_code=502, detail=f"SSH error: {exc}")
+    return result
+
+
+@_api.post("/faces/add")
+async def add_face(
+    request: Request,
+    connection: str = Form(...),
+    name: str = Form(...),
+    photo: UploadFile = File(...),
+):
+    _require_local(request)
+    try:
+        conn_raw = json.loads(connection)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="connection field must be valid JSON")
+    conn = _parse_conn(conn_raw)
+
+    name = name.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if len(name) > MAX_FACE_NAME_LEN:
+        raise HTTPException(status_code=400, detail=f"name too long (max {MAX_FACE_NAME_LEN} chars)")
+
+    data = await photo.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty photo upload")
+    if len(data) > MAX_PHOTO_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"photo too large (max {MAX_PHOTO_BYTES // (1024 * 1024)} MB)",
+        )
+
+    try:
+        result = face_admin_ssh.remote_add(conn, name, data, photo.filename or "upload.jpg")
+    except face_admin_ssh.SshError as exc:
+        raise HTTPException(status_code=502, detail=f"SSH error: {exc}")
+
+    code = result.get("result")
+    if code == "ok":
+        return {"status": "ok", "name": name, "count": int(result.get("count", 0))}
+    if code == "bad_image":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read image: {result.get('error', 'unknown')}",
+        )
+    mapped = _ENROLL_RESULT_TO_HTTP.get(code)
+    if mapped is None:
+        raise HTTPException(status_code=502, detail=f"Unknown enroll result: {code!r}")
+    status, detail = mapped
+    raise HTTPException(status_code=status, detail=detail)
 
 
 # Expose the combined router so main.py only needs one include_router call.

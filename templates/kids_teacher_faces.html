@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Faces — Kids Teacher</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg" />
+  <link rel="stylesheet" href="/static/css/style.css" />
+  <style>
+    .faces-wrap { max-width: 760px; margin: 24px auto; padding: 0 16px; font-family: system-ui, -apple-system, sans-serif; }
+    .panel { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin-top: 16px; background: #fafafa; }
+    .panel h2 { margin-top: 0; }
+    .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; }
+    .grid-2 label { display: flex; flex-direction: column; gap: 4px; font-size: 0.9rem; }
+    .grid-2 input { padding: 6px 8px; box-sizing: border-box; width: 100%; }
+    .faces-table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+    .faces-table th, .faces-table td { padding: 8px 12px; text-align: left; border-bottom: 1px solid #ddd; }
+    .toolbar { display: flex; gap: 8px; align-items: center; margin: 12px 0; }
+    .status { margin-top: 12px; min-height: 1.5em; font-size: 0.95rem; }
+    .status.ok { color: #1a7f37; }
+    .status.err { color: #b3261e; }
+    .empty { color: #777; padding: 12px 0; }
+    .muted { color: #555; font-size: 0.85rem; }
+    button { cursor: pointer; padding: 8px 14px; border-radius: 6px; border: 1px solid #ccc; background: #fff; }
+    button:disabled { opacity: 0.5; cursor: not-allowed; }
+    button.primary { background: #2563eb; color: white; border-color: #2563eb; }
+    button.danger { background: #b3261e; color: white; border-color: #b3261e; }
+    code { background: #eee; padding: 1px 4px; border-radius: 3px; }
+  </style>
+</head>
+<body>
+  <div class="faces-wrap">
+    <header class="home-header">
+      <div class="header-inner">
+        <h1>Faces (on robot)</h1>
+        <a href="/kids-teacher" class="settings-btn" title="Back">↩</a>
+      </div>
+    </header>
+
+    <p class="muted">
+      Manages <code>~/.myra/faces.pkl</code> on the Reachy Mini over SSH.
+      Key-based auth only — make sure <code>ssh user@host</code> works from your terminal first.
+    </p>
+
+    <section class="panel" id="conn-panel">
+      <h2>Robot connection</h2>
+      <form id="conn-form" autocomplete="off">
+        <div class="grid-2">
+          <label>Host
+            <input type="text" name="host" placeholder="reachy-mini.local" required />
+          </label>
+          <label>User
+            <input type="text" name="user" placeholder="reachy" required />
+          </label>
+          <label>Port
+            <input type="number" name="port" value="22" min="1" max="65535" />
+          </label>
+          <label>Repo path on robot
+            <input type="text" name="repo_path" placeholder="/home/reachy/myra-language-teacher" required />
+          </label>
+          <label>SSH key path (optional)
+            <input type="text" name="key_path" placeholder="~/.ssh/id_ed25519" />
+          </label>
+          <label>Python fallback (optional)
+            <input type="text" name="python" placeholder="python3" />
+            <span class="muted" style="font-size:0.75rem;">Uses <code>venv/bin/python</code> in repo path automatically; this is the fallback.</span>
+          </label>
+        </div>
+        <div style="margin-top:12px; display:flex; gap:8px;">
+          <button type="submit" class="primary">Save &amp; load faces</button>
+          <button type="button" id="clear-conn">Clear saved</button>
+        </div>
+      </form>
+    </section>
+
+    <section class="panel">
+      <h2>Enrolled faces</h2>
+      <div class="toolbar">
+        <button id="refresh-btn" type="button" disabled>Refresh</button>
+        <button id="delete-btn" type="button" class="danger" disabled>Delete selected</button>
+        <span id="selected-count" style="margin-left:auto; color:#555;"></span>
+      </div>
+      <table class="faces-table" id="faces-table" hidden>
+        <thead>
+          <tr>
+            <th style="width:32px;"><input type="checkbox" id="select-all" /></th>
+            <th>Name</th>
+            <th style="width:120px;">Encodings</th>
+          </tr>
+        </thead>
+        <tbody id="faces-tbody"></tbody>
+      </table>
+      <p id="faces-empty" class="empty" hidden>No faces enrolled.</p>
+      <p id="faces-prompt" class="empty">Save robot connection above to load faces.</p>
+    </section>
+
+    <section class="panel">
+      <h2>Add a face</h2>
+      <p class="muted">Photo must contain exactly one face. Limit ~10 MB. Photo is uploaded to <code>/tmp</code> on the robot, enrolled, then deleted.</p>
+      <form id="add-form" autocomplete="off">
+        <label>Name<br/>
+          <input type="text" id="add-name" name="name" required maxlength="100" style="width:100%; padding:6px 8px;" />
+        </label>
+        <label style="display:block; margin-top:8px;">Photo (JPG/PNG)<br/>
+          <input type="file" id="add-photo" name="photo" accept="image/*" required />
+        </label>
+        <div style="margin-top:12px;">
+          <button type="submit" id="add-submit" disabled>Add face</button>
+        </div>
+      </form>
+    </section>
+
+    <div id="status" class="status" role="status" aria-live="polite"></div>
+  </div>
+
+  <script>
+    const API = "/api/kids-teacher/faces";
+    const STORAGE_KEY = "myra_face_admin_ssh_v1";
+    const CONN_FIELDS = ["host", "user", "port", "repo_path", "key_path", "python"];
+
+    const els = {
+      connForm: document.getElementById("conn-form"),
+      clearConn: document.getElementById("clear-conn"),
+      table: document.getElementById("faces-table"),
+      tbody: document.getElementById("faces-tbody"),
+      empty: document.getElementById("faces-empty"),
+      prompt: document.getElementById("faces-prompt"),
+      selectAll: document.getElementById("select-all"),
+      deleteBtn: document.getElementById("delete-btn"),
+      refreshBtn: document.getElementById("refresh-btn"),
+      selectedCount: document.getElementById("selected-count"),
+      addForm: document.getElementById("add-form"),
+      addName: document.getElementById("add-name"),
+      addPhoto: document.getElementById("add-photo"),
+      addSubmit: document.getElementById("add-submit"),
+      status: document.getElementById("status"),
+    };
+
+    function setStatus(msg, kind) {
+      els.status.textContent = msg || "";
+      els.status.className = "status" + (kind ? " " + kind : "");
+    }
+
+    function readConnFromForm() {
+      const fd = new FormData(els.connForm);
+      const conn = {};
+      for (const f of CONN_FIELDS) {
+        const v = (fd.get(f) || "").toString().trim();
+        if (v) conn[f] = f === "port" ? Number(v) : v;
+      }
+      return conn;
+    }
+
+    function loadConnFromStorage() {
+      try {
+        const raw = localStorage.getItem(STORAGE_KEY);
+        if (!raw) return null;
+        const data = JSON.parse(raw);
+        for (const f of CONN_FIELDS) {
+          const input = els.connForm.elements.namedItem(f);
+          if (input && data[f] != null) input.value = data[f];
+        }
+        return data;
+      } catch (e) {
+        return null;
+      }
+    }
+
+    function saveConnToStorage(conn) {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(conn));
+    }
+
+    let currentConn = null;
+
+    function setOpsEnabled(enabled) {
+      els.refreshBtn.disabled = !enabled;
+      els.addSubmit.disabled = !enabled;
+      // delete button stays managed by selection state
+    }
+
+    function getCheckedNames() {
+      return Array.from(els.tbody.querySelectorAll("input[type=checkbox]:checked"))
+        .map(cb => cb.dataset.name);
+    }
+
+    function refreshSelectionState() {
+      const checked = getCheckedNames();
+      els.deleteBtn.disabled = !currentConn || checked.length === 0;
+      els.selectedCount.textContent = checked.length ? `${checked.length} selected` : "";
+      const all = els.tbody.querySelectorAll("input[type=checkbox]");
+      els.selectAll.checked = all.length > 0 && checked.length === all.length;
+    }
+
+    function render(faces) {
+      els.prompt.hidden = true;
+      els.tbody.innerHTML = "";
+      if (!faces.length) {
+        els.table.hidden = true;
+        els.empty.hidden = false;
+        refreshSelectionState();
+        return;
+      }
+      els.empty.hidden = true;
+      els.table.hidden = false;
+      for (const f of faces) {
+        const tr = document.createElement("tr");
+        const tdCb = document.createElement("td");
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.dataset.name = f.name;
+        cb.addEventListener("change", refreshSelectionState);
+        tdCb.appendChild(cb);
+        const tdName = document.createElement("td");
+        tdName.textContent = f.name;
+        const tdCount = document.createElement("td");
+        tdCount.textContent = f.count;
+        tr.append(tdCb, tdName, tdCount);
+        els.tbody.appendChild(tr);
+      }
+      refreshSelectionState();
+    }
+
+    async function postJSON(path, body) {
+      const resp = await fetch(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+      return data;
+    }
+
+    async function loadFaces() {
+      if (!currentConn) return;
+      setStatus("Connecting…");
+      try {
+        const data = await postJSON(API + "/list", { connection: currentConn });
+        render(data.faces || []);
+        setStatus(`Loaded ${data.faces.length} face(s).`, "ok");
+      } catch (e) {
+        setStatus(`Load failed: ${e.message}`, "err");
+      }
+    }
+
+    async function deleteSelected() {
+      const names = getCheckedNames();
+      if (!names.length || !currentConn) return;
+      if (!confirm(`Delete ${names.length} face(s) from the robot? This cannot be undone.`)) return;
+      els.deleteBtn.disabled = true;
+      setStatus("Deleting…");
+      try {
+        const data = await postJSON(API + "/delete", { connection: currentConn, names });
+        setStatus(`Deleted ${data.deleted.length}; ${data.not_found.length} not found.`, "ok");
+        await loadFaces();
+      } catch (e) {
+        setStatus(`Delete failed: ${e.message}`, "err");
+        refreshSelectionState();
+      }
+    }
+
+    async function addFace(ev) {
+      ev.preventDefault();
+      if (!currentConn) {
+        setStatus("Save robot connection first.", "err");
+        return;
+      }
+      const name = els.addName.value.trim();
+      const file = els.addPhoto.files[0];
+      if (!name || !file) return;
+      const fd = new FormData();
+      fd.append("connection", JSON.stringify(currentConn));
+      fd.append("name", name);
+      fd.append("photo", file);
+      els.addSubmit.disabled = true;
+      setStatus("Uploading & enrolling on the robot…");
+      try {
+        const resp = await fetch(API + "/add", { method: "POST", body: fd });
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`);
+        setStatus(`Enrolled ${data.name} (${data.count} encoding${data.count === 1 ? "" : "s"} total).`, "ok");
+        els.addForm.reset();
+        await loadFaces();
+      } catch (e) {
+        setStatus(`Add failed: ${e.message}`, "err");
+      } finally {
+        els.addSubmit.disabled = !currentConn;
+      }
+    }
+
+    els.connForm.addEventListener("submit", (ev) => {
+      ev.preventDefault();
+      const conn = readConnFromForm();
+      const required = ["host", "user", "repo_path"];
+      for (const f of required) {
+        if (!conn[f]) {
+          setStatus(`Missing required field: ${f}`, "err");
+          return;
+        }
+      }
+      saveConnToStorage(conn);
+      currentConn = conn;
+      setOpsEnabled(true);
+      loadFaces();
+    });
+
+    els.clearConn.addEventListener("click", () => {
+      localStorage.removeItem(STORAGE_KEY);
+      els.connForm.reset();
+      currentConn = null;
+      setOpsEnabled(false);
+      els.deleteBtn.disabled = true;
+      els.tbody.innerHTML = "";
+      els.table.hidden = true;
+      els.empty.hidden = true;
+      els.prompt.hidden = false;
+      setStatus("Saved connection cleared.");
+    });
+
+    els.refreshBtn.addEventListener("click", loadFaces);
+    els.deleteBtn.addEventListener("click", deleteSelected);
+    els.selectAll.addEventListener("change", () => {
+      for (const cb of els.tbody.querySelectorAll("input[type=checkbox]")) {
+        cb.checked = els.selectAll.checked;
+      }
+      refreshSelectionState();
+    });
+    els.addForm.addEventListener("submit", addFace);
+
+    // Restore saved connection (if any) and auto-load.
+    const saved = loadConnFromStorage();
+    if (saved && saved.host && saved.user && saved.repo_path) {
+      currentConn = saved;
+      setOpsEnabled(true);
+      loadFaces();
+    }
+  </script>
+</body>
+</html>
