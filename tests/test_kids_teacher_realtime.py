@@ -1130,3 +1130,284 @@ async def test_vad_hook_exception_is_swallowed() -> None:
 
     assert hooks.speech_started_calls == 1
     assert hooks.speech_stopped_calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Refusal-recovery intercept (issue #52)
+#
+# When the model falls out of persona and emits the canned identity refusal
+# ("I'm just a language model and can't help with that."), the handler must:
+#   1. Hard-cut local playback (so the child never hears the refusal).
+#   2. Suppress the partial transcript publish for the refusal text.
+#   3. Drop the backend's resumption handle via reset_session().
+#   4. Notify the bridge so it plays a recovery line.
+#   5. Tier the bridge line: soft on the first refusal, escalated on a
+#      repeat within _REFUSAL_ESCALATION_WINDOW_SECONDS.
+# ---------------------------------------------------------------------------
+
+
+class _RefusalAwareHooks(FakeHooks):
+    """FakeHooks + a recording on_refusal_recovery."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.refusal_recovery_calls: List[bool] = []  # one entry per call, value = escalated
+
+    def on_refusal_recovery(self, *, escalated: bool) -> None:
+        self.refusal_recovery_calls.append(escalated)
+
+
+def _refusal_handler(
+    backend: FakeRealtimeBackend,
+    hooks: FakeHooks,
+    *,
+    clock: Optional[callable] = None,  # type: ignore[type-arg]
+) -> KidsTeacherRealtimeHandler:
+    """Like _handler but lets the test override the clock for window math."""
+    if clock is None:
+        tick = [0]
+
+        def _tick() -> float:
+            tick[0] += 1
+            return float(tick[0])
+
+        clock = _tick
+    return KidsTeacherRealtimeHandler(
+        config=_config(),
+        backend=backend,
+        hooks=hooks,
+        clock=clock,
+    )
+
+
+async def test_refusal_intercept_stops_playback_and_resets_session() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Emit the canonical refusal as it appeared in the production log:
+    # short fragments that only trip the detector once "language" arrives.
+    await backend.push_event({"type": "assistant_transcript.delta", "text": "I'm just"})
+    await backend.push_event({"type": "assistant_transcript.delta", "text": " a language"})
+    await backend.push_event({"type": "assistant_transcript.delta", "text": " model"})
+    await asyncio.sleep(0.01)
+
+    # Hard-cut: local playback flushed exactly once.
+    assert hooks.stop_playback_calls == 1
+    # reset_session called exactly once on the backend.
+    assert backend.reset_calls == 1
+    # Bridge notified, soft tier (first refusal in this session).
+    assert hooks.refusal_recovery_calls == [False]
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_suppresses_partial_transcript_publish() -> None:
+    """The refusal partial must NOT be published to the transcript stream
+    once the detector has fired — otherwise downstream consumers (review
+    store, parent dashboard) record the canned refusal as if the robot
+    actually said it."""
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event({"type": "assistant_transcript.delta", "text": "I'm just"})
+    await backend.push_event({"type": "assistant_transcript.delta", "text": " a language model"})
+    await backend.push_event({"type": "assistant_transcript.delta", "text": " and can't help"})
+    await asyncio.sleep(0.01)
+
+    assistant_partials = [
+        t for t in hooks.transcripts
+        if t.speaker == Speaker.ASSISTANT and t.is_partial
+    ]
+    # First fragment ("I'm just") publishes — it alone is a refusal-pattern
+    # match so the intercept fires before publish on that delta. The
+    # follow-on fragments must never reach the transcript stream.
+    joined = "".join(t.text for t in assistant_partials)
+    assert "language model" not in joined.lower()
+    assert "can't help" not in joined.lower()
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_fires_only_once_per_turn() -> None:
+    """A refusal that spans many partials must not trigger the intercept
+    on every subsequent delta — reset_session and the bridge cue should
+    each be hit exactly once per turn."""
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    for fragment in ("I'm just", " a language", " model", " and", " can't", " help"):
+        await backend.push_event(
+            {"type": "assistant_transcript.delta", "text": fragment}
+        )
+    await asyncio.sleep(0.02)
+
+    assert backend.reset_calls == 1
+    assert hooks.refusal_recovery_calls == [False]
+    assert hooks.stop_playback_calls == 1
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_escalates_on_repeat_within_window() -> None:
+    """A second refusal within _REFUSAL_ESCALATION_WINDOW_SECONDS upgrades
+    the bridge cue from soft (False) to escalated (True). The handler's
+    clock callback drives the window math, so the test can deterministically
+    place the second refusal inside the window without real time."""
+    # Clock advances by 10 seconds per tick — well inside the 120s window.
+    ticks = [0.0]
+
+    def fake_clock() -> float:
+        ticks[0] += 10.0
+        return ticks[0]
+
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks, clock=fake_clock)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    # Refusal 1 → soft tier.
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await backend.push_event({"type": "response.done"})
+    await asyncio.sleep(0.01)
+
+    # Refusal 2 within the window → escalated tier.
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await asyncio.sleep(0.01)
+
+    assert hooks.refusal_recovery_calls == [False, True]
+    assert backend.reset_calls == 2
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_stays_soft_on_repeat_outside_window() -> None:
+    """A second refusal that lands AFTER the escalation window stays soft
+    — the escalation timer is window-bounded by design so a single transient
+    blip doesn't flip the rest of the session into the adult-redirect cue."""
+    # Each clock tick advances by 200s, well past the 120s window.
+    ticks = [0.0]
+
+    def fake_clock() -> float:
+        ticks[0] += 200.0
+        return ticks[0]
+
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks, clock=fake_clock)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await backend.push_event({"type": "response.done"})
+    await asyncio.sleep(0.01)
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await asyncio.sleep(0.01)
+
+    assert hooks.refusal_recovery_calls == [False, False]
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_resets_state_on_response_done() -> None:
+    """After response.done, the per-turn buffer + once-per-turn guard
+    must reset so the NEXT turn's refusal still trips the detector."""
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await backend.push_event({"type": "response.done"})
+    await asyncio.sleep(0.01)
+
+    # Turn 2: another refusal must trip the intercept again.
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await asyncio.sleep(0.01)
+
+    assert backend.reset_calls == 2
+    assert len(hooks.refusal_recovery_calls) == 2
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_no_refusal_intercept_for_benign_assistant_text() -> None:
+    backend = FakeRealtimeBackend()
+    hooks = _RefusalAwareHooks()
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta",
+         "text": "Kangaroos are plant eaters! They like grass and leaves."}
+    )
+    await backend.push_event({"type": "response.done"})
+    await asyncio.sleep(0.01)
+
+    assert backend.reset_calls == 0
+    assert hooks.refusal_recovery_calls == []
+    assert hooks.stop_playback_calls == 0
+
+    await backend.end_stream()
+    await run_task
+
+
+async def test_refusal_intercept_works_when_hook_omits_on_refusal_recovery() -> None:
+    """Hooks that don't expose on_refusal_recovery (e.g. browser SSE
+    bridge) must not crash the intercept path — getattr probing should
+    skip the call cleanly."""
+    backend = FakeRealtimeBackend()
+    hooks = FakeHooks()  # no on_refusal_recovery method
+    handler = _refusal_handler(backend, hooks)
+
+    await handler.start()
+    run_task = asyncio.create_task(handler.run())
+
+    await backend.push_event(
+        {"type": "assistant_transcript.delta", "text": "I'm just a language model"}
+    )
+    await asyncio.sleep(0.01)
+
+    # reset_session and stop_playback still fire even without the hook.
+    assert backend.reset_calls == 1
+    assert hooks.stop_playback_calls == 1
+
+    await backend.end_stream()
+    await run_task

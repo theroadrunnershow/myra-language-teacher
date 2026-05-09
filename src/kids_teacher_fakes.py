@@ -44,6 +44,7 @@ class FakeRealtimeBackend:
         self.video_chunks: List[bytes] = []
         self.text_messages: List[str] = []
         self.cancel_calls: int = 0
+        self.reset_calls: int = 0
         self.close_calls: int = 0
         self.tool_responses: List[tuple] = []
 
@@ -67,6 +68,9 @@ class FakeRealtimeBackend:
 
     async def cancel_response(self) -> None:
         self.cancel_calls += 1
+
+    async def reset_session(self) -> None:
+        self.reset_calls += 1
 
     async def send_tool_response(self, call_id: str, output: str) -> None:
         self.tool_responses.append((call_id, output))

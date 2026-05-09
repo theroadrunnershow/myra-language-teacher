@@ -20,6 +20,7 @@ from typing import AsyncIterator, Callable, Deque, Optional
 
 from kids_teacher_backend import RealtimeBackend, build_session_payload
 from kids_teacher_fakes import FakeRealtimeBackend  # noqa: F401 (re-export)
+from kids_teacher_refusal import is_refusal
 from kids_teacher_types import (
     KidsStatusEvent,
     KidsTeacherRuntimeHooks,
@@ -33,6 +34,12 @@ logger = logging.getLogger(__name__)
 
 
 _FALLBACK_ASSISTANT_LINE = "Let me try that again in a moment."
+
+# A second refusal within this window upgrades the bridge line from
+# "let me think for a second" (soft) to "ask a grown-up" (escalated).
+# Two minutes covers the typical recovery -> next-turn span without
+# making the escalation sticky for a whole session.
+_REFUSAL_ESCALATION_WINDOW_SECONDS = 120.0
 
 
 @dataclass(frozen=True)
@@ -85,6 +92,16 @@ class KidsTeacherRealtimeHandler:
         # Pending assistant audio chunks that have not yet been played.
         # Drained on barge-in or stop.
         self._pending_audio: asyncio.Queue[bytes] = asyncio.Queue()
+
+        # Per-turn accumulated assistant transcript and a one-shot guard
+        # so the refusal detector fires at most once per turn (otherwise
+        # every subsequent partial after the first match would re-trigger
+        # the intercept). Both reset on response.done / reconnect /
+        # cancellation. ``_last_refusal_at`` is monotonic — wallclock
+        # drift doesn't matter, only the window math.
+        self._assistant_partial_buffer: str = ""
+        self._refusal_handled_this_turn: bool = False
+        self._last_refusal_at: Optional[float] = None
 
     # ------------------------------------------------------------------
     # Public lifecycle API
@@ -225,7 +242,7 @@ class KidsTeacherRealtimeHandler:
         elif event_type == "input_transcript.final":
             self._on_input_final(event)
         elif event_type == "assistant_transcript.delta":
-            self._on_assistant_delta(event)
+            await self._on_assistant_delta(event)
         elif event_type == "assistant_transcript.final":
             self._on_assistant_final(event)
         elif event_type == "audio.chunk":
@@ -268,7 +285,7 @@ class KidsTeacherRealtimeHandler:
         )
         self._remember(Speaker.CHILD, text, language)
 
-    def _on_assistant_delta(self, event: dict) -> None:
+    async def _on_assistant_delta(self, event: dict) -> None:
         # Open the barge-in gate so a child speech_started in this window
         # cancels properly. Do NOT publish SPEAKING here — that would start
         # the robot's speak animation before any audio is queued, since
@@ -279,6 +296,22 @@ class KidsTeacherRealtimeHandler:
             self._assistant_active = True
             logger.info("[kids_teacher_realtime] assistant response started")
         text = event.get("text", "") or ""
+        # Refusal intercept runs BEFORE we publish the partial so we can
+        # short-circuit before downstream consumers see the canned
+        # "I'm just a language model" text. The transcript stream leads
+        # audio by 200-500ms, so detecting on a partial gives the bridge
+        # time to flush the speaker pipeline before the audio plays.
+        # Once the intercept has fired in a turn, every subsequent
+        # delta is also dropped — the turn has been cancelled and any
+        # follow-on text would just leak refusal fragments into the
+        # transcript stream.
+        if self._refusal_handled_this_turn:
+            return
+        if text:
+            self._assistant_partial_buffer += text
+            if is_refusal(self._assistant_partial_buffer):
+                await self._handle_refusal_intercept()
+                return
         self._publish_transcript(Speaker.ASSISTANT, text, is_partial=True)
 
     def _on_assistant_final(self, event: dict) -> None:
@@ -361,6 +394,8 @@ class KidsTeacherRealtimeHandler:
         logger.info("[kids_teacher_realtime] response.done — turn complete")
         self._assistant_active = False
         self._speaking_published = False
+        self._assistant_partial_buffer = ""
+        self._refusal_handled_this_turn = False
         self._drain_pending_audio()
         self._publish_status(SessionStatus.LISTENING)
 
@@ -377,6 +412,8 @@ class KidsTeacherRealtimeHandler:
         logger.info("[kids_teacher_realtime] backend reconnecting (%s)", detail or "")
         self._assistant_active = False
         self._speaking_published = False
+        self._assistant_partial_buffer = ""
+        self._refusal_handled_this_turn = False
         self._drain_pending_audio()
         try:
             self._hooks.stop_assistant_playback()
@@ -414,6 +451,83 @@ class KidsTeacherRealtimeHandler:
     # Helpers
     # ------------------------------------------------------------------
 
+    async def _handle_refusal_intercept(self) -> None:
+        """Hard-cut the in-flight refusal and force a fresh backend session.
+
+        Triggered by :meth:`_on_assistant_delta` when the accumulated
+        assistant transcript trips :func:`is_refusal`. Three jobs:
+
+        1. Suppress what's already been queued for the speaker pipeline
+           — Gemini Live's transcript stream leads audio by 200-500ms so
+           the refusal text usually arrives before the matching audio
+           chunk; flushing here means the child hears at most a syllable.
+        2. Notify the bridge so it plays the recovery cue line. The tier
+           (soft vs escalated) depends on whether a previous refusal
+           landed within :data:`_REFUSAL_ESCALATION_WINDOW_SECONDS` —
+           the second-strike case promotes the cue from "let me think"
+           to "ask a grown-up", matching the design discussion on issue
+           #52.
+        3. Drop the backend's resumption handle and reconnect so the
+           server-side context no longer carries the refusal in its
+           assistant-history window. Without the handle drop the next
+           turn would mirror the refusal again on its own.
+
+        Marked one-shot per turn via :attr:`_refusal_handled_this_turn`
+        so a refusal that spans multiple deltas only triggers the
+        intercept once.
+        """
+        self._refusal_handled_this_turn = True
+        logger.info(
+            "[kids_teacher_realtime] refusal intercept fired (buffer=%r)",
+            self._assistant_partial_buffer[:80],
+        )
+
+        # Hard-cut local playback first so any audio already pushed to
+        # the speaker pipeline stops before the next chunk plays.
+        try:
+            self._hooks.stop_assistant_playback()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] stop_assistant_playback raised during refusal intercept: %s",
+                exc,
+            )
+        self._assistant_active = False
+        self._speaking_published = False
+        self._drain_pending_audio()
+
+        # Tier the recovery cue. Use the handler's clock so tests with a
+        # monotonic fake clock can drive both branches deterministically.
+        now = self._clock()
+        escalated = (
+            self._last_refusal_at is not None
+            and (now - self._last_refusal_at) <= _REFUSAL_ESCALATION_WINDOW_SECONDS
+        )
+        self._last_refusal_at = now
+
+        # Notify the bridge before kicking the reconnect — the cue plays
+        # in parallel with the reconnect dance, filling what would
+        # otherwise be silent reconnect time.
+        notify = getattr(self._hooks, "on_refusal_recovery", None)
+        if notify is not None:
+            try:
+                notify(escalated=escalated)
+            except Exception as exc:
+                logger.warning(
+                    "[kids_teacher_realtime] on_refusal_recovery raised: %s", exc
+                )
+
+        # Drop the resumption handle and reconnect. The Gemini backend
+        # turns this into a fresh-handle reconnect that emits its own
+        # session.reconnecting / session.reconnected events; the
+        # OpenAI backend no-ops.
+        try:
+            await self._backend.reset_session()
+        except Exception as exc:
+            logger.warning(
+                "[kids_teacher_realtime] reset_session raised during refusal intercept: %s",
+                exc,
+            )
+
     async def _cancel_active_response(self, *, reason: str = "unspecified") -> None:
         """Cancel the in-flight assistant response and flush queued audio.
 
@@ -440,6 +554,8 @@ class KidsTeacherRealtimeHandler:
                 reason,
             )
         self._speaking_published = False
+        self._assistant_partial_buffer = ""
+        self._refusal_handled_this_turn = False
         self._drain_pending_audio()
         try:
             self._hooks.stop_assistant_playback()

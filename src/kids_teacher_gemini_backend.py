@@ -1424,6 +1424,30 @@ class GeminiRealtimeBackend:
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_gemini_backend] cancel_response failed: %s", exc)
 
+    async def reset_session(self) -> None:
+        """Drop the saved resumption handle and force a fresh reconnect.
+
+        Called when the realtime handler detects the model has fallen out
+        of persona (canned identity refusal looped). Clearing
+        :attr:`_latest_resumption_handle` ensures the reconnect path picks
+        the fresh-handle branch rather than re-resuming the contaminated
+        server-side context.
+
+        If a reconnect is already in flight (e.g. the socket dropped at
+        the same time), the handle drop above is enough — the in-flight
+        task will pick up the cleared handle on its next iteration and
+        we don't queue a duplicate.
+        """
+        if self._closed:
+            return
+        logger.info(
+            "[kids_teacher_gemini_backend] reset_session: dropping handle and reconnecting"
+        )
+        self._latest_resumption_handle = None
+        if self._reconnect_task is not None and not self._reconnect_task.done():
+            return
+        self._reconnect_task = asyncio.create_task(self._attempt_reconnect())
+
     async def close(self) -> None:
         if self._closed:
             return

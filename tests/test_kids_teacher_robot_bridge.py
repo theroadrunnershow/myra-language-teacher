@@ -1265,3 +1265,161 @@ def test_additional_tool_specs_empty_when_neither_configured():
     hooks, _, _ = _make_hooks()  # no motion, no registry
     assert hooks.additional_tool_specs() == []
     assert hooks.additional_instructions() == ""
+
+
+# ---------------------------------------------------------------------------
+# Refusal-recovery cue (issue #52)
+#
+# When the realtime handler intercepts a model persona-drift refusal it
+# calls hooks.on_refusal_recovery(escalated=...). The bridge must:
+#   * flush any chunks queued against the cancelled assistant turn,
+#   * return to the listening pose (so the robot doesn't appear frozen),
+#   * fire the injected refusal cue off-thread with the escalation flag.
+# ---------------------------------------------------------------------------
+
+
+def test_on_refusal_recovery_clears_queue_and_returns_to_listen():
+    hooks, robot, _ = _make_hooks()
+    hooks.start_assistant_playback(b"\x00\x01")  # arms speaking_active
+    hooks.start_assistant_playback(b"\x02\x03")
+
+    hooks.on_refusal_recovery(escalated=False)
+
+    assert robot.flush_calls == 1
+    assert robot.calls[-1] == "listen"
+    # Once back in LISTENING, a new chunk re-arms the speak animation.
+    hooks.start_assistant_playback(b"\x10\x11")
+    assert robot.calls.count("speak") == 2
+
+
+def test_on_refusal_recovery_invokes_cue_off_thread_with_escalated_flag():
+    """The cue runs in a daemon thread and receives the escalated flag
+    so the flow-level default can pick the soft vs adult-redirect line."""
+    cue_calls: List[Tuple[object, bool, int]] = []
+    cue_started = threading.Event()
+    release = threading.Event()
+    caller_thread_id = threading.get_ident()
+
+    def slow_cue(robot: object, escalated: bool) -> None:
+        cue_started.set()
+        release.wait(timeout=2.0)
+        cue_calls.append((robot, escalated, threading.get_ident()))
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        play_chunk=RecordingPlayChunk(),
+        refusal_recovery_cue=slow_cue,
+    )
+
+    hooks.on_refusal_recovery(escalated=True)
+
+    # Returned without waiting — the cue must be running off-thread.
+    assert cue_started.wait(timeout=1.0)
+    assert cue_calls == []
+    release.set()
+    assert _wait_until(lambda: len(cue_calls) == 1, timeout=1.0)
+    cue_robot, cue_escalated, cue_thread = cue_calls[0]
+    assert cue_robot is robot
+    assert cue_escalated is True
+    assert cue_thread != caller_thread_id
+
+
+def test_on_refusal_recovery_passes_soft_flag_when_not_escalated():
+    cue_calls: List[bool] = []
+
+    def cue(_robot: object, escalated: bool) -> None:
+        cue_calls.append(escalated)
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        play_chunk=RecordingPlayChunk(),
+        refusal_recovery_cue=cue,
+    )
+
+    hooks.on_refusal_recovery(escalated=False)
+
+    assert _wait_until(lambda: len(cue_calls) == 1, timeout=1.0)
+    assert cue_calls == [False]
+
+
+def test_on_refusal_recovery_without_cue_is_no_op():
+    """refusal_recovery_cue defaults to None — bridge must still publish
+    the listening pose without raising."""
+    hooks, robot, _ = _make_hooks()  # no refusal cue wired
+    hooks.on_refusal_recovery(escalated=True)
+    assert robot.calls[-1] == "listen"
+
+
+def test_on_refusal_recovery_swallows_cue_exceptions():
+    """A broken cue must not crash the bridge thread or propagate out."""
+    def broken_cue(_robot: object, _escalated: bool) -> None:
+        raise RuntimeError("simulated TTS outage")
+
+    robot = FakeRobotController()
+    hooks = KidsTeacherRobotHooks(
+        robot_controller=robot,
+        play_chunk=RecordingPlayChunk(),
+        refusal_recovery_cue=broken_cue,
+    )
+
+    # Must return without raising; the worker thread logs and swallows.
+    hooks.on_refusal_recovery(escalated=False)
+    assert robot.calls[-1] == "listen"
+
+
+def test_build_robot_hooks_wires_default_refusal_recovery_cue():
+    """build_robot_hooks must inject a default cue so a real robot
+    deployment plays the recovery line on intercept rather than going
+    silent."""
+    hooks = build_robot_hooks(FakeRobotController())
+    assert hooks._refusal_recovery_cue is not None  # type: ignore[attr-defined]
+
+
+def test_default_refusal_recovery_cue_picks_soft_or_escalated_text(monkeypatch):
+    """The default cue selects between the soft and escalated lines
+    based on the escalated flag and pushes the chosen text through the
+    same TTS path used by the reconnect cue."""
+    import kids_teacher_flow as flow
+
+    fake_module = types.ModuleType("robot_teacher")
+    fetched: List[str] = []
+
+    def fake_api_get_dino_voice(text: str) -> bytes:
+        fetched.append(text)
+        return b"FAKEMP3"
+
+    def fake_play(_robot, _mp3):
+        return None
+
+    fake_module.api_get_dino_voice = fake_api_get_dino_voice  # type: ignore[attr-defined]
+    fake_module._play = fake_play  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+
+    flow._default_refusal_recovery_cue(FakeRobotController(), escalated=False)
+    flow._default_refusal_recovery_cue(FakeRobotController(), escalated=True)
+
+    assert fetched == [
+        flow._REFUSAL_RECOVERY_SOFT_TEXT,
+        flow._REFUSAL_RECOVERY_ESCALATED_TEXT,
+    ]
+
+
+def test_default_refusal_recovery_cue_swallows_tts_failure(monkeypatch):
+    """A TTS outage on the refusal cue must not raise — the recovery
+    path is best-effort, never fatal to the session."""
+    import kids_teacher_flow as flow
+
+    fake_module = types.ModuleType("robot_teacher")
+
+    def boom(_text: str) -> bytes:
+        raise ConnectionError("simulated TTS outage")
+
+    fake_module.api_get_dino_voice = boom  # type: ignore[attr-defined]
+    fake_module._play = lambda r, b: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+
+    flow._default_refusal_recovery_cue(  # must not raise
+        FakeRobotController(), escalated=True
+    )

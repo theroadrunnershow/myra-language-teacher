@@ -217,3 +217,14 @@ class KidsTeacherRuntimeHooks(Protocol):
     def on_speech_started(self) -> None: ...  # pragma: no cover - protocol-only
 
     def on_speech_stopped(self) -> None: ...  # pragma: no cover - protocol-only
+
+    # Optional: refusal-recovery cue. The realtime handler invokes this
+    # when it detects the model has fallen out of persona (canned
+    # identity refusal looped). Hooks that don't expose it (e.g. the
+    # browser SSE bridge or test fakes) are skipped via getattr probing.
+    # ``escalated`` is True when this is the second refusal within the
+    # tier-escalation window, signalling the bridge to play the
+    # "ask a grown-up" line instead of the soft bridge line.
+    def on_refusal_recovery(  # pragma: no cover - protocol-only signature
+        self, *, escalated: bool
+    ) -> None: ...

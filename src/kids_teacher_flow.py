@@ -152,6 +152,15 @@ def _resolve_playback_speed() -> float:
 
 _RECOVERY_CUE_TEXT = "One moment, let me think."
 
+# Refusal-recovery bridge lines. Two tiers per the design discussion on
+# issue #52: silent-style soft line for the first refusal in a session,
+# explicit adult redirect when a second refusal lands within the
+# realtime handler's escalation window. Both are kid-friendly and short.
+_REFUSAL_RECOVERY_SOFT_TEXT = "Hmm, let me think for a second."
+_REFUSAL_RECOVERY_ESCALATED_TEXT = (
+    "Hmm, I got a little mixed up. Can you ask a grown-up to come help?"
+)
+
 
 def _default_recovery_cue(robot_controller: object) -> None:
     """Play a short "one moment" line through the local TTS + robot speaker.
@@ -185,6 +194,46 @@ def _default_recovery_cue(robot_controller: object) -> None:
         )
 
 
+def _default_refusal_recovery_cue(
+    robot_controller: object, escalated: bool
+) -> None:
+    """Play the soft or escalated refusal-recovery line.
+
+    Picks :data:`_REFUSAL_RECOVERY_SOFT_TEXT` for the first refusal in a
+    session and :data:`_REFUSAL_RECOVERY_ESCALATED_TEXT` when the
+    realtime handler signals a repeat. Same lazy-import + swallow-error
+    pattern as :func:`_default_recovery_cue` — a stripped CI image
+    without ``robot_teacher`` must not crash the bridge thread.
+    """
+    text = (
+        _REFUSAL_RECOVERY_ESCALATED_TEXT
+        if escalated
+        else _REFUSAL_RECOVERY_SOFT_TEXT
+    )
+    try:
+        from robot_teacher import _play, api_get_dino_voice  # local import
+    except Exception as exc:
+        logger.debug(
+            "[kids_teacher_flow] refusal recovery cue unavailable "
+            "(robot_teacher import failed): %s",
+            exc,
+        )
+        return
+    try:
+        mp3 = api_get_dino_voice(text)
+    except Exception as exc:
+        logger.warning(
+            "[kids_teacher_flow] refusal recovery cue TTS fetch failed: %s", exc
+        )
+        return
+    try:
+        _play(robot_controller, mp3)
+    except Exception as exc:
+        logger.warning(
+            "[kids_teacher_flow] refusal recovery cue playback failed: %s", exc
+        )
+
+
 def build_robot_hooks(
     robot_controller: object,
     *,
@@ -213,6 +262,7 @@ def build_robot_hooks(
         robot_controller=robot_controller,
         playback_speed=_resolve_playback_speed(),
         recovery_cue=_default_recovery_cue,
+        refusal_recovery_cue=_default_refusal_recovery_cue,
         motion_stack=motion_stack,
         tool_registry=tool_registry,
     )

@@ -186,6 +186,19 @@ class RealtimeBackend(Protocol):
 
     async def cancel_response(self) -> None: ...
 
+    async def reset_session(self) -> None:
+        """Drop server-side conversation context and start fresh.
+
+        Used by the realtime handler when it detects the model has fallen
+        out of persona (e.g. a canned "I'm just a language model" refusal
+        looped into the assistant transcript history). Implementations
+        should drop any saved resumption / continuation state and force a
+        fresh connection so the next turn starts with a clean
+        model-side context. Best-effort — backends without a notion of
+        resumable context (e.g. OpenAI Realtime) may no-op.
+        """
+        ...
+
     async def send_tool_response(self, call_id: str, output: str) -> None:
         """Acknowledge a function tool call back to the model.
 
@@ -438,6 +451,11 @@ class OpenAIRealtimeBackend:
             await self._connection.response.cancel()  # type: ignore[attr-defined]
         except Exception as exc:  # pragma: no cover - integration path
             logger.warning("[kids_teacher_backend] cancel_response failed: %s", exc)
+
+    async def reset_session(self) -> None:
+        # OpenAI Realtime keeps no client-side resumption handle and the
+        # observed persona-drift failure mode is Gemini-specific. No-op.
+        return None
 
     async def send_tool_response(self, call_id: str, output: str) -> None:
         """Send a ``function_call_output`` so the model can continue.

@@ -81,6 +81,7 @@ class KidsTeacherRobotHooks:
         play_chunk: Optional[Callable[[Any, bytes, int], None]] = None,
         playback_speed: float = 1.0,
         recovery_cue: Optional[Callable[[Any], None]] = None,
+        refusal_recovery_cue: Optional[Callable[[Any, bool], None]] = None,
         motion_stack: Optional[Any] = None,
         tool_registry: Optional[ToolRegistry] = None,
     ) -> None:
@@ -113,6 +114,15 @@ class KidsTeacherRobotHooks:
                 gap instead of dead air. Called on a short-lived helper
                 thread so a slow TTS fetch can't block the realtime
                 handler. Tests leave this ``None`` (cue is skipped).
+            refusal_recovery_cue: Optional callable invoked when the
+                realtime handler intercepts a model persona-drift
+                refusal. Signature ``(robot_controller, escalated:
+                bool)``. The bridge picks the soft "let me think" line
+                (``escalated=False``) on the first refusal in a
+                session and promotes it to the explicit "ask a
+                grown-up" line (``escalated=True``) when a second
+                refusal lands within the realtime handler's escalation
+                window. Same off-thread firing pattern as ``recovery_cue``.
             motion_stack: Optional :class:`motion.stack.MotionStack`. When
                 present, the bridge routes state and audio through the
                 stack instead of the legacy ``robot.speak/listen/idle``
@@ -156,6 +166,7 @@ class KidsTeacherRobotHooks:
         self._speaking_active = False
         self._speaking_lock = threading.Lock()
         self._recovery_cue = recovery_cue
+        self._refusal_recovery_cue = refusal_recovery_cue
 
     # ------------------------------------------------------------------
     # Thread lifecycle
@@ -415,6 +426,32 @@ class KidsTeacherRobotHooks:
             return
         self._motion_stack_call("exit_child_speech")
 
+    def on_refusal_recovery(self, *, escalated: bool) -> None:
+        """Play the refusal-recovery bridge line off-thread.
+
+        Invoked by the realtime handler after it intercepts a model
+        persona-drift refusal. The realtime handler has already flushed
+        local playback and asked the backend for a fresh session; this
+        hook just plays an in-character line so the child hears
+        something during the reconnect window. ``escalated=True`` picks
+        the explicit "ask a grown-up" line; otherwise the soft
+        "let me think" bridge line plays.
+        """
+        # Drop any chunks queued against the now-cancelled assistant turn
+        # and return to the listening pose so the robot doesn't appear
+        # frozen mid-speak while the cue plays. Mirrors the RECONNECTING
+        # cleanup since the underlying mechanic is identical.
+        with self._queue_lock:
+            self._queue.clear()
+        with self._speaking_lock:
+            self._speaking_active = False
+        self._safe_call("flush_output_audio")
+        if self._motion_stack is not None:
+            self._motion_stack_call("exit_assistant_speech")
+        else:
+            self._safe_call("listen")
+        self._fire_refusal_recovery_cue(escalated=escalated)
+
     def additional_tool_specs(self) -> list:
         """Tool specs the realtime handler should add to ``session.update``.
 
@@ -525,6 +562,31 @@ class KidsTeacherRobotHooks:
         threading.Thread(
             target=_run,
             name="kids-teacher-recovery-cue",
+            daemon=True,
+        ).start()
+
+    def _fire_refusal_recovery_cue(self, *, escalated: bool) -> None:
+        """Run the refusal-recovery cue off-thread.
+
+        Same threading pattern as :meth:`_fire_recovery_cue` — a slow
+        TTS fetch must not stall the realtime event loop.
+        """
+        cue = self._refusal_recovery_cue
+        if cue is None:
+            return
+
+        def _run() -> None:
+            try:
+                cue(self._robot, escalated)
+            except Exception as exc:
+                self._log.warning(
+                    "[kids_teacher_robot_bridge] refusal_recovery_cue raised: %s",
+                    exc,
+                )
+
+        threading.Thread(
+            target=_run,
+            name="kids-teacher-refusal-recovery-cue",
             daemon=True,
         ).start()
 

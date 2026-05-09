@@ -2517,6 +2517,77 @@ async def test_reconnect_drops_saved_handle_when_disconnect_is_mid_turn() -> Non
 
 
 # ---------------------------------------------------------------------------
+# reset_session() — issue #52
+#
+# When the realtime handler intercepts a model persona-drift refusal it
+# calls backend.reset_session(). The Gemini backend must drop the saved
+# resumption handle so the reconnect path picks a fresh-handle branch
+# rather than re-resuming the contaminated server-side context.
+# ---------------------------------------------------------------------------
+
+
+async def test_reset_session_drops_handle_and_reconnects_fresh() -> None:
+    """reset_session() must clear _latest_resumption_handle and trigger
+    a reconnect that does NOT carry the saved handle — otherwise the
+    server-side session resumes the same poisoned conversation context
+    that emitted the canned refusal."""
+    first_session = _MultiTurnFakeSession(turns=[])
+    second_session = _MultiTurnFakeSession(turns=[])
+    client = _RotatingFakeClient(
+        [_FakeConnectionCM(first_session), _FakeConnectionCM(second_session)]
+    )
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+
+    # Cache a handle as if Gemini had sent a session_resumption_update
+    # before the refusal landed.
+    backend._latest_resumption_handle = "poisoned-context-handle"
+
+    try:
+        await backend.reset_session()
+        # reset_session schedules _attempt_reconnect; wait for it to land.
+        assert backend._reconnect_task is not None
+        await asyncio.wait_for(backend._reconnect_task, timeout=2.0)
+    finally:
+        await backend.close()
+
+    # Two connects total: initial + the post-reset reconnect. The
+    # reconnect MUST use a fresh handle.
+    assert len(client._live.connect_calls) == 2
+    second_config = client._live.connect_calls[1]["config"]
+    assert second_config.session_resumption.handle is None, (
+        "reset_session must reconnect with a fresh handle; "
+        f"got handle={second_config.session_resumption.handle!r}"
+    )
+    assert backend._latest_resumption_handle is None
+
+
+async def test_reset_session_no_op_when_closed() -> None:
+    """Calling reset_session() after close() must not crash and must
+    not reopen the connection."""
+    first_session = _MultiTurnFakeSession(turns=[])
+    client = _RotatingFakeClient([_FakeConnectionCM(first_session)])
+
+    backend = GeminiRealtimeBackend(
+        model=DEFAULT_GEMINI_MODEL,
+        client_factory=lambda: client,
+        types_module=_FakeTypes,
+    )
+    await backend.connect({"instructions": "hi", "voice": "alloy"})
+    await backend.close()
+
+    await backend.reset_session()  # must not raise
+
+    # Only the initial connect ever happened — no reconnect attempted.
+    assert len(client._live.connect_calls) == 1
+
+
+# ---------------------------------------------------------------------------
 # Generic ToolRegistry dispatch path
 #
 # Anything mounted via ToolRegistry should round-trip through the Gemini
