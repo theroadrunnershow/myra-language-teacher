@@ -56,6 +56,12 @@ class _FakeStartSensitivity:
     START_SENSITIVITY_LOW = "START_SENSITIVITY_LOW"
 
 
+class _FakeEndSensitivity:
+    END_SENSITIVITY_UNSPECIFIED = "END_SENSITIVITY_UNSPECIFIED"
+    END_SENSITIVITY_HIGH = "END_SENSITIVITY_HIGH"
+    END_SENSITIVITY_LOW = "END_SENSITIVITY_LOW"
+
+
 class _FakeTypes:
     Blob = _Record
     Content = _Record
@@ -72,6 +78,7 @@ class _FakeTypes:
     RealtimeInputConfig = _Record
     AutomaticActivityDetection = _Record
     StartSensitivity = _FakeStartSensitivity
+    EndSensitivity = _FakeEndSensitivity
 
 
 class _FakeSession:

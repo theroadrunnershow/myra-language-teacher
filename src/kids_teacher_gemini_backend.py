@@ -62,15 +62,20 @@ GEMINI_API_KEY_ENV_VAR = "GEMINI_API_KEY"
 GEMINI_INPUT_SAMPLE_RATE = 16000
 GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 
-# Server-side VAD tuning. Gemini's defaults
-# (start_sensitivity=HIGH, prefix_padding=20ms, silence_duration=100ms)
-# are the most aggressive setting on the dial — any 20ms blip past the
-# energy bar fires a barge-in. For a kid talking to a robot in a noisy
-# room (and with the robot's own speaker leaking back into the mic),
-# that produces constant false interrupts. These values raise the bar:
-# require ~300ms of clearer-onset audio before declaring "speech started"
-# and ~500ms of silence before ending the turn.
-_VAD_PREFIX_PADDING_MS = 300
+# Server-side VAD tuning. Per the google-genai SDK docs, both
+# start/end sensitivities default to LOW and the padding/silence
+# windows are server-picked (not documented as fixed values). We pin
+# sensitivity=LOW explicitly as deliberate false-positive defense: the
+# robot's own speaker bleeds back into the mic and the household has
+# constant ambient noise, so we want fewer barge-ins, not more.
+# ``prefix_padding_ms`` is the required duration of detected speech
+# before start-of-speech is committed — i.e. the onset gate, not a
+# pre-roll buffer. 100ms ≈ one phoneme, which lets a quiet preschool
+# leading syllable (e.g. the "pi-" in "pilli") clear the gate instead
+# of being swallowed until the louder trailing syllable arrives.
+# ``silence_duration_ms=500`` gives Myra room to think mid-utterance
+# without prematurely ending the turn.
+_VAD_PREFIX_PADDING_MS = 100
 _VAD_SILENCE_DURATION_MS = 500
 
 # OpenAI voice names → Gemini prebuilt voice names. Kept tiny and
@@ -381,12 +386,14 @@ def build_gemini_live_config(
       on child transcripts; without them topic classification regresses.
     * ``turn_detection`` with ``type == "server_vad"`` → Gemini's
       automatic activity detection, tuned via ``realtime_input_config``
-      (see :data:`_VAD_*` constants). Defaults are far too eager for the
-      kids-teacher use case — small noises (clicks, coughs, the robot's
-      own speaker bleed) trigger barge-in mid-sentence — so we override:
+      (see :data:`_VAD_*` constants). We pin both sensitivities to LOW
+      (matches the SDK default but locks the contract) as false-positive
+      defense against the robot's own speaker bleed and household noise:
 
       - ``start_of_speech_sensitivity = LOW`` (fires less often)
-      - ``prefix_padding_ms = 300`` (~300ms of clear onset required)
+      - ``end_of_speech_sensitivity = LOW`` (ends speech less often)
+      - ``prefix_padding_ms = 100`` (~one phoneme of detected speech;
+        lets a quiet preschool leading syllable clear the onset gate)
       - ``silence_duration_ms = 500`` (gives Myra room to think)
 
     ``resumption_handle`` enables Gemini Live's session-resumption protocol:
@@ -418,6 +425,9 @@ def build_gemini_live_config(
         automatic_activity_detection=types_module.AutomaticActivityDetection(
             start_of_speech_sensitivity=(
                 types_module.StartSensitivity.START_SENSITIVITY_LOW
+            ),
+            end_of_speech_sensitivity=(
+                types_module.EndSensitivity.END_SENSITIVITY_LOW
             ),
             prefix_padding_ms=_VAD_PREFIX_PADDING_MS,
             silence_duration_ms=_VAD_SILENCE_DURATION_MS,

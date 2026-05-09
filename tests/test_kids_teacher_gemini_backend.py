@@ -52,6 +52,12 @@ class _FakeStartSensitivity:
     START_SENSITIVITY_LOW = "START_SENSITIVITY_LOW"
 
 
+class _FakeEndSensitivity:
+    END_SENSITIVITY_UNSPECIFIED = "END_SENSITIVITY_UNSPECIFIED"
+    END_SENSITIVITY_HIGH = "END_SENSITIVITY_HIGH"
+    END_SENSITIVITY_LOW = "END_SENSITIVITY_LOW"
+
+
 class _FakeTypes:
     Blob = _Record
     Content = _Record
@@ -68,6 +74,7 @@ class _FakeTypes:
     RealtimeInputConfig = _Record
     AutomaticActivityDetection = _Record
     StartSensitivity = _FakeStartSensitivity
+    EndSensitivity = _FakeEndSensitivity
 
 
 # ---------------------------------------------------------------------------
@@ -218,10 +225,11 @@ def test_build_live_config_empty_instructions_still_adds_memory_tool_prompt() ->
 
 
 def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
-    # Gemini's defaults (start_sensitivity=HIGH, prefix_padding=20ms,
-    # silence_duration=100ms) are too eager — small noises trigger
-    # barge-in mid-sentence. The backend must override with LOW start
-    # sensitivity and longer prefix/silence windows.
+    # False-barge-in defense comes from LOW start/end sensitivity (pinned
+    # explicitly even though it matches the SDK default). prefix_padding
+    # is intentionally short (100ms ≈ one phoneme) so a quiet preschool
+    # leading syllable clears the onset gate; the silence window stays
+    # long so Myra can pause mid-utterance without ending the turn.
     payload = {"instructions": "hi", "voice": "alloy"}
     config = build_gemini_live_config(payload, _FakeTypes)
 
@@ -231,7 +239,11 @@ def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
         aad.start_of_speech_sensitivity
         == _FakeStartSensitivity.START_SENSITIVITY_LOW
     )
-    assert aad.prefix_padding_ms == 300
+    assert (
+        aad.end_of_speech_sensitivity
+        == _FakeEndSensitivity.END_SENSITIVITY_LOW
+    )
+    assert aad.prefix_padding_ms == 100
     assert aad.silence_duration_ms == 500
 
 
