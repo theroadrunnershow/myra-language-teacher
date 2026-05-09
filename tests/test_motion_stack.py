@@ -190,9 +190,16 @@ def test_face_tracker_target_drives_pose_sink():
     tracker = _FakeTracker()
     stack.attach_face_tracker(tracker)
 
+    # Inject a stub clock into the face mixer so the slew sees a deterministic
+    # 1s dt between the two ticks (otherwise it relies on real wall-clock and
+    # the deadband suppresses the sub-step second frame).
+    fake_now = [0.0]
+    stack._face_mixer._clock = lambda: fake_now[0]
+
     # Push a target and tick the composer manually.
     tracker.publish((0.5, 0.0))
     stack._composer.tick_at(0.0)
+    fake_now[0] = 1.0
     stack._composer.tick_at(1.0)  # let slew settle
 
     assert robot.pose_calls
@@ -211,6 +218,70 @@ def test_pose_sink_with_robot_lacking_apply_pose_is_silent():
     stack._composer.tick_at(0.0)
 
 
+def test_pose_sink_deadband_suppresses_repeat_frames():
+    """Idle composer with no inputs: only the first tick should hit apply_pose."""
+    robot = _FakeRobotController()
+    stack = MotionStack(
+        robot_controller=robot,
+        config=MotionStackConfig(layers=frozenset()),
+    )
+    for t in range(5):
+        stack._composer.tick_at(float(t) / 30.0)
+    assert len(robot.pose_calls) == 1
+
+
+def test_pose_sink_deadband_lets_real_motion_through():
+    """A meaningful change in offset (face tracker moves) clears the deadband."""
+    robot = _FakeRobotController()
+    stack = MotionStack(
+        robot_controller=robot,
+        config=MotionStackConfig(layers=frozenset({LAYER_TRACKING})),
+    )
+    tracker = _FakeTracker()
+    stack.attach_face_tracker(tracker)
+
+    # Stub the face mixer's clock so slew dt is deterministic across ticks.
+    fake_now = [0.0]
+    stack._face_mixer._clock = lambda: fake_now[0]
+
+    # Tick 1: NEUTRAL — first frame goes through.
+    stack._composer.tick_at(0.0)
+    initial_calls = len(robot.pose_calls)
+    assert initial_calls == 1
+
+    # Tracker publishes a target large enough that the slewed offset will
+    # exceed the 0.1° deadband immediately.
+    tracker.publish((0.5, 0.0))
+    fake_now[0] = 1.0
+    stack._composer.tick_at(1.0)  # large dt so slew converges
+
+    assert len(robot.pose_calls) > initial_calls
+    assert robot.pose_calls[-1]["head_yaw"] != 0.0
+
+
+def test_pose_sink_deadband_returns_false_does_not_update_last_sent():
+    """A failed apply_pose must not poison the deadband baseline."""
+
+    class _FlakyRobot:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def apply_pose(self, **kwargs) -> bool:
+            self.calls += 1
+            return False  # always claim drop
+
+    robot = _FlakyRobot()
+    stack = MotionStack(
+        robot_controller=robot,
+        config=MotionStackConfig(layers=frozenset()),
+    )
+    # Each tick should re-attempt the SDK call because the prior one
+    # didn't land — deadband is keyed off the last *successful* frame.
+    for t in range(3):
+        stack._composer.tick_at(float(t) / 30.0)
+    assert robot.calls == 3
+
+
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
@@ -226,10 +297,12 @@ def test_start_then_stop_runs_at_least_one_tick():
     )
     stack.start()
     deadline = _time.monotonic() + 1.0
-    while _time.monotonic() < deadline and len(robot.pose_calls) < 3:
+    while _time.monotonic() < deadline and len(robot.pose_calls) < 1:
         _time.sleep(0.005)
     stack.stop(timeout=1.0)
-    assert len(robot.pose_calls) >= 3
+    # Deadband suppresses repeat-frames at NEUTRAL after the first tick;
+    # the first call landing is enough to prove the loop is running.
+    assert len(robot.pose_calls) >= 1
 
 
 def test_stop_without_start_is_safe():

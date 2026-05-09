@@ -23,6 +23,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any, FrozenSet, Iterable, List, Optional
 
+import math
+
 from motion.composer import MovementComposer
 from motion.face_offset import FaceOffsetMixer
 from motion.library import ChoreographyLibrary, default_library
@@ -44,6 +46,16 @@ LAYER_WOBBLE = "wobble"
 LAYER_GESTURES = "gestures"
 LAYER_TRACKING = "tracking"
 ALL_LAYERS: FrozenSet[str] = frozenset({LAYER_WOBBLE, LAYER_GESTURES, LAYER_TRACKING})
+
+
+# apply_pose deadband. The composer ticks at ~30 Hz and the SDK launches a
+# fresh minjerk trajectory every call; re-issuing the same target every tick
+# keeps the motors in perpetual minjerk-restart and reads as visible wobble.
+# Suppress frames whose every axis sits within these thresholds of the last
+# frame we actually sent. Sub-visual at arm's length, so the held pose looks
+# identical to a constantly-re-issued one.
+_DEADBAND_RAD = 0.1 * math.pi / 180.0  # 0.1°
+_DEADBAND_M = 0.0005  # 0.5 mm
 
 
 def parse_layers(spec: Optional[str]) -> FrozenSet[str]:
@@ -125,13 +137,21 @@ class MotionStack:
 
         self._first_assistant_chunk_seen = False
 
-        # Diagnostic (temporary): apply_pose success/drop counters + last
+        # Last pose actually handed to apply_pose. ``None`` means "we have
+        # never sent anything yet" — the first frame always goes through so
+        # the motors learn the starting target. After that, _pose_sink
+        # suppresses frames that fall inside the deadband.
+        self._last_sent_offset: Optional[PoseOffset] = None
+
+        # Diagnostic (temporary): apply_pose outcome counters + last
         # observed face offset. Heartbeat-logged every ~2s from _pose_sink
         # so a single session leaves visible evidence of L3 reaching motors.
+        # ``apply_skip`` counts deadband-suppressed frames.
         import time as _time
         self._diag_clock = _time.monotonic
         self._diag_apply_ok = 0
         self._diag_apply_drop = 0
+        self._diag_apply_skip = 0
         self._diag_last_heartbeat_at = self._diag_clock()
 
     # ------------------------------------------------------------------
@@ -250,6 +270,17 @@ class MotionStack:
         apply = getattr(self._robot, "apply_pose", None)
         if apply is None:
             return
+        # Deadband: skip the SDK call when no axis has moved beyond the
+        # sub-visual threshold since the last frame we sent. Without this,
+        # the composer's 30 Hz heartbeat re-launches a fresh minjerk
+        # trajectory at the same target every tick and the motors visibly
+        # twitch trying to settle.
+        if self._last_sent_offset is not None and _within_deadband(
+            offset, self._last_sent_offset
+        ):
+            self._diag_apply_skip += 1
+            self._maybe_log_heartbeat()
+            return
         result = None
         try:
             result = apply(
@@ -265,31 +296,51 @@ class MotionStack:
             )
         except Exception as exc:
             logger.debug("[motion.stack] apply_pose raised: %s", exc)
-        # Diagnostic (temporary): count outcomes + heartbeat every 2s.
         if result:
             self._diag_apply_ok += 1
+            self._last_sent_offset = offset
         else:
             self._diag_apply_drop += 1
+        self._maybe_log_heartbeat()
+
+    def _maybe_log_heartbeat(self) -> None:
         now = self._diag_clock()
-        if now - self._diag_last_heartbeat_at >= 2.0:
-            face_yaw_deg = 0.0
-            face_pitch_deg = 0.0
-            if self._face_mixer is not None:
-                fo = self._face_mixer.current_offset()
-                face_yaw_deg = fo.head_yaw * 180.0 / 3.141592653589793
-                face_pitch_deg = fo.head_pitch * 180.0 / 3.141592653589793
-            logger.info(
-                "[motion.stack] heartbeat: apply_ok=%d apply_drop=%d "
-                "face_yaw=%.2f° face_pitch=%.2f° gain_state=%s",
-                self._diag_apply_ok,
-                self._diag_apply_drop,
-                face_yaw_deg,
-                face_pitch_deg,
-                self._face_mixer.gain_state if self._face_mixer else "n/a",
-            )
-            self._diag_apply_ok = 0
-            self._diag_apply_drop = 0
-            self._diag_last_heartbeat_at = now
+        if now - self._diag_last_heartbeat_at < 2.0:
+            return
+        face_yaw_deg = 0.0
+        face_pitch_deg = 0.0
+        if self._face_mixer is not None:
+            fo = self._face_mixer.current_offset()
+            face_yaw_deg = fo.head_yaw * 180.0 / math.pi
+            face_pitch_deg = fo.head_pitch * 180.0 / math.pi
+        logger.info(
+            "[motion.stack] heartbeat: apply_ok=%d apply_drop=%d "
+            "apply_skip=%d face_yaw=%.2f° face_pitch=%.2f° gain_state=%s",
+            self._diag_apply_ok,
+            self._diag_apply_drop,
+            self._diag_apply_skip,
+            face_yaw_deg,
+            face_pitch_deg,
+            self._face_mixer.gain_state if self._face_mixer else "n/a",
+        )
+        self._diag_apply_ok = 0
+        self._diag_apply_drop = 0
+        self._diag_apply_skip = 0
+        self._diag_last_heartbeat_at = now
+
+
+def _within_deadband(a: PoseOffset, b: PoseOffset) -> bool:
+    """True iff every channel of ``a`` is within the deadband of ``b``."""
+    return (
+        abs(a.head_pitch - b.head_pitch) < _DEADBAND_RAD
+        and abs(a.head_yaw - b.head_yaw) < _DEADBAND_RAD
+        and abs(a.head_roll - b.head_roll) < _DEADBAND_RAD
+        and abs(a.head_x - b.head_x) < _DEADBAND_M
+        and abs(a.head_y - b.head_y) < _DEADBAND_M
+        and abs(a.head_z - b.head_z) < _DEADBAND_M
+        and abs(a.antenna_left - b.antenna_left) < _DEADBAND_RAD
+        and abs(a.antenna_right - b.antenna_right) < _DEADBAND_RAD
+    )
 
 
 # Convenience used by the CLI factory; importable for tests.
