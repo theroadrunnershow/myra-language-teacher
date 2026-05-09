@@ -869,7 +869,17 @@ class RobotController:
         lifecycle via speak/listen transitions). Priming stays idempotent.
         """
         self.prime_speaker()
-        self._mini.media.push_audio_sample(samples)
+        logger.info(
+            "[diag] play_audio_streaming → push_audio_sample shape=%s dtype=%s",
+            samples.shape,
+            samples.dtype,
+        )
+        try:
+            self._mini.media.push_audio_sample(samples)
+        except Exception as exc:
+            logger.warning("[diag] push_audio_sample raised: %s", exc)
+            raise
+        logger.info("[diag] play_audio_streaming → push_audio_sample returned")
 
     def flush_output_audio(self) -> None:
         """Drop any audio already queued in the speaker pipeline.

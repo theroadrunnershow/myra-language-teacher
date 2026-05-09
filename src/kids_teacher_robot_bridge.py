@@ -599,6 +599,15 @@ def _default_play_chunk(
     if playback_speed != 1.0 and playback_speed > 0:
         output_rate = max(1, int(round(output_rate / playback_speed)))
     samples = _resample_audio(samples, sample_rate, output_rate).reshape(-1, 1)
+    rms = float(np.sqrt(np.mean(samples.astype(np.float32) ** 2))) if samples.size else 0.0
+    logger.info(
+        "[kids_teacher_robot_bridge] [diag] _default_play_chunk → play_audio_streaming "
+        "shape=%s src_rate=%d out_rate=%d rms=%.4f",
+        samples.shape,
+        sample_rate,
+        output_rate,
+        rms,
+    )
     robot_controller.play_audio_streaming(samples)
 
 

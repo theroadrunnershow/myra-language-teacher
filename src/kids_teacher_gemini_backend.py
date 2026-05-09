@@ -1287,6 +1287,10 @@ class GeminiRealtimeBackend:
                             "[kids_teacher_gemini_backend] could not decode inline audio"
                         )
                         continue
+                logger.info(
+                    "[kids_teacher_gemini_backend] [diag] audio.chunk emitted bytes=%d",
+                    len(data) if hasattr(data, "__len__") else -1,
+                )
                 events.append({"type": "audio.chunk", "audio": data})
 
         # Generation complete is a distinct signal from turn_complete:
