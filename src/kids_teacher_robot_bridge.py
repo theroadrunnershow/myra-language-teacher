@@ -288,6 +288,13 @@ class KidsTeacherRobotHooks:
         """Map session status transitions to robot animations."""
         status = event.status
         if status == SessionStatus.LISTENING:
+            # Normal turn end (no barge-in, no reconnect). Reset the
+            # speaking-active flag so the next assistant turn's first
+            # audio chunk re-arms enter_assistant_speech — otherwise the
+            # composer stays pinned in "listen" and the face mixer never
+            # transitions to "robot_speaking" on subsequent turns.
+            with self._speaking_lock:
+                self._speaking_active = False
             if self._motion_stack is not None:
                 self._motion_stack_call("exit_assistant_speech")
             else:

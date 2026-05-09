@@ -992,6 +992,29 @@ def test_motion_stack_reconnecting_clears_speaking_and_exits_assistant():
     assert "exit_assistant_speech" in stack.calls
 
 
+def test_motion_stack_listening_resets_speaking_flag_for_next_turn():
+    """Normal turn end (LISTENING transition, no barge-in / reconnect) must
+    reset the speaking-active flag so the NEXT turn's first audio chunk
+    re-fires enter_assistant_speech. Without the reset the composer stays
+    pinned in "listen" and the face mixer never enters "robot_speaking" on
+    subsequent turns — see kids_teacher_robot_bridge.publish_status."""
+    stack = _RecordingMotionStack()
+    hooks, _, _ = _make_hooks_with_stack(stack)
+
+    # Turn 1: first chunk fires enter_assistant_speech once.
+    hooks.start_assistant_playback(b"\x00\x01")
+    assert stack.calls.count("enter_assistant_speech") == 1
+
+    # Normal turn completion — no barge-in (stop_assistant_playback) and no
+    # reconnect, just the realtime handler reporting LISTENING after
+    # response.done.
+    hooks.publish_status(_status(SessionStatus.LISTENING))
+
+    # Turn 2: a brand-new assistant chunk must re-arm the speak state.
+    hooks.start_assistant_playback(b"\x02\x03")
+    assert stack.calls.count("enter_assistant_speech") == 2
+
+
 def test_on_speech_started_routes_to_enter_child_speech():
     stack = _RecordingMotionStack()
     hooks, _, _ = _make_hooks_with_stack(stack)
