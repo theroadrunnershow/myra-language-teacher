@@ -116,7 +116,10 @@ class GetCurrentLocationTool:
             f"The child currently lives in: {self._store.get()}.\n"
             "Use this for weather and local-events questions without asking "
             "again. If they tell you they moved, call "
-            "`register_current_location` with the new city."
+            "`register_current_location` with the new city. "
+            "For time-of-day questions ('what time is it?', 'what day is it?'), "
+            "call `get_current_time` — it returns the current local time at "
+            "their location."
         )
 
     async def call(self, arguments: Mapping[str, Any]) -> ToolResult:

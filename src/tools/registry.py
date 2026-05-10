@@ -15,6 +15,7 @@ from typing import Optional
 from tools.base import ToolRegistry
 from tools.location import GetCurrentLocationTool, RegisterCurrentLocationTool
 from tools.location_store import LocationStore, location_store_from_env
+from tools.time import GetCurrentTimeTool
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,7 @@ async def build_default_registry(
         [
             RegisterCurrentLocationTool(store),
             GetCurrentLocationTool(store),
+            GetCurrentTimeTool(store),
         ]
     )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from tools.location import GET_TOOL_NAME, REGISTER_TOOL_NAME
 from tools.location_store import LocationStore
 from tools.registry import build_default_registry
+from tools.time import GET_CURRENT_TIME_TOOL_NAME
 
 
 class _RecordingStore(LocationStore):
@@ -24,17 +25,29 @@ async def test_build_default_registry_loads_store_then_returns_registry():
     registry = await build_default_registry(location_store=store)
 
     assert store.load_calls == 1
-    assert set(registry.tool_names) == {REGISTER_TOOL_NAME, GET_TOOL_NAME}
+    assert set(registry.tool_names) == {
+        REGISTER_TOOL_NAME,
+        GET_TOOL_NAME,
+        GET_CURRENT_TIME_TOOL_NAME,
+    }
 
 
 async def test_build_default_registry_falls_back_to_env_store(monkeypatch):
     """When no store is passed, the factory builds one from the env var."""
     monkeypatch.delenv("KIDS_TEACHER_LOCATION_BUCKET", raising=False)
     registry = await build_default_registry()
-    assert set(registry.tool_names) == {REGISTER_TOOL_NAME, GET_TOOL_NAME}
+    assert set(registry.tool_names) == {
+        REGISTER_TOOL_NAME,
+        GET_TOOL_NAME,
+        GET_CURRENT_TIME_TOOL_NAME,
+    }
 
 
 async def test_build_default_registry_specs_contain_both_function_tools():
     registry = await build_default_registry(location_store=_RecordingStore())
     spec_names = {s["name"] for s in registry.specs()}
-    assert spec_names == {REGISTER_TOOL_NAME, GET_TOOL_NAME}
+    assert spec_names == {
+        REGISTER_TOOL_NAME,
+        GET_TOOL_NAME,
+        GET_CURRENT_TIME_TOOL_NAME,
+    }

@@ -70,6 +70,13 @@ def test_get_tool_prompt_block_includes_current_location():
     assert "Current location" in block
 
 
+def test_get_tool_prompt_block_advertises_get_current_time_tool():
+    """Time questions need to call ``get_current_time``; the location
+    tool's prompt block is the one place we tell the model so."""
+    block = GetCurrentLocationTool(_FakeStore()).prompt_block()
+    assert "get_current_time" in block
+
+
 def test_get_tool_prompt_block_reflects_registered_value():
     """After register, prompt_block reads the new location.
 
