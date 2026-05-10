@@ -681,6 +681,12 @@ def _build_backend_factory(
 
 def main(argv: Optional[list[str]] = None) -> int:
     """Entry point. Returns a unix-style exit code."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-7s  %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
     parser = _build_parser()
     args = parser.parse_args(argv)
 
