@@ -38,44 +38,15 @@ resource "google_cloud_run_v2_service" "app" {
         name  = "GCP_PROJECT"
         value = var.project_id
       }
-      env {
-        name  = "DISABLE_PASS1"
-        value = "true"
-      }
-      env {
-        name  = "WORDS_STORE_ENABLED"
-        value = "true"
-      }
-      env {
-        name  = "WORDS_OBJECT_BUCKET"
-        value = google_storage_bucket.words.name
-      }
-      env {
-        name  = "WORDS_OBJECT_KEY"
-        value = var.words_object_key
-      }
-      env {
-        name  = "WORDS_FLUSH_INTERVAL_SEC"
-        value = tostring(var.words_flush_interval_sec)
-      }
-      env {
-        name  = "WORDS_FLUSH_MAX_NEW_WORDS"
-        value = tostring(var.words_flush_max_new_words)
-      }
-      env {
-        name  = "WORDS_REFRESH_INTERVAL_SEC"
-        value = tostring(var.words_refresh_interval_sec)
-      }
 
-      # Startup probe — Whisper model load takes ~30s
       startup_probe {
         http_get {
           path = "/health"
           port = 8000
         }
-        initial_delay_seconds = 10
-        period_seconds        = 10
-        failure_threshold     = 12 # 120s total startup window
+        initial_delay_seconds = 5
+        period_seconds        = 5
+        failure_threshold     = 6 # 30s total startup window
       }
 
       liveness_probe {
@@ -88,7 +59,6 @@ resource "google_cloud_run_v2_service" "app" {
       }
     }
 
-    # 5-minute request timeout (generous for Whisper STT on cold start)
     timeout = "300s"
   }
 

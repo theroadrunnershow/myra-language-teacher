@@ -173,7 +173,7 @@ def _build_mic_reader(
     """
     # Lazy — numpy + scipy live in the robot requirement set only.
     import numpy as np
-    from robot_teacher import (
+    from robot_audio import (
         _extract_first_channel,
         _resample_audio,
         _to_float32_audio,
@@ -730,7 +730,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # Import the local robot helpers only after SDK checks pass so the
     # module-level import graph stays light.
-    from robot_teacher import RobotController, SAMPLE_RATE
+    from robot_audio import RobotController, SAMPLE_RATE
 
     target_rate = _target_mic_sample_rate_for(provider)
 

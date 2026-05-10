@@ -167,23 +167,25 @@ def _default_recovery_cue(robot_controller: object) -> None:
 
     Used as the default reconnect cue so the child hears something during
     the 1–2s gap when Gemini Live drops the session at the 10-min ceiling.
-    Lazily imports :mod:`robot_teacher` so the flow module stays importable
-    on hosts without the robot SDK / audio deps; if the import or the HTTP
-    fetch fails we log and swallow — the cue is best-effort, never fatal.
+    Lazily imports :mod:`robot_audio` and :mod:`tts_service` so the flow
+    module stays importable on hosts without the robot SDK / audio deps;
+    if the import or TTS call fails we log and swallow — the cue is
+    best-effort, never fatal.
     """
     try:
-        from robot_teacher import _play, api_get_dino_voice  # local import
+        from robot_audio import _play  # local import
+        from tts_service import _generate_tts_sync  # local import
     except Exception as exc:
         logger.debug(
-            "[kids_teacher_flow] recovery cue unavailable (robot_teacher import failed): %s",
+            "[kids_teacher_flow] recovery cue unavailable (import failed): %s",
             exc,
         )
         return
     try:
-        mp3 = api_get_dino_voice(_RECOVERY_CUE_TEXT)
+        mp3 = _generate_tts_sync(_RECOVERY_CUE_TEXT, "en", slow=False)
     except Exception as exc:
         logger.warning(
-            "[kids_teacher_flow] recovery cue TTS fetch failed: %s", exc
+            "[kids_teacher_flow] recovery cue TTS generation failed: %s", exc
         )
         return
     try:
@@ -202,8 +204,7 @@ def _default_refusal_recovery_cue(
     Picks :data:`_REFUSAL_RECOVERY_SOFT_TEXT` for the first refusal in a
     session and :data:`_REFUSAL_RECOVERY_ESCALATED_TEXT` when the
     realtime handler signals a repeat. Same lazy-import + swallow-error
-    pattern as :func:`_default_recovery_cue` — a stripped CI image
-    without ``robot_teacher`` must not crash the bridge thread.
+    pattern as :func:`_default_recovery_cue`.
     """
     text = (
         _REFUSAL_RECOVERY_ESCALATED_TEXT
@@ -211,19 +212,20 @@ def _default_refusal_recovery_cue(
         else _REFUSAL_RECOVERY_SOFT_TEXT
     )
     try:
-        from robot_teacher import _play, api_get_dino_voice  # local import
+        from robot_audio import _play  # local import
+        from tts_service import _generate_tts_sync  # local import
     except Exception as exc:
         logger.debug(
             "[kids_teacher_flow] refusal recovery cue unavailable "
-            "(robot_teacher import failed): %s",
+            "(import failed): %s",
             exc,
         )
         return
     try:
-        mp3 = api_get_dino_voice(text)
+        mp3 = _generate_tts_sync(text, "en", slow=False)
     except Exception as exc:
         logger.warning(
-            "[kids_teacher_flow] refusal recovery cue TTS fetch failed: %s", exc
+            "[kids_teacher_flow] refusal recovery cue TTS generation failed: %s", exc
         )
         return
     try:

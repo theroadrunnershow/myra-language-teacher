@@ -37,7 +37,3 @@ output "docker_push_command" {
   EOT
 }
 
-output "dynamic_words_bucket" {
-  description = "GCS bucket storing dynamic translated words with object versioning"
-  value       = google_storage_bucket.words.name
-}

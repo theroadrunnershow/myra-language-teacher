@@ -19,11 +19,7 @@ COPY src/ src/
 COPY templates/ templates/
 COPY static/ static/
 
-# Pre-download faster-whisper tiny model (~39 MB CTranslate2 format) so first request isn't slow
-# Model saved to /root/.cache/huggingface/hub/ inside the image
-RUN python -c "from faster_whisper import WhisperModel; WhisperModel('tiny', device='cpu', compute_type='int8'); print('faster-whisper tiny model cached.')"
-
 EXPOSE 8000
 
-# Production: single worker (Whisper model stays in memory, no reload)
+# Production: single worker
 CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

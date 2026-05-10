@@ -1,26 +1,26 @@
 # Myra Language Teacher
 
-A toddler-friendly web app (FastAPI + vanilla JS) that teaches Telugu and Assamese
-to Myra (age 4) through an animated mascot. Kids hear a word, attempt to say it, and
-get scored via on-device speech recognition with fuzzy matching.
+A FastAPI app that drives the kids-teacher experience for Myra (age 4): a real-time,
+voice-first session backed by Gemini Live, running on a Reachy Mini robot with motion
+and face-tracking integrations. The legacy browser-based "say the word, get scored"
+flow has been removed; the entry path is now `/kids-teacher`.
 
 ## Stack at a glance
 - **Backend**: Python / FastAPI, single `uvicorn` worker
-- **STT**: `faster-whisper` (tiny, int8 CPU) — dual-pass for native + romanized scoring
-- **TTS**: gTTS (Google) for Telugu, Assamese, and English voice lines
-- **Translation**: cache → in-memory `words_db` → Google Cloud Translate fallback
-- **Audio**: pydub + ffmpeg (browser WebM/OGG/MP4 → 16kHz mono WAV)
-- **Matching**: rapidfuzz `token_sort_ratio` against native script + romanized targets
-- **Frontend**: Jinja2 templates + vanilla JS state machine; config in sessionStorage
+- **Realtime LLM**: Gemini Live (audio in / audio out) via the kids-teacher backend
+- **TTS** (recovery cues only): gTTS for short English bridge lines
+- **Audio**: pydub + ffmpeg + scipy for sample-rate conversion / MP3 decode
+- **Robot**: Reachy Mini SDK; `RobotController` in `src/robot_audio.py` owns motion + playback
+- **Frontend**: Jinja2 templates + vanilla JS for `/kids-teacher` and the faces admin page
 - **Deploy**: Dockerized, GCP Cloud Run (scale-to-zero) via Terraform in `infra/`
 
 ## Layout
 ```
-src/            # FastAPI app + STT/TTS/translate services, words DB, robot controller
+src/            # FastAPI app, kids-teacher flow, robot audio + motion controller
 src/motion/     # motion-director (composer + scheduler + L2 gesture tools)
 src/tools/      # kids-teacher tools framework (registry + location tools + Gemini adapter)
-templates/      # index (learning page) + config (settings)
-static/         # CSS/JS, mascot SVGs
+templates/      # kids_teacher + faces admin pages
+static/         # CSS/JS for the kids-teacher UI
 tests/          # pytest suite — see pytest.ini (pythonpath=src, asyncio_mode=auto)
 infra/          # Terraform for Cloud Run, Artifact Registry, budget kill-switch
 deploy/         # bootstrap + build-push scripts
@@ -32,20 +32,15 @@ profiles/       # locked kids-teacher profile (instructions.txt, voice, tools al
 ```bash
 source venv/bin/activate
 pip install -r requirements.txt -r requirements-dev.txt
-PYTHONPATH=src python src/main.py     # http://localhost:8000
+PYTHONPATH=src python src/main.py     # http://localhost:8000 → redirects to /kids-teacher
 pytest                                 # full test suite
 ```
 
-ffmpeg is required on the host. First STT call loads Whisper (~30s); subsequent calls are fast.
+ffmpeg is required on the host (used by pydub for MP3 decode of recovery-cue TTS).
 
 ## Key architectural notes
-- **Config is client-side.** `GET /api/config` returns `DEFAULT_CONFIG` from `main.py`;
-  the browser merges it with `sessionStorage`. Nothing is persisted server-side.
-- **Word DB is in-memory and immutable** (`words_db.py`, ~600 words / 8 categories /
-  2 languages). Tests use it directly — do not mock it.
-- **Dual-pass Whisper**: one pass in the target language (native script), one in
-  English (romanization). The higher similarity score wins.
-- **Dynamic words** (outside the static DB) are cached in GCS via `dynamic_words_store.py`.
+- **`/` redirects to `/kids-teacher`.** The only top-level routes mounted on the
+  app are `/health`, `/`, the kids-teacher router, and `/static/*`.
 - **Tools framework** (`src/tools/`): a `ToolRegistry` mounted on the robot bridge
   alongside the motion stack — exposes `register_current_location` /
   `get_current_location` plus Gemini Live's built-in `google_search` grounding
@@ -54,15 +49,24 @@ ffmpeg is required on the host. First STT call loads Whisper (~30s); subsequent 
   Specs are kept in OpenAI-Realtime shape internally; the Gemini adapter
   (`tools/gemini_adapter.py`) is the only place that boundary lives. Plan:
   `tasks/plan-tools-framework.md`.
-- **Cloud Run** runs min=0 / max=2; startup probe allows 120s for Whisper to warm.
-- For deeper details, read the source — this file is intentionally a map, not a mirror.
+- **Recovery cues**: when Gemini drops the session at the 10-min ceiling or the
+  safety layer intercepts a refusal, the bridge plays a short English bridge
+  line via `tts_service._generate_tts_sync` → `robot_audio._play` (in-process,
+  no HTTP).
+- **Robot audio**: `src/robot_audio.py` owns `RobotController`, sample-rate
+  conversion helpers (`_resample_audio`, `_to_float32_audio`,
+  `_extract_first_channel`), and `mp3_bytes_to_robot_samples` /  `_play`.
+  Imported lazily by the kids-teacher bridge so the module stays importable on
+  hosts without the robot SDK.
+- **Cloud Run** runs min=0 / max=2; startup probe budget is short (~30s) since
+  there's no model warm-up.
 
 ## Testing rules
 - Every change ships with tests covering the new behavior.
 - **Never modify existing tests without asking first.**
 - Run the full suite before declaring work done.
-- `main.generate_tts` and `main.recognize_speech` are `AsyncMock`ed in API tests;
-  `conftest.py` stubs `faster_whisper` / `noisereduce` at import time.
+- `conftest.py` stubs `face_recognition` (dlib) at import time so face_service
+  imports cleanly on a dev laptop without the robot dep installed.
 
 ---
 

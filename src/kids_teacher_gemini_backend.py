@@ -41,7 +41,7 @@ from memory_file import remove_notes_starting_with as memory_remove_notes_starti
 from memory_file import set_key as set_memory_key
 from memory_reconciler import add_note as reconcile_add_note
 from tools.base import ToolRegistry
-from tools.gemini_adapter import GOOGLE_SEARCH_TOOL, build_gemini_tools
+from tools.gemini_adapter import build_gemini_tools
 
 load_project_dotenv()
 
@@ -73,10 +73,14 @@ GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 # pre-roll buffer. 100ms ≈ one phoneme, which lets a quiet preschool
 # leading syllable (e.g. the "pi-" in "pilli") clear the gate instead
 # of being swallowed until the louder trailing syllable arrives.
-# ``silence_duration_ms=500`` gives Myra room to think mid-utterance
-# without prematurely ending the turn.
+# ``silence_duration_ms=1000`` gives Myra room to think mid-utterance
+# without prematurely ending the turn. Bumped from 500ms after live
+# sessions showed natural mid-thought pauses (~0.5–1s) ending the
+# user turn early — the robot would start replying to the truncated
+# input, then the kid's continuation tripped the barge gate, cancelling
+# the (premature) reply and fragmenting both sides of the exchange.
 _VAD_PREFIX_PADDING_MS = 100
-_VAD_SILENCE_DURATION_MS = 500
+_VAD_SILENCE_DURATION_MS = 1000
 
 # OpenAI voice names → Gemini prebuilt voice names. Kept tiny and
 # explicit; unknown voices fall back to ``_DEFAULT_GEMINI_VOICE``.
@@ -394,7 +398,8 @@ def build_gemini_live_config(
       - ``end_of_speech_sensitivity = LOW`` (ends speech less often)
       - ``prefix_padding_ms = 100`` (~one phoneme of detected speech;
         lets a quiet preschool leading syllable clear the onset gate)
-      - ``silence_duration_ms = 500`` (gives Myra room to think)
+      - ``silence_duration_ms = 1000`` (gives Myra room to think
+        through natural mid-thought pauses without ending the turn)
 
     ``resumption_handle`` enables Gemini Live's session-resumption protocol:
     pass ``None`` on the first connect (server starts emitting
@@ -450,17 +455,6 @@ def build_gemini_live_config(
             _build_memory_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_remember_face_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_forget_face_tool(types_module, non_blocking=tool_supports_non_blocking),
-            # Built-in grounding tool — lets the model search the web
-            # mid-turn for weather / current events. See
-            # tasks/plan-tools-framework.md §3.5.
-            # Disabled: google_search grounding is a paid-tier feature
-            # on the Gemini API. Including it in the tools array of a
-            # free-tier project causes session.setup to be rejected
-            # with a misleading 1011 "exceeded your current quota"
-            # error — same code path as actual rate-limit exhaustion.
-            # Re-enable once the project is on a billed tier (or gate
-            # behind an env var if mixed-tier support is needed).
-            # GOOGLE_SEARCH_TOOL,
             # Anything mounted via the tools-framework registry (e.g.
             # the location tools) flows through session_payload["tools"]
             # and is translated by the adapter.

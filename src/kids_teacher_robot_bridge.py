@@ -3,7 +3,7 @@
 Wires the realtime handler's runtime hooks to a physical Reachy Mini robot:
 assistant audio chunks stream through a background playback thread, and
 session status events map to the robot's animation methods in
-``robot_teacher.RobotController``.
+``robot_audio.RobotController``.
 
 The Reachy SDK is NOT imported at module load time — this module must import
 cleanly in environments where the robot SDK is missing (test environment,
@@ -651,9 +651,9 @@ def _default_play_chunk(
     """
     import numpy as np
 
-    # Imported lazily: robot_teacher pulls numpy + scipy + pydub; tests that
+    # Imported lazily: robot_audio pulls numpy + scipy + pydub; tests that
     # don't touch playback should not pay that cost.
-    from robot_teacher import _resample_audio, _to_float32_audio  # local import
+    from robot_audio import _resample_audio, _to_float32_audio  # local import
 
     pcm16 = np.frombuffer(audio_bytes, dtype="<i2")
     samples = _to_float32_audio(pcm16)
@@ -691,7 +691,7 @@ async def pump_microphone_to_backend(
     each ``mic_source()`` call (for callables) must return **PCM16 mono
     bytes at the rate expected by the OpenAI Realtime API**. This function
     does NOT resample or re-encode; producing the right format is the
-    caller's job (see ``robot_teacher.mic_samples_to_wav_bytes`` et al.
+    caller's job (see the realtime mic pump in ``robot_kids_teacher``)
     for utilities).
 
     Return-value semantics:

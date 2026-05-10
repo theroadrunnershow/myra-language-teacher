@@ -24,14 +24,6 @@ from typing import Any, Mapping, Optional
 logger = logging.getLogger(__name__)
 
 
-# Built-in google_search grounding tool — declared inline as a
-# single-key dict per the Gemini Live docs. Bypasses the adapter
-# entirely (no FunctionDeclaration, no schema). The realtime handler's
-# 3 s registry timeout doesn't apply because the search runs inside
-# the model's turn.
-GOOGLE_SEARCH_TOOL: dict = {"google_search": {}}
-
-
 def build_gemini_tools(types_module: Any, specs: Any) -> list:
     """Translate a list of OpenAI-shaped specs to ``types.Tool`` objects.
 
@@ -88,4 +80,4 @@ def _spec_to_function_declaration(
     return types_module.FunctionDeclaration(**kwargs)
 
 
-__all__ = ["GOOGLE_SEARCH_TOOL", "build_gemini_tools"]
+__all__ = ["build_gemini_tools"]
