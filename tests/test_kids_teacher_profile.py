@@ -286,3 +286,97 @@ def test_load_profile_reads_language_code_first_non_empty_line(tmp_path) -> None
     _write(tmp_path / "language_code.txt", "te-IN\n# fallback\n")
     profile = load_profile(str(tmp_path))
     assert profile.language_code == "te-IN"
+
+
+# ---------------------------------------------------------------------------
+# Math lesson loader plumbing — parallel to language lesson, no vocab block
+# ---------------------------------------------------------------------------
+
+
+def test_load_profile_appends_math_lesson_to_instructions(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "math_lesson.txt",
+        "# Math lesson mode\nTeach numbers gently.",
+    )
+
+    profile = load_profile(str(tmp_path))
+
+    assert "Be kind." in profile.instructions
+    assert "# Math lesson mode" in profile.instructions
+    assert "Teach numbers gently." in profile.instructions
+    # Base persona appears before the math-lesson section.
+    assert profile.instructions.index("Be kind.") < profile.instructions.index(
+        "# Math lesson mode"
+    )
+
+
+def test_load_profile_skips_missing_math_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    # No math_lesson.txt on disk — loader must not raise or warn,
+    # and must not glue extra blank lines onto instructions.
+    profile = load_profile(str(tmp_path))
+    assert profile.instructions.strip() == "Be kind."
+
+
+def test_load_profile_skips_empty_math_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(tmp_path / "math_lesson.txt", "   \n\n   \n")
+    profile = load_profile(str(tmp_path))
+    # Empty/whitespace-only file must not glue extra blank lines onto
+    # instructions.
+    assert profile.instructions.strip() == "Be kind."
+
+
+def test_load_profile_orders_math_lesson_after_language_lesson(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "language_lesson.txt",
+        "# Language lesson mode\nTeach Telugu words.",
+    )
+    _write(
+        tmp_path / "math_lesson.txt",
+        "# Math lesson mode\nTeach numbers gently.",
+    )
+
+    profile = load_profile(str(tmp_path))
+
+    text = profile.instructions
+    # Order: persona → language lesson → Telugu vocab → math lesson.
+    # The Telugu vocab block sits between the two skill blocks because
+    # it belongs to the language lesson it follows.
+    assert text.index("Be kind.") < text.index("# Language lesson mode")
+    assert text.index("# Language lesson mode") < text.index(
+        "# Telugu starter vocabulary"
+    )
+    assert text.index("# Telugu starter vocabulary") < text.index(
+        "# Math lesson mode"
+    )
+
+
+def test_load_profile_orders_math_lesson_before_memory(tmp_path) -> None:
+    _write(tmp_path / "instructions.txt", "Be kind.")
+    _write(
+        tmp_path / "math_lesson.txt",
+        "# Math lesson mode\nTeach numbers gently.",
+    )
+    memory_path = tmp_path / "memory.md"
+    _write(
+        memory_path,
+        "# Things to remember about the child\n\n## Current\n- name: Aanya _(2026-04-25)_\n",
+    )
+
+    profile = load_profile(str(tmp_path), memory_file_path=str(memory_path))
+
+    text = profile.instructions
+    # Math lesson sits before memory so the model reads the curriculum
+    # before the per-child notes that personalize it.
+    assert "# Math lesson mode" in text
+    assert "## Current" in text
+    assert text.index("# Math lesson mode") < text.index("## Current")
+
+
+def test_math_lesson_file_exists_on_disk() -> None:
+    # Guardrail: the v1 deliverable is that this file exists in the
+    # locked profile dir.
+    assert os.path.exists(os.path.join(DEFAULT_PROFILE_DIR, "math_lesson.txt"))

@@ -31,6 +31,7 @@ _INSTRUCTIONS_FILENAME = "instructions.txt"
 _VOICE_FILENAME = "voice.txt"
 _TOOLS_FILENAME = "tools.txt"
 _LANGUAGE_LESSON_FILENAME = "language_lesson.txt"
+_MATH_LESSON_FILENAME = "math_lesson.txt"
 _LANGUAGE_CODE_FILENAME = "language_code.txt"
 
 _VOCAB_HEADING = "# Telugu starter vocabulary (seed pool for lesson stories)"
@@ -158,6 +159,13 @@ def load_profile(
             instructions = (
                 f"{instructions}\n\n{format_telugu_lesson_vocabulary()}"
             )
+
+    math_lesson_path = os.path.join(base_dir, _MATH_LESSON_FILENAME)
+    math_lesson_raw = _read_text_file(math_lesson_path)
+    if math_lesson_raw is not None:
+        math_lesson_text = math_lesson_raw.strip()
+        if math_lesson_text:
+            instructions = f"{instructions}\n\n{math_lesson_text}"
 
     try:
         memory_text = read_memory_for_prompt(memory_file_path)
