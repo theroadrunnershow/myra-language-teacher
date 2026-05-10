@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from tools.gemini_adapter import GOOGLE_SEARCH_TOOL, build_gemini_tools
+from tools.gemini_adapter import build_gemini_tools
 
 
 # ---------------------------------------------------------------------------
@@ -206,13 +206,3 @@ def test_build_gemini_tools_does_not_crash_on_iterable_other_than_list():
     assert len(tools) == 1
 
 
-# ---------------------------------------------------------------------------
-# GOOGLE_SEARCH_TOOL constant
-# ---------------------------------------------------------------------------
-
-
-def test_google_search_tool_is_inline_dict():
-    """The built-in grounding tool ships as a single-key dict per the
-    Gemini Live docs — no ``FunctionDeclaration``, no ``types.Tool``
-    wrapper. The realtime handler's 3 s registry timeout doesn't apply."""
-    assert GOOGLE_SEARCH_TOOL == {"google_search": {}}

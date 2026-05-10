@@ -180,11 +180,8 @@ def test_build_live_config_maps_instructions_voice_and_transcription() -> None:
     assert config.output_audio_transcription is not None
     # Memory tool exposes two FunctionDeclarations (set_about + add_note);
     # face tools (remember_face, forget_face) are separate Tool entries
-    # asserted in their own test below. The built-in google_search tool
-    # rides as a single-key dict per the Gemini Live docs (added by the
-    # tools-framework wiring; see tasks/plan-tools-framework.md §3.5).
-    assert len(config.tools) == 4
-    assert {"google_search": {}} in config.tools
+    # asserted in their own test below.
+    assert len(config.tools) == 3
     function_tools = [t for t in config.tools if hasattr(t, "function_declarations")]
     memory_decls = function_tools[0].function_declarations
     memory_names = [d.name for d in memory_decls]
@@ -244,7 +241,7 @@ def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
         == _FakeEndSensitivity.END_SENSITIVITY_LOW
     )
     assert aad.prefix_padding_ms == 100
-    assert aad.silence_duration_ms == 500
+    assert aad.silence_duration_ms == 1000
 
 
 def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
@@ -1946,42 +1943,6 @@ def test_face_tools_not_registered_on_openai_backend() -> None:
     profile = load_profile(present_names=[])
     assert "remember_face" not in profile.allowed_tools
     assert "forget_face" not in profile.allowed_tools
-
-
-def test_build_live_config_always_includes_google_search() -> None:
-    """The built-in ``google_search`` grounding tool must be wired into
-    every Gemini Live session, regardless of what (if anything) the
-    session payload provides via ``additional_tools``. See plan §3.5.
-    """
-    # Empty session payload → google_search still present.
-    config = build_gemini_live_config(
-        {"instructions": "hi", "voice": "alloy"}, _FakeTypes
-    )
-    assert {"google_search": {}} in config.tools
-
-    # With session_payload["tools"] populated → still exactly one
-    # google_search entry (no duplication).
-    payload_with_tools = {
-        "instructions": "hi",
-        "voice": "alloy",
-        "tools": [
-            {
-                "type": "function",
-                "name": "register_current_location",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"location": {"type": "string"}},
-                    "required": ["location"],
-                    "additionalProperties": False,
-                },
-            }
-        ],
-    }
-    config = build_gemini_live_config(payload_with_tools, _FakeTypes)
-    google_search_entries = [
-        t for t in config.tools if isinstance(t, dict) and "google_search" in t
-    ]
-    assert google_search_entries == [{"google_search": {}}]
 
 
 def test_build_live_config_translates_session_payload_tools_via_adapter() -> None:

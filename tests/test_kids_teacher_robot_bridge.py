@@ -305,11 +305,11 @@ def test_default_play_chunk_decodes_pcm16_and_resamples(monkeypatch):
         calls["resample"] = (np.array(samples, copy=True), src_rate, dst_rate)
         return np.array([0.25, -0.25], dtype=np.float32)
 
-    fake_robot_teacher = types.SimpleNamespace(
+    fake_robot_audio = types.SimpleNamespace(
         _to_float32_audio=fake_to_float32_audio,
         _resample_audio=fake_resample_audio,
     )
-    monkeypatch.setitem(sys.modules, "robot_teacher", fake_robot_teacher)
+    monkeypatch.setitem(sys.modules, "robot_audio", fake_robot_audio)
 
     audio_bytes = np.array([1000, -1000, 2000], dtype="<i2").tobytes()
     _default_play_chunk(robot, audio_bytes, 24000)
@@ -347,7 +347,7 @@ def test_default_play_chunk_stretches_output_rate_when_speed_below_one(monkeypat
 
     monkeypatch.setitem(
         sys.modules,
-        "robot_teacher",
+        "robot_audio",
         types.SimpleNamespace(
             _to_float32_audio=fake_to_float32_audio,
             _resample_audio=fake_resample_audio,
@@ -375,7 +375,7 @@ def test_default_play_chunk_ignores_invalid_speed(monkeypatch):
 
     monkeypatch.setitem(
         sys.modules,
-        "robot_teacher",
+        "robot_audio",
         types.SimpleNamespace(
             _to_float32_audio=lambda s: s.astype(np.float32),
             _resample_audio=fake_resample_audio,
@@ -774,67 +774,69 @@ def test_build_robot_hooks_wires_default_recovery_cue():
 
 
 def test_default_recovery_cue_calls_dino_voice_and_plays(monkeypatch):
-    """The default cue should fetch a short 'one moment' line via the
-    local TTS (api_get_dino_voice) and play it through the robot speaker.
-    Mocks: monkeypatch the robot_teacher import so no HTTP / SDK is hit.
+    """The default cue should synthesize a short 'one moment' line via the
+    in-process TTS (tts_service._generate_tts_sync) and play it through the
+    robot speaker. Mocks: monkeypatch tts_service + robot_audio so no
+    network / SDK is hit.
     """
     import kids_teacher_flow as flow
 
-    fake_module = types.ModuleType("robot_teacher")
-    fetched_text: List[str] = []
+    fake_tts_module = types.ModuleType("tts_service")
+    fake_audio_module = types.ModuleType("robot_audio")
+    fetched: List[Tuple[str, str]] = []
     played: List[Tuple[object, bytes]] = []
 
-    def fake_api_get_dino_voice(text: str) -> bytes:
-        fetched_text.append(text)
+    def fake_generate_tts_sync(text: str, lang_code: str, slow: bool = True) -> bytes:
+        fetched.append((text, lang_code))
         return b"FAKEMP3"
 
     def fake_play(robot, mp3_bytes):
         played.append((robot, mp3_bytes))
 
-    fake_module.api_get_dino_voice = fake_api_get_dino_voice  # type: ignore[attr-defined]
-    fake_module._play = fake_play  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+    fake_tts_module._generate_tts_sync = fake_generate_tts_sync  # type: ignore[attr-defined]
+    fake_audio_module._play = fake_play  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tts_service", fake_tts_module)
+    monkeypatch.setitem(sys.modules, "robot_audio", fake_audio_module)
 
     robot = FakeRobotController()
     flow._default_recovery_cue(robot)
 
-    assert fetched_text == [flow._RECOVERY_CUE_TEXT]
+    assert fetched == [(flow._RECOVERY_CUE_TEXT, "en")]
     assert played == [(robot, b"FAKEMP3")]
 
 
 def test_default_recovery_cue_swallows_tts_failure(monkeypatch):
-    """A network outage on the TTS fetch must not raise out of the cue —
+    """A failure inside the TTS call must not raise out of the cue —
     the recovery path is best-effort, never fatal to the session."""
     import kids_teacher_flow as flow
 
-    fake_module = types.ModuleType("robot_teacher")
+    fake_tts_module = types.ModuleType("tts_service")
+    fake_audio_module = types.ModuleType("robot_audio")
 
-    def boom(_text: str) -> bytes:
+    def boom(_text: str, _lang: str, slow: bool = True) -> bytes:
         raise ConnectionError("simulated TTS outage")
 
-    fake_module.api_get_dino_voice = boom  # type: ignore[attr-defined]
-    fake_module._play = lambda r, b: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+    fake_tts_module._generate_tts_sync = boom  # type: ignore[attr-defined]
+    fake_audio_module._play = lambda r, b: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tts_service", fake_tts_module)
+    monkeypatch.setitem(sys.modules, "robot_audio", fake_audio_module)
 
     flow._default_recovery_cue(FakeRobotController())  # must not raise
 
 
-def test_default_recovery_cue_swallows_missing_robot_teacher(monkeypatch):
-    """If robot_teacher (and its audio deps) isn't installed on the host —
+def test_default_recovery_cue_swallows_missing_robot_audio(monkeypatch):
+    """If robot_audio (and its audio deps) isn't installed on the host —
     e.g. a stripped CI image — the cue must silently no-op rather than
     crash the bridge."""
     import kids_teacher_flow as flow
 
-    monkeypatch.setitem(sys.modules, "robot_teacher", None)
-    # importlib raises if a module is bound to None; emulate that path
-    # by deleting + setting up an import that fails.
-    sys.modules.pop("robot_teacher", None)
+    sys.modules.pop("robot_audio", None)
 
     real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
 
     def fail_import(name, *args, **kwargs):
-        if name == "robot_teacher":
-            raise ImportError("robot_teacher not available on this host")
+        if name == "robot_audio":
+            raise ImportError("robot_audio not available on this host")
         return real_import(name, *args, **kwargs)
 
     if isinstance(__builtins__, dict):
@@ -1383,19 +1385,21 @@ def test_default_refusal_recovery_cue_picks_soft_or_escalated_text(monkeypatch):
     same TTS path used by the reconnect cue."""
     import kids_teacher_flow as flow
 
-    fake_module = types.ModuleType("robot_teacher")
+    fake_tts_module = types.ModuleType("tts_service")
+    fake_audio_module = types.ModuleType("robot_audio")
     fetched: List[str] = []
 
-    def fake_api_get_dino_voice(text: str) -> bytes:
+    def fake_generate_tts_sync(text: str, lang_code: str, slow: bool = True) -> bytes:
         fetched.append(text)
         return b"FAKEMP3"
 
     def fake_play(_robot, _mp3):
         return None
 
-    fake_module.api_get_dino_voice = fake_api_get_dino_voice  # type: ignore[attr-defined]
-    fake_module._play = fake_play  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+    fake_tts_module._generate_tts_sync = fake_generate_tts_sync  # type: ignore[attr-defined]
+    fake_audio_module._play = fake_play  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tts_service", fake_tts_module)
+    monkeypatch.setitem(sys.modules, "robot_audio", fake_audio_module)
 
     flow._default_refusal_recovery_cue(FakeRobotController(), escalated=False)
     flow._default_refusal_recovery_cue(FakeRobotController(), escalated=True)
@@ -1411,14 +1415,16 @@ def test_default_refusal_recovery_cue_swallows_tts_failure(monkeypatch):
     path is best-effort, never fatal to the session."""
     import kids_teacher_flow as flow
 
-    fake_module = types.ModuleType("robot_teacher")
+    fake_tts_module = types.ModuleType("tts_service")
+    fake_audio_module = types.ModuleType("robot_audio")
 
-    def boom(_text: str) -> bytes:
+    def boom(_text: str, _lang: str, slow: bool = True) -> bytes:
         raise ConnectionError("simulated TTS outage")
 
-    fake_module.api_get_dino_voice = boom  # type: ignore[attr-defined]
-    fake_module._play = lambda r, b: None  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "robot_teacher", fake_module)
+    fake_tts_module._generate_tts_sync = boom  # type: ignore[attr-defined]
+    fake_audio_module._play = lambda r, b: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "tts_service", fake_tts_module)
+    monkeypatch.setitem(sys.modules, "robot_audio", fake_audio_module)
 
     flow._default_refusal_recovery_cue(  # must not raise
         FakeRobotController(), escalated=True
