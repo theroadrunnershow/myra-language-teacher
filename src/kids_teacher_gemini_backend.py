@@ -82,6 +82,38 @@ GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 _VAD_PREFIX_PADDING_MS = 100
 _VAD_SILENCE_DURATION_MS = 1000
 
+# Safety thresholds for Gemini Live's built-in content classifier.
+# Gemini's defaults block low+above on every category, which on the
+# native-audio preview models false-positives on benign science topics
+# ("atomic table of elements", "volcano erupts") because the dangerous-
+# content classifier reads "atomic", "explode", "fire" etc. and trips.
+# When that fires mid-stream the model emits its stock "I am a language
+# model and can't help with that" refusal — which we never want a 4yo
+# to hear. The kids-teacher prompt + ``kids_safety.py`` + the visual
+# redirect backstop already enforce topic gating, so we relax the API
+# classifier and keep the strict one only for sexually-explicit output.
+#
+# Stored as (category_attr, threshold_attr) tuples so the live SafetySetting
+# objects can be built lazily through the injected ``types_module`` —
+# tests use a fake types module without HarmCategory/HarmBlockThreshold
+# enums.
+_KIDS_TEACHER_SAFETY_THRESHOLDS: tuple[tuple[str, str], ...] = (
+    ("HARM_CATEGORY_HARASSMENT", "BLOCK_ONLY_HIGH"),
+    ("HARM_CATEGORY_HATE_SPEECH", "BLOCK_ONLY_HIGH"),
+    ("HARM_CATEGORY_SEXUALLY_EXPLICIT", "BLOCK_LOW_AND_ABOVE"),
+    ("HARM_CATEGORY_DANGEROUS_CONTENT", "BLOCK_ONLY_HIGH"),
+)
+
+
+def _build_safety_settings(types_module: Any) -> list[Any]:
+    return [
+        types_module.SafetySetting(
+            category=getattr(types_module.HarmCategory, category_attr),
+            threshold=getattr(types_module.HarmBlockThreshold, threshold_attr),
+        )
+        for category_attr, threshold_attr in _KIDS_TEACHER_SAFETY_THRESHOLDS
+    ]
+
 # OpenAI voice names → Gemini prebuilt voice names. Kept tiny and
 # explicit; unknown voices fall back to ``_DEFAULT_GEMINI_VOICE``.
 # ``Kore`` is a warm female voice recommended for child-facing use per
@@ -451,6 +483,7 @@ def build_gemini_live_config(
         session_resumption=types_module.SessionResumptionConfig(
             handle=resumption_handle
         ),
+        safety_settings=_build_safety_settings(types_module),
         tools=[
             _build_memory_tool(types_module, non_blocking=tool_supports_non_blocking),
             _build_remember_face_tool(types_module, non_blocking=tool_supports_non_blocking),
