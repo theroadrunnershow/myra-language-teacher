@@ -70,16 +70,18 @@ GEMINI_INPUT_MIME = f"audio/pcm;rate={GEMINI_INPUT_SAMPLE_RATE}"
 # constant ambient noise, so we want fewer barge-ins, not more.
 # ``prefix_padding_ms`` is the required duration of detected speech
 # before start-of-speech is committed — i.e. the onset gate, not a
-# pre-roll buffer. 100ms ≈ one phoneme, which lets a quiet preschool
-# leading syllable (e.g. the "pi-" in "pilli") clear the gate instead
-# of being swallowed until the louder trailing syllable arrives.
+# pre-roll buffer. We raise it to 600ms so a child mid-utterance making
+# small noises (the "uh"s and quiet syllables that 100ms ≈ one phoneme
+# previously let through) no longer cancels the assistant's reply.
+# START_SENSITIVITY_LOW is already the lowest dial Gemini exposes, so
+# prefix_padding is the only VAD-side lever left to raise the
+# barge-in threshold further when accidental interrupts persist.
 # ``silence_duration_ms=1000`` gives Myra room to think mid-utterance
-# without prematurely ending the turn. Bumped from 500ms after live
-# sessions showed natural mid-thought pauses (~0.5–1s) ending the
-# user turn early — the robot would start replying to the truncated
-# input, then the kid's continuation tripped the barge gate, cancelling
-# the (premature) reply and fragmenting both sides of the exchange.
-_VAD_PREFIX_PADDING_MS = 100
+# without prematurely ending the turn — live sessions showed natural
+# mid-thought pauses (~0.5–1s) ending the user turn early at 500ms,
+# which then caused the robot to reply to a truncated input and the
+# kid's continuation tripped barge-in, fragmenting both sides.
+_VAD_PREFIX_PADDING_MS = 600
 _VAD_SILENCE_DURATION_MS = 1000
 
 # Safety thresholds for Gemini Live's built-in content classifier.
@@ -428,8 +430,9 @@ def build_gemini_live_config(
 
       - ``start_of_speech_sensitivity = LOW`` (fires less often)
       - ``end_of_speech_sensitivity = LOW`` (ends speech less often)
-      - ``prefix_padding_ms = 100`` (~one phoneme of detected speech;
-        lets a quiet preschool leading syllable clear the onset gate)
+      - ``prefix_padding_ms = 600`` (~600ms of detected speech required
+        before the onset gate commits — raises the barge-in threshold
+        so small mid-utterance noises don't cancel the assistant)
       - ``silence_duration_ms = 1000`` (gives Myra room to think
         through natural mid-thought pauses without ending the turn)
 

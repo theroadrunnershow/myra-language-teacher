@@ -257,7 +257,7 @@ def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
         aad.end_of_speech_sensitivity
         == _FakeEndSensitivity.END_SENSITIVITY_LOW
     )
-    assert aad.prefix_padding_ms == 100
+    assert aad.prefix_padding_ms == 600
     assert aad.silence_duration_ms == 1000
 
 
