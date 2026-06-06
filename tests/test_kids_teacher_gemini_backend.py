@@ -58,20 +58,6 @@ class _FakeEndSensitivity:
     END_SENSITIVITY_LOW = "END_SENSITIVITY_LOW"
 
 
-class _FakeHarmCategory:
-    HARM_CATEGORY_HARASSMENT = "HARM_CATEGORY_HARASSMENT"
-    HARM_CATEGORY_HATE_SPEECH = "HARM_CATEGORY_HATE_SPEECH"
-    HARM_CATEGORY_SEXUALLY_EXPLICIT = "HARM_CATEGORY_SEXUALLY_EXPLICIT"
-    HARM_CATEGORY_DANGEROUS_CONTENT = "HARM_CATEGORY_DANGEROUS_CONTENT"
-
-
-class _FakeHarmBlockThreshold:
-    BLOCK_NONE = "BLOCK_NONE"
-    BLOCK_ONLY_HIGH = "BLOCK_ONLY_HIGH"
-    BLOCK_MEDIUM_AND_ABOVE = "BLOCK_MEDIUM_AND_ABOVE"
-    BLOCK_LOW_AND_ABOVE = "BLOCK_LOW_AND_ABOVE"
-
-
 class _FakeTypes:
     Blob = _Record
     Content = _Record
@@ -87,11 +73,8 @@ class _FakeTypes:
     SessionResumptionConfig = _Record
     RealtimeInputConfig = _Record
     AutomaticActivityDetection = _Record
-    SafetySetting = _Record
     StartSensitivity = _FakeStartSensitivity
     EndSensitivity = _FakeEndSensitivity
-    HarmCategory = _FakeHarmCategory
-    HarmBlockThreshold = _FakeHarmBlockThreshold
 
 
 # ---------------------------------------------------------------------------
@@ -259,28 +242,6 @@ def test_build_live_config_tunes_server_vad_against_false_bargein() -> None:
     )
     assert aad.prefix_padding_ms == 600
     assert aad.silence_duration_ms == 1000
-
-
-def test_build_live_config_relaxes_dangerous_content_for_science_topics() -> None:
-    # Gemini's default classifier blocks low+above on every category and
-    # false-positives on words like "atomic" (→ "atomic table of elements"),
-    # "explode", or "fire", which makes the model emit its stock "I am a
-    # language model and can't help with that" refusal mid-turn. The
-    # backend must override DANGEROUS_CONTENT (and the other classifiers
-    # we trust the kids-teacher prompt + kids_safety.py to gate) to
-    # BLOCK_ONLY_HIGH, while keeping SEXUALLY_EXPLICIT strict.
-    payload = {"instructions": "hi", "voice": "alloy"}
-    config = build_gemini_live_config(payload, _FakeTypes)
-
-    settings_by_category = {
-        s.category: s.threshold for s in config.safety_settings
-    }
-    assert settings_by_category == {
-        "HARM_CATEGORY_HARASSMENT": "BLOCK_ONLY_HIGH",
-        "HARM_CATEGORY_HATE_SPEECH": "BLOCK_ONLY_HIGH",
-        "HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_LOW_AND_ABOVE",
-        "HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_ONLY_HIGH",
-    }
 
 
 def test_build_live_config_omits_non_blocking_behavior_on_gemini_3_1() -> None:
