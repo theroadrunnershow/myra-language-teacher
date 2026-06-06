@@ -6,6 +6,7 @@ from tools.location import GET_TOOL_NAME, REGISTER_TOOL_NAME
 from tools.location_store import LocationStore
 from tools.registry import build_default_registry
 from tools.time import GET_CURRENT_TIME_TOOL_NAME
+from tools.weather import GET_WEATHER_TOOL_NAME
 
 
 class _RecordingStore(LocationStore):
@@ -29,6 +30,7 @@ async def test_build_default_registry_loads_store_then_returns_registry():
         REGISTER_TOOL_NAME,
         GET_TOOL_NAME,
         GET_CURRENT_TIME_TOOL_NAME,
+        GET_WEATHER_TOOL_NAME,
     }
 
 
@@ -40,6 +42,7 @@ async def test_build_default_registry_falls_back_to_env_store(monkeypatch):
         REGISTER_TOOL_NAME,
         GET_TOOL_NAME,
         GET_CURRENT_TIME_TOOL_NAME,
+        GET_WEATHER_TOOL_NAME,
     }
 
 
@@ -50,4 +53,5 @@ async def test_build_default_registry_specs_contain_both_function_tools():
         REGISTER_TOOL_NAME,
         GET_TOOL_NAME,
         GET_CURRENT_TIME_TOOL_NAME,
+        GET_WEATHER_TOOL_NAME,
     }
